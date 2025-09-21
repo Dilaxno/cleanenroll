@@ -89,19 +89,9 @@ async def send_password_reset_email(req: PasswordResetRequest):
     """
     try:
         _ensure_firebase_initialized()
-    except HTTPException as init_err:
+    except HTTPException:
         # If Firebase Admin is unavailable, don't error-leak; respond 200 but skip send
         return {"status": "ok"}
-
-# Explicit CORS preflight handler to prevent 405 from certain proxies/CDNs
-@router.options("/api/auth/password-reset")
-@router.options("/api/auth/password-reset/")
-async def password_reset_options():
-    return PlainTextResponse("", status_code=204, headers={
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    })
 
     continue_url = os.getenv("RESET_CONTINUE_URL", "https://cleanenroll.com/reset-password")
 
@@ -114,9 +104,8 @@ async def password_reset_options():
                 "handle_code_in_app": True,
             },
         )
-    except Exception as e:
-        # Common case: user not found -> do not leak via 4xx; just pretend success
-        # You may inspect the error message, but we keep it generic here.
+    except Exception:
+        # Do not leak details; proceed without link
         link = None
 
     if link:
@@ -133,12 +122,22 @@ async def password_reset_options():
 
         try:
             send_email_html(req.email, subject, html)
-        except Exception:
-            # Do not leak mailer issues to client
-            pass
+        except Exception as e:
+            # Do not leak mailer issues to client, but log on server
+            print(f"[email] Failed to send password reset email: {e}")
 
     # Always return ok to avoid user enumeration
     return {"status": "ok"}
+
+# Explicit CORS preflight handler to prevent 405 from certain proxies/CDNs
+@router.options("/api/auth/password-reset")
+@router.options("/api/auth/password-reset/")
+async def password_reset_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
 
 
 # -----------------------------

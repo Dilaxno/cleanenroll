@@ -181,6 +181,7 @@ class FormConfig(BaseModel):
     emailValidationEnabled: bool = False
     recaptchaEnabled: bool = False
     preventDuplicateByUID: bool = False
+    isPublished: bool = False
     submitButton: SubmitButton = SubmitButton()
     formType: Literal["simple", "multi-step"] = "simple"
     theme: ThemeSchema = ThemeSchema()
@@ -221,6 +222,7 @@ def _validate_form(cfg: FormConfig):
         if f.type in ("text", "textarea") and f.maxLength is not None and f.maxLength <= 0:
             raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid maxLength")
 
+    
 
 def _create_id() -> str:
     return uuid.uuid4().hex
@@ -312,11 +314,19 @@ async def create_form(cfg: FormConfig):
     now = datetime.utcnow().isoformat()
     form_id = _create_id()
     data = cfg.dict()
+    # Preserve provided step values; default missing/invalid to 1
+    for f in data.get("fields") or []:
+        try:
+            step_val = int(f.get("step") or 1)
+            f["step"] = max(1, step_val)
+        except Exception:
+            f["step"] = 1
     # Normalize restrictedCountries to upper-case ISO codes
     data["restrictedCountries"] = _normalize_country_list(data.get("restrictedCountries") or [])
     data["id"] = form_id
     data["createdAt"] = now
     data["updatedAt"] = now
+    data["isPublished"] = bool(data.get("isPublished", False))
     _write_json(_form_path(form_id), data)
 
     embed_url = f"/embed/{form_id}"
@@ -340,10 +350,21 @@ async def update_form(form_id: str, cfg: FormConfig):
 
     _validate_form(cfg)
     data = cfg.dict()
+    # Preserve provided step values; default missing/invalid to 1
+    for f in data.get("fields") or []:
+        try:
+            step_val = int(f.get("step") or 1)
+            f["step"] = max(1, step_val)
+        except Exception:
+            f["step"] = 1
     # Normalize restrictedCountries to upper-case ISO codes
     data["restrictedCountries"] = _normalize_country_list(data.get("restrictedCountries") or [])
     data["id"] = form_id
     prev = _read_json(path)
+    # Preserve published state if not explicitly provided
+    existing_published = prev.get("isPublished", False)
+    incoming_published = data.get("isPublished")
+    data["isPublished"] = existing_published if incoming_published is None else bool(incoming_published)
     data["createdAt"] = prev.get("createdAt")  # preserve original
     data["updatedAt"] = datetime.utcnow().isoformat()
 
@@ -375,6 +396,28 @@ async def get_embed_snippet(form_id: str):
     iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
     return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet}
 
+
+@router.put("/forms/{form_id}/publish")
+async def set_publish(form_id: str, payload: Dict = None):
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    desired = True
+    if isinstance(payload, dict) and "isPublished" in payload:
+        desired = bool(payload.get("isPublished"))
+    data["isPublished"] = desired
+    data["updatedAt"] = datetime.utcnow().isoformat()
+    _write_json(path, data)
+    return {"success": True, "isPublished": desired}
+
+@router.get("/forms/{form_id}/status")
+async def get_status(form_id: str):
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    return {"id": form_id, "isPublished": bool(data.get("isPublished", False))}
 
 @router.get("/forms/{form_id}/geo-check")
 async def geo_check(form_id: str, request: Request):

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="x-apple-disable-message-reformatting">
+    <meta name="format-detection" content="telephone=no, date=no, address=no, email=no">
+    <title>{{subject}}</title>
+    <!-- Preheader (hidden preview text) -->
+    <meta name="description" content="{{preheader}}">
+    <style>
+      /* Outfit webfont (supported on Apple Mail / iOS / some Android clients). Fallbacks for others */
+      @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap');
+
+      /* Reset */
+      html, body { margin:0 !important; padding:0 !important; height:100% !important; width:100% !important; }
+      * { -ms-text-size-adjust:100%; -webkit-text-size-adjust:100%; }
+      table, td { mso-table-lspace:0pt !important; mso-table-rspace:0pt !important; }
+      img { -ms-interpolation-mode:bicubic; }
+
+      /* Responsive */
+      @media screen and (max-width: 600px) {
+        .container { width: 100% !important; }
+        .px-24 { padding-left: 16px !important; padding-right: 16px !important; }
+        .py-32 { padding-top: 20px !important; padding-bottom: 24px !important; }
+        .logo { height: 28px !important; }
+        .btn { display:block !important; width:100% !important; }
+      }
+
+      /* Dark brand theme */
+      :root {
+        --bg: #0B0B0B;                /* app background */
+        --card: #141414;              /* inner surface */
+        --text: #FFFFFF;              /* primary text */
+        --muted: #B3B3B3;             /* secondary text */
+        --border: #2A2A2A;            /* borders/dividers */
+        --accent: #7ED957;            /* brand button green */
+        --accentText: #000000;        /* button text black */
+      }
+
+      body { background: var(--bg); color: var(--text); font-family: 'Outfit', Arial, Helvetica, sans-serif; }
+      a { color: var(--accent); text-decoration: none; }
+    </style>
+    <!--[if gte mso 9]>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:AllowPNG/>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+    <![endif]-->
+  </head>
+  <body style="margin:0; padding:0; background: var(--bg);">
+    <!-- Preheader fallback (hidden) -->
+    <div style="display:none; max-height:0; overflow:hidden; opacity:0; visibility:hidden; mso-hide:all;">
+      {{preheader}}
+    </div>
+
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: var(--bg);">
+      <tr>
+        <td align="center" style="padding: 24px 12px;">
+          <!-- Container -->
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" class="container" style="width:600px; max-width: 600px;">
+            <!-- Header / Logo -->
+            <tr>
+              <td align="left" class="px-24" style="padding: 12px 24px 8px;">
+                <a href="https://cleanenroll.com" target="_blank" style="display:inline-flex; align-items:center; gap:8px;">
+                  <img src="https://cleanenroll.com/Logo%20CleanEnroll.svg" width="140" height="40" alt="CleanEnroll" class="logo" style="display:block; height:32px; width:auto;">
+                </a>
+              </td>
+            </tr>
+
+            <!-- Card -->
+            <tr>
+              <td style="background: var(--card); border: 1px solid var(--border); border-radius: 16px;" class="px-24 py-32">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                  <!-- Title -->
+                  <tr>
+                    <td style="padding: 4px 0 8px;">
+                      <h1 style="margin:0; font-size: 22px; line-height: 1.35; font-weight: 700; color: var(--text);">{{title}}</h1>
+                    </td>
+                  </tr>
+
+                  <!-- Intro / Message -->
+                  <tr>
+                    <td style="padding: 8px 0 4px;">
+                      <p style="margin:0; font-size: 15px; line-height: 1.7; color: var(--muted);">
+                        {{intro}}
+                      </p>
+                    </td>
+                  </tr>
+
+                  <!-- Dynamic content HTML -->
+                  <tr>
+                    <td style="padding-top: 12px;">
+                      <div style="font-size: 15px; line-height: 1.7; color: var(--text);">
+                        {{content_html}}
+                      </div>
+                    </td>
+                  </tr>
+
+                  <!-- CTA Button (optional) -->
+                  <!--[if mso]>
+                  <tr>
+                    <td align="left" style="padding-top: 20px;">
+                      <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{cta_url}}" style="height:44px; v-text-anchor:middle; width:220px;" arcsize="10%" stroke="f" fillcolor="#7ED957">
+                        <w:anchorlock/>
+                        <center style="color:#000000; font-family: Arial, Helvetica, sans-serif; font-size:16px; font-weight:700;">{{cta_label}}</center>
+                      </v:roundrect>
+                    </td>
+                  </tr>
+                  <![endif]-->
+
+                  <!--[if !mso]><!-- -->
+                  <tr>
+                    <td style="padding-top: 20px;">
+                      <a href="{{cta_url}}" class="btn" style="display:inline-block; background: var(--accent); color: var(--accentText); font-weight:700; font-size:16px; line-height: 20px; padding: 12px 20px; border-radius: 10px;">
+                        {{cta_label}}
+                      </a>
+                    </td>
+                  </tr>
+                  <!--<![endif]-->
+
+                  <!-- Secondary links (optional) -->
+                  <tr>
+                    <td style="padding-top: 12px;">
+                      <p style="margin:0; font-size: 13px; color: var(--muted);">
+                        Or copy this link into your browser: <a href="{{cta_url}}" style="color: var(--accent);">{{cta_url}}</a>
+                      </p>
+                    </td>
+                  </tr>
+
+                  <!-- Divider -->
+                  <tr>
+                    <td style="padding-top: 24px;">
+                      <div style="height:1px; background: var(--border);"></div>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="padding-top: 16px;">
+                      <p style="margin:0 0 6px 0; font-size: 12px; color: var(--muted);">
+                        You’re receiving this email because you use CleanEnroll.
+                      </p>
+                      <p style="margin:0; font-size: 12px; color: var(--muted);">
+                        © {{year}} CleanEnroll • <a href="https://cleanenroll.com/legal#privacy-policy" style="color: var(--accent);">Privacy</a> • <a href="https://cleanenroll.com/legal#terms-of-service" style="color: var(--accent);">Terms</a>
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Spacing below card -->
+            <tr>
+              <td style="height: 24px; line-height:24px;">&nbsp;</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

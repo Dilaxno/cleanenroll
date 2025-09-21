@@ -1,0 +1,8 @@
+# Dependencies for the FastAPI form builder
+fastapi>=0.110.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+email-validator>=2.1.0.post1
+geoip2>=4.7.0
+firebase-admin>=6.5.0
+Jinja2>=3.1.4

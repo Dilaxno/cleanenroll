@@ -5,6 +5,8 @@ from datetime import datetime
 import os
 import json
 import uuid
+import urllib.parse
+import urllib.request
 
 # Email validation
 from email_validator import validate_email as _validate_email, EmailNotValidError as _EmailNotValidError
@@ -177,6 +179,7 @@ class FormConfig(BaseModel):
     thankYouMessage: str = "Thank you for your submission! We'll get back to you soon."
     redirect: RedirectConfig = RedirectConfig()
     emailValidationEnabled: bool = False
+    recaptchaEnabled: bool = False
     preventDuplicateByUID: bool = False
     submitButton: SubmitButton = SubmitButton()
     formType: Literal["simple", "multi-step"] = "simple"
@@ -222,6 +225,23 @@ def _validate_form(cfg: FormConfig):
 def _create_id() -> str:
     return uuid.uuid4().hex
 
+
+RECAPTCHA_SECRET = os.getenv("RECAPTCHA_SECRET_KEY") or os.getenv("RECAPTCHA_SECRET") or ""
+
+def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
+    if not RECAPTCHA_SECRET:
+        return False
+    try:
+        payload = urllib.parse.urlencode({
+            "secret": RECAPTCHA_SECRET,
+            "response": token,
+            "remoteip": remoteip or ""
+        }).encode()
+        with urllib.request.urlopen("https://www.google.com/recaptcha/api/siteverify", data=payload, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return bool(data.get("success"))
+    except Exception:
+        return False
 
 # -----------------------------
 # Geo helpers
@@ -386,6 +406,21 @@ async def geo_check(form_id: str, request: Request):
     return {"allowed": True, "country": country}
 
 
+@router.post("/recaptcha/verify")
+async def recaptcha_verify(request: Request, payload: Dict = None):
+    """Verify a reCAPTCHA token with Google. Returns {"success": True} if valid."""
+    token = None
+    if isinstance(payload, dict):
+        token = payload.get("token") or payload.get("recaptchaToken") or payload.get("g-recaptcha-response")
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing reCAPTCHA token")
+    if not RECAPTCHA_SECRET:
+        raise HTTPException(status_code=500, detail="reCAPTCHA not configured on server")
+    ok = _verify_recaptcha(token, _client_ip(request))
+    if not ok:
+        raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
+    return {"success": True}
+
 @router.post("/forms/{form_id}/submit")
 async def submit_form(form_id: str, request: Request, payload: Dict = None):
     """Simple submission endpoint that enforces country restrictions.
@@ -404,6 +439,21 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         _, country = _country_from_ip(ip)
         if country and country in restricted:
             raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+
+    # reCAPTCHA verification when enabled
+    if form_data.get("recaptchaEnabled"):
+        if not isinstance(payload, dict):
+            payload = payload or {}
+        token = (
+            (payload or {}).get("recaptchaToken")
+            or (payload or {}).get("g-recaptcha-response")
+            or (payload or {}).get("recaptcha")
+        )
+        if not token:
+            raise HTTPException(status_code=400, detail="Missing reCAPTCHA token")
+        ok = _verify_recaptcha(token, _client_ip(request))
+        if not ok:
+            raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
 
     # Email validation (format + MX) when enabled
     if form_data.get("emailValidationEnabled"):

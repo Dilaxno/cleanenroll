@@ -1,9 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Routers (package-relative imports)
-from .routers.core import router as core_router  # type: ignore
-from .routers.builder import router as builder_router  # type: ignore
+# Routers: support both package-relative and flat repo imports
+try:
+    # When running as a package: e.g. `uvicorn backend.main:app` or `python -m backend.main`
+    from .routers.core import router as core_router  # type: ignore
+    from .routers.builder import router as builder_router  # type: ignore
+except Exception:
+    # When running from a flat repo root: e.g. `uvicorn main:app`
+    from routers.core import router as core_router  # type: ignore
+    from routers.builder import router as builder_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 

@@ -585,8 +585,8 @@ async def embed_page(form_id: str):
   <style>
     :root { --border: #e5e7eb; --muted: #6b7280; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: transparent; }
-    .form { max-width: 720px; margin: 0 auto; }
+    body { margin: 0; background: transparent; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+    .form { width: 100%; max-width: 720px; }
     .card { background: var(--form-bg, #ffffff); color: var(--form-text, #111827); border-radius: 16px; border: 1px solid var(--border); }
     .header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
     .header h1 { margin: 0 0 6px; font-size: 22px; }

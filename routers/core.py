@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import os
@@ -689,6 +689,23 @@ async def embed_page(form_id: str):
     html = html.replace("__FORM_ID__", form_id)
     return HTMLResponse(content=html)
 
+
+# --------------
+# SPA route redirect helpers
+# --------------
+@router.get("/form/{path:path}")
+async def spa_form_redirect(path: str):
+    """Redirect SPA /form/* paths to the frontend app to avoid 404s on the API server.
+    Set FRONTEND_URL (e.g., https://cleanenroll.com) so the API can redirect.
+    """
+    frontend = os.getenv("FRONTEND_URL")
+    if frontend:
+        url = f"{frontend.rstrip('/')}/form/{path}"
+        return RedirectResponse(url, status_code=307)
+    return PlainTextResponse(
+        "This path is handled by the frontend SPA. Set FRONTEND_URL to enable redirects.",
+        status_code=404,
+    )
 
 # --------------
 # Health endpoint

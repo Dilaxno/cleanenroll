@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import os
@@ -82,6 +82,7 @@ def _ensure_firebase_initialized():
 
 
 @router.post("/api/auth/password-reset")
+@router.post("/api/auth/password-reset/")
 async def send_password_reset_email(req: PasswordResetRequest):
     """Generate a Firebase password reset link and email it with our branded template.
     Always return 200 to avoid revealing whether an account exists.
@@ -91,6 +92,16 @@ async def send_password_reset_email(req: PasswordResetRequest):
     except HTTPException as init_err:
         # If Firebase Admin is unavailable, don't error-leak; respond 200 but skip send
         return {"status": "ok"}
+
+# Explicit CORS preflight handler to prevent 405 from certain proxies/CDNs
+@router.options("/api/auth/password-reset")
+@router.options("/api/auth/password-reset/")
+async def password_reset_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
 
     continue_url = os.getenv("RESET_CONTINUE_URL", "https://cleanenroll.com/reset-password")
 
@@ -172,9 +183,11 @@ async def create_form(cfg: FormConfig):
     data = cfg.dict()
     form_id = _save_form(data)
 
-    # Build iframe snippet
-    embed_url = f"/embed/{form_id}"
-    iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
+    # Build fully-qualified embed URL on API subdomain
+    embed_url = f"https://api.cleanenroll.com/embed/{form_id}"
+    iframe_snippet = (
+        f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
+    )
 
     return {
         "id": form_id,
@@ -555,9 +568,10 @@ BUILDER_HTML = """<!doctype html>
 """
 
 
-@router.get("/", response_class=HTMLResponse)
-async def builder_page():
-    return HTMLResponse(content=BUILDER_HTML)
+@router.get("/")
+async def root():
+    # Lightweight health/info message for the root path
+    return PlainTextResponse("app is running")
 
 
 @router.get("/embed/{form_id}", response_class=HTMLResponse)

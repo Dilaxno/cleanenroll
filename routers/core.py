@@ -171,7 +171,7 @@ def _load_form(form_id: str) -> Dict:
 @router.post("/api/forms")
 async def create_form(cfg: FormConfig):
     # Basic type guard for field.type
-    allowed_types = {"text", "number", "checkbox", "dropdown", "date", "location"}
+    allowed_types = {"text", "textarea", "number", "checkbox", "dropdown", "date", "location", "url"}
     for fld in cfg.fields:
         if fld.type not in allowed_types:
             raise HTTPException(status_code=400, detail=f"Unsupported field type: {fld.type}")
@@ -646,6 +646,8 @@ async def embed_page(form_id: str):
         </div>
       </div>`;
     }
+    if (f.type === 'textarea') { return `<div class=\"field\">${labelHtml}<textarea rows=\"4\"${ph}></textarea></div>`; }
+    if (f.type === 'url') { return `<div class=\"field\">${labelHtml}<input type=\"url\"${ph} /></div>`; }
     return `<div class=\"field\">${labelHtml}<input type=\"text\"${ph} /></div>`;
   }
 
@@ -675,6 +677,14 @@ async def embed_page(form_id: str):
       const body = document.getElementById('body');
       const fields = (cfg.fields||[]).map(renderField).join('');
       body.innerHTML = fields;
+
+      // Submit button customization
+      const btnEl = document.querySelector('.actions .btn');
+      if (btnEl && cfg.submitButton) {
+        if (cfg.submitButton.label) btnEl.textContent = cfg.submitButton.label;
+        if (cfg.submitButton.color) btnEl.style.background = cfg.submitButton.color;
+        if (cfg.submitButton.textColor) btnEl.style.color = cfg.submitButton.textColor;
+      }
     } catch (e) {
       document.body.innerHTML = '<div style="padding:24px;font-family:sans-serif">Form not found</div>';
     }

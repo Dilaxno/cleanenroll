@@ -331,9 +331,9 @@ BUILDER_HTML = """<!doctype html>
         <div id=\"fieldsList\" class=\"fields-list\"></div>
       </div>
 
-      <div id=\"saveBox\" class=\"save-box\" style=\"display:none\;\">
+      <div id=\"saveBox\" class=\"save-box\" style=\"display:none\">
         <div><strong>Embed code</strong> (copy & paste into your site):</div>
-        <pre id=\"iframeCode\" style=\"white-space: pre-wrap; background:#0b1020; color:#d1e7ff; padding:10px; border-radius:8px;\"></pre>
+        <pre id=\"iframeCode\" style=\"white-space: pre-wrap; background:#0b1020; color:#d1e7ff; padding:10px; border-radius:8px\"></pre>
         <button id=\"copyIframeBtn\" class=\"btn\">Copy code</button>
         <div class=\"muted\">If the iframe src starts with /embed/, prepend your server origin (e.g. https://your-domain.com/embed/XYZ).</div>
       </div>
@@ -383,7 +383,7 @@ BUILDER_HTML = """<!doctype html>
   }
 
   function escapeHtml(str){
-    return String(str).replace(/[&<>\"]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s]));
+    return String(str).replace(/[&<>\"]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[s]));
   }
 
   function renderField(f){
@@ -614,7 +614,7 @@ async def embed_page(form_id: str):
   }
 
   function renderField(f){
-    const req = f.required ? ' <span style=\"color:var(--muted)\;font-size:12px\">(required)</span>' : '';
+    const req = f.required ? ' <span style=\"color:var(--muted);font-size:12px\">(required)</span>' : '';
     const labelHtml = `<label>${escapeHtml(f.label||'Untitled')}${req}</label>`;
     const ph = f.placeholder ? ` placeholder=\"${escapeHtml(f.placeholder)}\"` : '';
     if (f.type === 'text') { return `<div class=\"field\">${labelHtml}<input type=\"text\"${ph} /></div>`; }

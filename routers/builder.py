@@ -24,7 +24,7 @@ except Exception:
 
 
 def _resolve_geoip_db_path() -> str:
-    """Resolve a usable .mmdb path.
+    r"""Resolve a usable .mmdb path.
     Priority:
       1) GEOIP_DB_PATH env var if it points to an existing .mmdb
       2) GEOIP_DB_PATH env var as a .tar.gz archive -> extract first .mmdb found

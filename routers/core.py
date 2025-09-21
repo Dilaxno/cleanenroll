@@ -8,8 +8,12 @@ import uuid
 from pydantic import BaseModel, EmailStr
 
 # Email + Firebase Admin
-from ..utils.email import render_email, send_email_html  # type: ignore
-import os
+try:
+    # When running as a package (e.g., backend.*)
+    from ..utils.email import render_email, send_email_html  # type: ignore
+except Exception:
+    # When running flat from repo root
+    from utils.email import render_email, send_email_html  # type: ignore
 try:
     import firebase_admin
     from firebase_admin import auth as admin_auth, credentials as admin_credentials

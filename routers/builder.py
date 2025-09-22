@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Literal
+import logging
 from datetime import datetime
 import os
 import json
@@ -23,6 +24,9 @@ try:
 except Exception:
     geoip2 = None  # type: ignore
     _GEOIP_IMPORTED = False
+
+# Logger
+logger = logging.getLogger("backend.builder")
 
 
 def _resolve_geoip_db_path() -> str:
@@ -305,6 +309,7 @@ def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
 
 @router.get("/forms")
 async def list_forms(userId: Optional[str] = Query(default=None, description="Filter by userId")):
+    logger.debug("list_forms called userId=%s", userId)
     items: List[Dict] = []
     for name in os.listdir(BACKING_DIR):
         if not name.endswith(".json"):
@@ -348,11 +353,13 @@ async def create_form(cfg: FormConfig):
 
     embed_url = f"/embed/{form_id}"
     iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
+    logger.info("form created id=%s fields=%s published=%s", form_id, len(data.get("fields") or []), bool(data.get("isPublished", False)))
     return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet}
 
 
 @router.get("/forms/{form_id}")
 async def get_form(form_id: str):
+    logger.debug("get_form id=%s", form_id)
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
@@ -389,6 +396,7 @@ async def update_form(form_id: str, cfg: FormConfig):
 
     embed_url = f"/embed/{form_id}"
     iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
+    logger.info("form updated id=%s fields=%s published=%s", form_id, len(data.get("fields") or []), bool(data.get("isPublished", False)))
     return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet}
 
 
@@ -401,11 +409,13 @@ async def delete_form(form_id: str):
         os.remove(path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
+    logger.info("form deleted id=%s", form_id)
     return {"success": True}
 
 
 @router.get("/forms/{form_id}/embed")
 async def get_embed_snippet(form_id: str):
+    logger.debug("get_embed_snippet id=%s", form_id)
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
@@ -416,6 +426,7 @@ async def get_embed_snippet(form_id: str):
 
 @router.put("/forms/{form_id}/publish")
 async def set_publish(form_id: str, payload: Dict = None):
+    logger.debug("set_publish id=%s payload_keys=%s", form_id, list((payload or {}).keys()))
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
@@ -426,10 +437,12 @@ async def set_publish(form_id: str, payload: Dict = None):
     data["isPublished"] = desired
     data["updatedAt"] = datetime.utcnow().isoformat()
     _write_json(path, data)
+    logger.info("form publish updated id=%s isPublished=%s", form_id, desired)
     return {"success": True, "isPublished": desired}
 
 @router.get("/forms/{form_id}/status")
 async def get_status(form_id: str):
+    logger.debug("get_status id=%s", form_id)
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
@@ -450,6 +463,7 @@ async def geo_check(form_id: str, request: Request):
 
     restricted = _normalize_country_list(form_data.get("restrictedCountries") or [])
     if not restricted:
+        logger.debug("geo_check id=%s unrestricted", form_id)
         return {"allowed": True, "country": None}
 
     ip = _client_ip(request)
@@ -457,12 +471,15 @@ async def geo_check(form_id: str, request: Request):
 
     # If we cannot determine country (no DB or IP), allow by default
     if not country:
+        logger.debug("geo_check id=%s ip=%s country undetermined (allow)", form_id, ip)
         return {"allowed": True, "country": None}
 
     if country in restricted:
         # Block with required message
+        logger.info("geo_check blocked id=%s ip=%s country=%s", form_id, ip, country)
         raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
 
+    logger.debug("geo_check allowed id=%s ip=%s country=%s", form_id, ip, country)
     return {"allowed": True, "country": country}
 
 
@@ -476,9 +493,11 @@ async def recaptcha_verify(request: Request, payload: Dict = None):
         raise HTTPException(status_code=400, detail="Missing reCAPTCHA token")
     if not RECAPTCHA_SECRET:
         raise HTTPException(status_code=500, detail="reCAPTCHA not configured on server")
-    ok = _verify_recaptcha(token, _client_ip(request))
+    client_ip = _client_ip(request)
+    ok = _verify_recaptcha(token, client_ip)
     if not ok:
         raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
+    logger.info("recaptcha verified success ip=%s", client_ip)
     return {"success": True}
 
 @router.post("/forms/{form_id}/submit")
@@ -511,9 +530,11 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         )
         if not token:
             raise HTTPException(status_code=400, detail="Missing reCAPTCHA token")
-        ok = _verify_recaptcha(token, _client_ip(request))
+        client_ip = _client_ip(request)
+        ok = _verify_recaptcha(token, client_ip)
         if not ok:
             raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
+        logger.debug("submit_form recaptcha ok id=%s ip=%s", form_id, client_ip)
 
     # Email validation (format + MX) when enabled
     if form_data.get("emailValidationEnabled"):
@@ -581,8 +602,9 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         resp["responseId"] = response_id  # type: ignore
     except Exception:
         # Swallow persistence errors to not break client submission flow
-        pass
+        logger.exception("submit_form persistence error id=%s", form_id)
 
+    logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp
 
 @router.get("/forms/{form_id}/responses")

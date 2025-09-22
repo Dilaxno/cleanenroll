@@ -1,4 +1,5 @@
 import os
+import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -22,9 +23,12 @@ RESEND_FROM = os.getenv("RESEND_FROM", SMTP_FROM)
 # Debugging
 EMAIL_DEBUG = os.getenv("EMAIL_DEBUG", "false").lower() in ("1", "true", "yes", "on")
 
+# Centralized logger for email utils
+logger = logging.getLogger("backend.email")
+
 def _elog(msg: str):
     if EMAIL_DEBUG:
-        print(f"[email][debug] {msg}")
+        logger.debug(msg)
 
 _templates_env = Environment(
     loader=FileSystemLoader(os.path.join(os.getcwd(), "backend", "templates", "email")),
@@ -82,13 +86,14 @@ def send_email_html(to_email: str, subject: str, html_body: str):
                 body = e.read().decode("utf-8")
             except Exception:
                 body = str(e)
-            _elog(f"Resend HTTPError {e.code}: {body}")
-        except Exception:
+            logger.warning("Resend HTTPError %s: %s", getattr(e, 'code', 'n/a'), body)
+        except Exception as ex:
             # Fall back to SMTP silently
-            _elog("Resend request failed with a non-HTTP error; falling back to SMTP")
+            logger.warning("Resend request failed: %s; falling back to SMTP", ex)
 
     # Fallback to SMTP if Resend not configured or failed
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
+        logger.error("Email not configured: missing SMTP credentials and no RESEND_API_KEY")
         raise RuntimeError(
             "Email is not configured. Provide RESEND_API_KEY (preferred) or SMTP_HOST/SMTP_USER/SMTP_PASS."
         )
@@ -109,7 +114,7 @@ def send_email_html(to_email: str, subject: str, html_body: str):
             server.starttls()
             _elog("SMTP STARTTLS successful")
         except Exception as e:
-            _elog(f"SMTP STARTTLS skipped/failed: {e}")
+            logger.debug("SMTP STARTTLS skipped/failed: %s", e)
         server.login(SMTP_USER, SMTP_PASS)
         _elog("SMTP AUTH successful, sending message")
         server.send_message(msg)

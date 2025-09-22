@@ -3,11 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
+# Centralized logging setup
+try:
+    # When running as a package
+    from .utils.logger import setup_logging, RequestContextLogMiddleware  # type: ignore
+except Exception:
+    # When running flat from repo root
+    from utils.logger import setup_logging, RequestContextLogMiddleware  # type: ignore
+
+setup_logging()
 
 # Routers: support both package-relative and flat repo imports
 try:
@@ -29,6 +33,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request/response logging middleware
+app.add_middleware(RequestContextLogMiddleware)
 
 # Include routers
 app.include_router(core_router)

@@ -760,7 +760,10 @@ async def health():
 # -----------------------------
 # Dodo Payments Webhook
 # -----------------------------
+# Accept both legacy and provider default paths
 @router.post("/api/webhooks/dodo")
+@router.post("/api/payments/dodo/webhook")
+@router.post("/api/payments/dodo/webhook/")
 async def dodo_webhook(request: Request):
     """Handle Dodo Payments webhook events.
     On payment.succeeded, upgrade user's plan to 'pro' in Firestore.
@@ -945,3 +948,14 @@ async def dodo_webhook(request: Request):
     except Exception as e:
         logger.exception("[dodo-webhook] failed to update user plan")
         raise HTTPException(status_code=500, detail="Failed to update user plan")
+
+    
+# CORS preflight for webhook path variants
+@router.options("/api/payments/dodo/webhook")
+@router.options("/api/payments/dodo/webhook/")
+async def dodo_webhook_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, webhook-id, webhook-signature, webhook-timestamp",
+    })

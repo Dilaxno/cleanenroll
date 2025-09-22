@@ -18,10 +18,12 @@ try:
     # When running as a package: e.g. `uvicorn backend.main:app` or `python -m backend.main`
     from .routers.core import router as core_router  # type: ignore
     from .routers.builder import router as builder_router  # type: ignore
+    from .routers.payments import router as payments_router  # type: ignore
 except Exception:
     # When running from a flat repo root: e.g. `uvicorn main:app`
     from routers.core import router as core_router  # type: ignore
     from routers.builder import router as builder_router  # type: ignore
+    from routers.payments import router as payments_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -40,6 +42,7 @@ app.add_middleware(RequestContextLogMiddleware)
 # Include routers
 app.include_router(core_router)
 app.include_router(builder_router)
+app.include_router(payments_router)
 
 
 if __name__ == "__main__":

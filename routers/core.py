@@ -13,6 +13,8 @@ import logging
 import traceback
 from pydantic import BaseModel, EmailStr
 
+logger = logging.getLogger("backend.core")
+
 # Email + Firebase Admin
 try:
     # When running as a package (e.g., backend.*)
@@ -92,11 +94,15 @@ def _ensure_firebase_initialized():
         cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         try:
             if cred_path and os.path.exists(cred_path):
+                logger.info("Initializing Firebase Admin with service account at %s", cred_path)
                 cred = admin_credentials.Certificate(cred_path)
             else:
+                logger.info("Initializing Firebase Admin with Application Default Credentials")
                 cred = admin_credentials.ApplicationDefault()
             firebase_admin.initialize_app(cred)
+            logger.info("Firebase Admin initialized")
         except Exception as e:
+            logger.exception("Firebase Admin initialization failed")
             raise HTTPException(status_code=500, detail=f"Failed to initialize Firebase Admin: {e}")
 
 
@@ -110,6 +116,7 @@ async def send_password_reset_email(req: PasswordResetRequest):
         _ensure_firebase_initialized()
     except HTTPException:
         # If Firebase Admin is unavailable, don't error-leak; respond 200 but skip send
+        logger.warning("Firebase Admin unavailable; skipping password reset email send")
         return {"status": "ok"}
 
     continue_url = os.getenv("RESET_CONTINUE_URL", "https://cleanenroll.com/reset-password")
@@ -143,9 +150,10 @@ async def send_password_reset_email(req: PasswordResetRequest):
             send_email_html(req.email, subject, html)
         except Exception as e:
             # Do not leak mailer issues to client, but log on server
-            print(f"[email] Failed to send password reset email: {e}")
+            logger.exception("Failed to send password reset email")
 
     # Always return ok to avoid user enumeration
+    logger.info("Password reset responded ok for %s", _mask_email(req.email))
     return {"status": "ok"}
 
 # Explicit CORS preflight handler to prevent 405 from certain proxies/CDNs
@@ -762,9 +770,9 @@ async def dodo_webhook(request: Request):
     try:
         raw_body = await request.body()
         raw_text = raw_body.decode('utf-8', errors='replace')
-        print(f"[dodo-webhook] received: body_len={len(raw_text)}")
+        logger.info("[dodo-webhook] received: body_len=%d", len(raw_text))
     except Exception:
-        print("[dodo-webhook] failed to read body")
+        logger.exception("[dodo-webhook] failed to read body")
         raise HTTPException(status_code=400, detail="Invalid body")
 
     # Verify Standard Webhooks signature from Dodo
@@ -774,9 +782,9 @@ async def dodo_webhook(request: Request):
     webhook_ts = headers.get('webhook-timestamp')
     secret = os.getenv('DODO_WEBHOOK_SECRET') or os.getenv('DODO_PAYMENTS_WEBHOOK_KEY')
 
-    print(f"[dodo-webhook] headers present: id={bool(webhook_id)} ts={bool(webhook_ts)} sig={bool(webhook_sig)} secret={bool(secret)}")
+    logger.debug("[dodo-webhook] headers present: id=%s ts=%s sig=%s secret=%s", bool(webhook_id), bool(webhook_ts), bool(webhook_sig), bool(secret))
     if not (webhook_id and webhook_sig and webhook_ts and secret):
-        print("[dodo-webhook] missing required headers or secret; rejecting")
+        logger.warning("[dodo-webhook] missing required headers or secret; rejecting")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     # Timestamp tolerance (default 5 minutes)
@@ -785,12 +793,12 @@ async def dodo_webhook(request: Request):
         now = int(time.time())
         tolerance = int(os.getenv('DODO_WEBHOOK_TOLERANCE', '300'))
         delta = now - ts
-        print(f"[dodo-webhook] timestamp check: now={now} ts={ts} delta={delta}s tolerance={tolerance}s")
+        logger.debug("[dodo-webhook] timestamp check: now=%s ts=%s delta=%ss tolerance=%ss", now, ts, delta, tolerance)
         if abs(delta) > tolerance:
-            print("[dodo-webhook] timestamp outside tolerance; rejecting")
+            logger.warning("[dodo-webhook] timestamp outside tolerance; rejecting")
             raise HTTPException(status_code=401, detail="Webhook timestamp outside tolerance")
     except ValueError:
-        print("[dodo-webhook] invalid timestamp header; rejecting")
+        logger.warning("[dodo-webhook] invalid timestamp header; rejecting")
         raise HTTPException(status_code=401, detail="Invalid webhook timestamp")
 
     msg = f"{webhook_id}.{webhook_ts}.{raw_text}".encode('utf-8')
@@ -803,10 +811,10 @@ async def dodo_webhook(request: Request):
     match_b64 = hmac.compare_digest(webhook_sig, expected_b64)
     verified_by = 'hex' if match_hex else ('base64' if match_b64 else None)
     if not verified_by:
-        print("[dodo-webhook] signature verification failed")
+        logger.warning("[dodo-webhook] signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
     else:
-        print(f"[dodo-webhook] signature verified via {verified_by}")
+        logger.info("[dodo-webhook] signature verified via %s", verified_by)
 
     # Parse JSON after verification
     try:
@@ -821,13 +829,13 @@ async def dodo_webhook(request: Request):
         or payload.get("eventType")
     )
     if not event_type:
-        print("[dodo-webhook] missing event type; ignoring")
+        logger.info("[dodo-webhook] missing event type; ignoring")
         return {"status": "ignored", "reason": "missing event type"}
 
     # Only act on payment.succeeded
-    print(f"[dodo-webhook] event_type={event_type}")
+    logger.info("[dodo-webhook] event_type=%s", event_type)
     if event_type != "payment.succeeded":
-        print(f"[dodo-webhook] ignoring event_type={event_type}")
+        logger.info("[dodo-webhook] ignoring event_type=%s", event_type)
         return {"status": "ignored", "event_type": event_type}
 
     data = payload.get("data", {}) or {}
@@ -862,7 +870,7 @@ async def dodo_webhook(request: Request):
             seen_ref = fs.collection("webhooks").document(webhook_id)
             seen_snap = seen_ref.get()
             if seen_snap.exists:
-                print(f"[dodo-webhook] duplicate webhook-id={webhook_id}; skipping")
+                logger.info("[dodo-webhook] duplicate webhook-id=%s; skipping", webhook_id)
                 return {"status": "ok", "duplicate": True}
             # Mark as seen (no user-specific info yet)
             seen_ref.set({
@@ -870,10 +878,10 @@ async def dodo_webhook(request: Request):
                 "event_type": event_type,
                 "verified": True,
             }, merge=False)
-            print(f"[dodo-webhook] idempotency recorded webhook-id={webhook_id}")
+            logger.debug("[dodo-webhook] idempotency recorded webhook-id=%s", webhook_id)
         except Exception as e:
             # Log but continue; idempotency failures should not block processing
-            print(f"[webhook] idempotency record error: {e}")
+            logger.exception("[webhook] idempotency record error")
     except HTTPException as e:
         # Fail explicitly on server misconfiguration
         raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
@@ -882,27 +890,23 @@ async def dodo_webhook(request: Request):
     resolved_uid = None
     try:
         if user_id:
-            print(f"[dodo-webhook] metadata.user_id present: {user_id}")
+            logger.info("[dodo-webhook] metadata.user_id present: %s", user_id)
             resolved_uid = user_id
         elif customer_email:
             masked = _mask_email(customer_email)
-            print(f"[dodo-webhook] resolving by email: {masked}")
+            logger.info("[dodo-webhook] resolving by email: %s", masked)
             # Map email to Firebase auth user
             u = admin_auth.get_user_by_email(customer_email)
             resolved_uid = u.uid
-            print(f"[dodo-webhook] resolved uid: {resolved_uid}")
+            logger.info("[dodo-webhook] resolved uid: %s", resolved_uid)
     except Exception as e:
-        print(f"[dodo-webhook] failed to resolve user: {e}")
-        traceback.print_exc()
+        logger.exception("[dodo-webhook] failed to resolve user")
         resolved_uid = None
 
     if not resolved_uid:
         # Can't map this payment to a user; acknowledge to avoid retries, but log intent
-        print("[webhook] payment.succeeded received but no user could be resolved", {
-            "email": customer_email,
-            "metadata": metadata,
-            "payment_id": payment_id,
-        })
+        logger.warning("[webhook] payment.succeeded received but no user could be resolved | email=%s metadata_keys=%s payment_id=%s",
+                       _mask_email(customer_email), list(metadata.keys()), payment_id)
         return {"status": "ok", "mapped": False}
 
     # Update Firestore user doc
@@ -923,7 +927,7 @@ async def dodo_webhook(request: Request):
                 "product_id": product_id,
             },
         }
-        print(f"[dodo-webhook] updating Firestore: users/{resolved_uid} -> pro")
+        logger.info("[dodo-webhook] updating Firestore: users/%s -> pro", resolved_uid)
         user_ref.set(update, merge=True)
         # Enrich idempotency record with mapping info
         try:
@@ -935,10 +939,9 @@ async def dodo_webhook(request: Request):
                 "updatedUser": True,
             }, merge=True)
         except Exception as e:
-            print(f"[dodo-webhook] failed to enrich idempotency record: {e}")
-        print(f"[dodo-webhook] upgraded user {resolved_uid} to pro via Dodo payment {payment_id}")
+            logger.exception("[dodo-webhook] failed to enrich idempotency record")
+        logger.info("[dodo-webhook] upgraded user %s to pro via Dodo payment %s", resolved_uid, payment_id)
         return {"status": "ok", "mapped": True, "uid": resolved_uid}
     except Exception as e:
-        print(f"[dodo-webhook] failed to update user plan: {e}")
-        traceback.print_exc()
+        logger.exception("[dodo-webhook] failed to update user plan")
         raise HTTPException(status_code=500, detail="Failed to update user plan")

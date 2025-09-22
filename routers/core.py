@@ -955,6 +955,13 @@ async def dodo_webhook(request: Request):
     logger.info("[dodo-webhook] uid found in metadata/query_params")
     resolved_uid = user_id
 
+    # Determine plan (from metadata/query_params if present)
+    plan = (
+        (metadata.get("plan") if isinstance(metadata, dict) else None)
+        or (query_params.get("plan") if isinstance(query_params, dict) else None)
+        or "pro"
+    )
+
     # Update Firestore user doc
     try:
         if admin_firestore is None:
@@ -962,7 +969,7 @@ async def dodo_webhook(request: Request):
         fs = admin_firestore.client()
         user_ref = fs.collection("users").document(resolved_uid)
         update = {
-            "plan": "pro",
+            "plan": plan,
             "planUpdatedAt": admin_firestore.SERVER_TIMESTAMP,
             "planSource": "dodo",
             "planDetails": {
@@ -971,6 +978,7 @@ async def dodo_webhook(request: Request):
                 "payment_id": payment_id,
                 "subscription_id": subscription_id,
                 "product_id": product_id,
+                "requested_plan": plan,
             },
         }
         logger.info("[dodo-webhook] updating Firestore: users/%s -> pro", resolved_uid)

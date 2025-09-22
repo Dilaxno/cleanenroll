@@ -150,6 +150,10 @@ class ThemeSchema(BaseModel):
     inputTextColor: str = "#111827"
     inputBorderColor: str = "#d1d5db"
     inputBorderRadius: int = 8
+    # Persist builder border customization
+    inputBorderWidth: int = 1
+    inputBorderStyle: Literal["none", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset"] = "solid"
+    inputBorderSide: Literal["all", "top", "right", "bottom", "left"] = "all"
 
 
 class RedirectConfig(BaseModel):

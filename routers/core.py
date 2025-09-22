@@ -781,8 +781,14 @@ async def dodo_webhook(request: Request):
     # Verify Standard Webhooks signature from Dodo
     headers = request.headers
     webhook_id = headers.get('webhook-id')
-    webhook_sig = headers.get('webhook-signature')
-    webhook_ts = headers.get('webhook-timestamp')
+    # Support alternate provider header names for signature
+    webhook_sig = (
+        headers.get('webhook-signature')
+        or headers.get('dodo-signature')
+        or headers.get('x-dodo-signature')
+        or headers.get('signature')
+    )
+    webhook_ts = headers.get('webhook-timestamp') or headers.get('webhook-time') or headers.get('timestamp')
     secret = os.getenv('DODO_WEBHOOK_SECRET') or os.getenv('DODO_PAYMENTS_WEBHOOK_KEY')
 
     logger.debug("[dodo-webhook] headers present: id=%s ts=%s sig=%s secret=%s", bool(webhook_id), bool(webhook_ts), bool(webhook_sig), bool(secret))
@@ -804,15 +810,62 @@ async def dodo_webhook(request: Request):
         logger.warning("[dodo-webhook] invalid timestamp header; rejecting")
         raise HTTPException(status_code=401, detail="Invalid webhook timestamp")
 
-    msg = f"{webhook_id}.{webhook_ts}.{raw_text}".encode('utf-8')
-    key = secret.encode('utf-8')
-    digest = hmac.new(key, msg, hashlib.sha256).digest()
-    expected_hex = digest.hex()
-    expected_b64 = base64.b64encode(digest).decode('utf-8')
+    # Parse signature header (support formats like: "v1=...,v2=..." or plain token)
+    def _parse_sig_tokens(s: str) -> list[str]:
+        try:
+            parts = [p.strip() for p in str(s).split(',') if p.strip()]
+            tokens: list[str] = []
+            for p in parts:
+                if '=' in p:
+                    k, v = p.split('=', 1)
+                    k = k.strip().lower()
+                    v = v.strip()
+                    # ignore timestamp keys (e.g., t=...)
+                    if k and v and k not in ('t', 'ts', 'time', 'timestamp', 'v', 'version'):
+                        tokens.append(v)
+                else:
+                    # drop bare version labels like 'v1'
+                    pv = p.lower()
+                    if pv in ('v1', 'v2', 'v3', 'version'):
+                        continue
+                    tokens.append(p)
+            # If nothing parsed, fall back to whole header
+            return tokens or [str(s)]
+        except Exception:
+            return [str(s)]
 
-    match_hex = hmac.compare_digest(webhook_sig, expected_hex)
-    match_b64 = hmac.compare_digest(webhook_sig, expected_b64)
-    verified_by = 'hex' if match_hex else ('base64' if match_b64 else None)
+    sig_tokens = _parse_sig_tokens(webhook_sig)
+
+    key = secret.encode('utf-8')
+    # Try common message templates (bytes, to preserve exact body)
+    id_b = str(webhook_id).encode('utf-8')
+    ts_b = str(webhook_ts).encode('utf-8')
+    dot_b = b'.'
+    msg_templates = [
+        id_b + dot_b + ts_b + dot_b + raw_body,  # id.ts.body
+        ts_b + dot_b + id_b + dot_b + raw_body,  # ts.id.body
+        ts_b + dot_b + raw_body,                 # ts.body
+        id_b + dot_b + raw_body,                 # id.body
+        raw_body,                                # body
+        id_b + ts_b + raw_body,                  # idtsbody
+        ts_b + id_b + raw_body,                  # tsidbody
+    ]
+
+    verified_by = None
+    for idx, m in enumerate(msg_templates):
+        digest = hmac.new(key, m, hashlib.sha256).digest()
+        expected_hex = digest.hex()
+        expected_b64 = base64.b64encode(digest).decode('utf-8')
+        for tok in sig_tokens:
+            if hmac.compare_digest(tok, expected_hex):
+                verified_by = f"template#{idx+1}:hex"
+                break
+            if hmac.compare_digest(tok, expected_b64):
+                verified_by = f"template#{idx+1}:base64"
+                break
+        if verified_by:
+            break
+
     if not verified_by:
         logger.warning("[dodo-webhook] signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")

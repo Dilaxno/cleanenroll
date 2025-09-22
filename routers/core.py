@@ -888,9 +888,22 @@ async def dodo_webhook(request: Request):
 
     data = payload.get("data", {}) or {}
     metadata = data.get("metadata", {}) or payload.get("metadata", {}) or {}
+    query_params = data.get("query_params", {}) or {}
 
-    # Attempt to derive identifiers
-    user_id = metadata.get("user_id") or metadata.get("uid") or metadata.get("firebase_uid")
+    # Attempt to derive identifiers (prefer explicit UID over email)
+    def _first_key(d: dict, keys: list[str]):
+        for k in keys:
+            if isinstance(d, dict) and d.get(k) is not None:
+                try:
+                    v = str(d.get(k)).strip()
+                except Exception:
+                    v = d.get(k)
+                if v:
+                    return v
+        return None
+
+    uid_keys = ["user_uid", "uid", "userId", "firebase_uid", "user_id"]
+    user_id = _first_key(metadata, uid_keys) or _first_key(query_params, uid_keys)
 
     customer = data.get("customer") or {}
     customer_email = None
@@ -934,28 +947,13 @@ async def dodo_webhook(request: Request):
         # Fail explicitly on server misconfiguration
         raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
 
-    # Resolve UID
+    # Resolve UID (strict)
     resolved_uid = None
-    try:
-        if user_id:
-            logger.info("[dodo-webhook] metadata.user_id present: %s", user_id)
-            resolved_uid = user_id
-        elif customer_email:
-            masked = _mask_email(customer_email)
-            logger.info("[dodo-webhook] resolving by email: %s", masked)
-            # Map email to Firebase auth user
-            u = admin_auth.get_user_by_email(customer_email)
-            resolved_uid = u.uid
-            logger.info("[dodo-webhook] resolved uid: %s", resolved_uid)
-    except Exception as e:
-        logger.exception("[dodo-webhook] failed to resolve user")
-        resolved_uid = None
-
-    if not resolved_uid:
-        # Can't map this payment to a user; acknowledge to avoid retries, but log intent
-        logger.warning("[webhook] payment.succeeded received but no user could be resolved | email=%s metadata_keys=%s payment_id=%s",
-                       _mask_email(customer_email), list(metadata.keys()), payment_id)
-        return {"status": "ok", "mapped": False}
+    if not user_id:
+        logger.warning("[dodo-webhook] missing uid in metadata/query_params; rejecting")
+        raise HTTPException(status_code=400, detail="Missing user UID in webhook metadata/query_params")
+    logger.info("[dodo-webhook] uid found in metadata/query_params")
+    resolved_uid = user_id
 
     # Update Firestore user doc
     try:

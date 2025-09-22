@@ -93,9 +93,26 @@ router = APIRouter(prefix="/api/builder", tags=["builder"])
 BACKING_DIR = os.path.join(os.getcwd(), "data", "forms")
 os.makedirs(BACKING_DIR, exist_ok=True)
 
+# Responses storage (separate from form schemas)
+RESPONSES_BASE_DIR = os.path.join(os.getcwd(), "data", "responses")
+os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
+
 
 def _form_path(form_id: str) -> str:
     return os.path.join(BACKING_DIR, f"{form_id}.json")
+
+
+def _responses_dir(form_id: str) -> str:
+    """Directory where responses for a given form are stored."""
+    d = os.path.join(RESPONSES_BASE_DIR, form_id)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _new_response_path(form_id: str, submitted_at_iso: str, response_id: str) -> str:
+    """Generate a filesystem-safe path for a new response file."""
+    safe_ts = str(submitted_at_iso).replace(":", "-")
+    return os.path.join(_responses_dir(form_id), f"{safe_ts}_{response_id}.json")
 
 
 def _write_json(path: str, data: Dict):
@@ -525,6 +542,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 raise HTTPException(status_code=400, detail=f"Invalid email for field '{lab}': {str(e)}")
 
     # Success payload mirrors configured behavior
+    # Build response payload for client
     resp: Dict[str, Optional[str] | bool] = {
         "success": True,
         "message": form_data.get("thankYouMessage"),
@@ -533,4 +551,55 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     if redir.get("enabled") and redir.get("url"):
         resp["redirectUrl"] = redir.get("url")
 
+    # Persist submission (store answers separately from form schema)
+    try:
+        submitted_at = datetime.utcnow().isoformat()
+        response_id = uuid.uuid4().hex
+        # Only persist answers for known fields, keyed by field id
+        answers: Dict[str, object] = {}
+        fields_def = form_data.get("fields") or []
+        payload = payload or {}
+        for f in fields_def:
+            try:
+                fid = str(f.get("id"))
+                label = str(f.get("label") or "")
+            except Exception:
+                continue
+            val = payload.get(fid)
+            if val is None and label:
+                val = payload.get(label)
+            if val is not None:
+                answers[fid] = val
+        record = {
+            "responseId": response_id,
+            "formId": form_id,
+            "submittedAt": submitted_at,
+            "answers": answers,
+        }
+        _write_json(_new_response_path(form_id, submitted_at, response_id), record)
+        # Optionally return responseId to the client
+        resp["responseId"] = response_id  # type: ignore
+    except Exception:
+        # Swallow persistence errors to not break client submission flow
+        pass
+
     return resp
+
+@router.get("/forms/{form_id}/responses")
+async def list_responses(form_id: str, limit: int = 100, offset: int = 0):
+    """
+    List stored responses for a form. Results are sorted by submittedAt descending.
+    """
+    dir_path = _responses_dir(form_id)
+    items: List[Dict] = []
+    if os.path.exists(dir_path):
+        for name in os.listdir(dir_path):
+            if name.endswith(".json"):
+                fpath = os.path.join(dir_path, name)
+                try:
+                    items.append(_read_json(fpath))
+                except Exception:
+                    continue
+    items.sort(key=lambda d: d.get("submittedAt") or "", reverse=True)
+    sliced = items[offset: offset + max(0, int(limit))]
+    return {"count": len(items), "responses": sliced}

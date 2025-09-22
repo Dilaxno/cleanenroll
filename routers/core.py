@@ -422,7 +422,8 @@ BUILDER_HTML = """<!doctype html>
     const label = `<label>${escapeHtml(f.label || 'Untitled')}${req}</label>`;
     const ph = f.placeholder ? ` placeholder=\"${escapeHtml(f.placeholder)}\"` : '';
     if (f.type === 'text') {
-      return `<div class=\"form-field\">${label}<input type=\"text\"${ph} /></div>`;
+      const maxAttr = (typeof f.maxLength === 'number' && f.maxLength > 0) ? ` maxlength=\"${f.maxLength}\"` : '';
+      return `<div class=\"form-field\">${label}<input type=\"text\"${ph}${maxAttr} /></div>`;
     }
     if (f.type === 'number') {
       return `<div class=\"form-field\">${label}<input type=\"number\"${ph} /></div>`;
@@ -433,6 +434,10 @@ BUILDER_HTML = """<!doctype html>
     if (f.type === 'dropdown') {
       const opts = (f.options||[]).map(o => `<option>${escapeHtml(o)}</option>`).join('');
       return `<div class=\"form-field\">${label}<select>${opts}</select></div>`;
+    }
+    if (f.type === 'textarea') {
+      const maxAttr = (typeof f.maxLength === 'number' && f.maxLength > 0) ? ` maxlength=\"${f.maxLength}\"` : '';
+      return `<div class=\"form-field\">${label}<textarea rows=\"4\"${ph}${maxAttr}></textarea></div>`;
     }
     if (f.type === 'date') {
       return `<div class=\"form-field\">${label}<input type=\"date\" /></div>`;

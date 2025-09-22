@@ -12,6 +12,12 @@ import time
 import logging
 import traceback
 from pydantic import BaseModel, EmailStr
+try:
+    from standardwebhooks import Webhook  # type: ignore
+    _STDWEBHOOKS_AVAILABLE = True
+except Exception:
+    Webhook = None  # type: ignore
+    _STDWEBHOOKS_AVAILABLE = False
 
 logger = logging.getLogger("backend.core")
 
@@ -628,7 +634,16 @@ async def embed_page(form_id: str):
     .field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
     input[type=text], input[type=number], input[type=date], select, textarea {
       width: 100%; padding: 12px; background: var(--input-bg, #fff); color: var(--input-text, #111827);
-      border: 1px solid var(--input-border, #d1d5db); border-radius: var(--radius, 8px);
+      border-color: var(--input-border, #d1d5db);
+      border-top-width: var(--input-border-top-width, 1px);
+      border-right-width: var(--input-border-right-width, 1px);
+      border-bottom-width: var(--input-border-bottom-width, 1px);
+      border-left-width: var(--input-border-left-width, 1px);
+      border-top-style: var(--input-border-top-style, solid);
+      border-right-style: var(--input-border-right-style, solid);
+      border-bottom-style: var(--input-border-bottom-style, solid);
+      border-left-style: var(--input-border-left-style, solid);
+      border-radius: var(--radius, 8px);
       outline: none; transition: box-shadow .15s ease, border-color .15s ease;
     }
     input[type=text]:focus, input[type=number]:focus, input[type=date]:focus, select:focus, textarea:focus {
@@ -700,6 +715,26 @@ async def embed_page(form_id: str):
       card.style.setProperty('--input-border', t.inputBorderColor || '#d1d5db');
       card.style.setProperty('--radius', (t.inputBorderRadius||8) + 'px');
       card.style.setProperty('--primary', t.primaryColor || '#4f46e5');
+      // Border per-side customization (width/style/side)
+      (function(){
+        var width = parseInt((t.inputBorderWidth ?? 1), 10); if (isNaN(width) || width < 0) width = 0;
+        var style = (String(t.inputBorderStyle || 'solid')).toLowerCase();
+        var side = (String(t.inputBorderSide || 'all')).toLowerCase();
+        var sides = { top: {w:'0px', s:'none'}, right: {w:'0px', s:'none'}, bottom: {w:'0px', s:'none'}, left: {w:'0px', s:'none'} };
+        if (side === 'all') {
+          sides.top = sides.right = sides.bottom = sides.left = { w: width + 'px', s: style };
+        } else if (sides.hasOwnProperty(side)) {
+          sides[side] = { w: width + 'px', s: style };
+        }
+        card.style.setProperty('--input-border-top-width', sides.top.w);
+        card.style.setProperty('--input-border-right-width', sides.right.w);
+        card.style.setProperty('--input-border-bottom-width', sides.bottom.w);
+        card.style.setProperty('--input-border-left-width', sides.left.w);
+        card.style.setProperty('--input-border-top-style', sides.top.s);
+        card.style.setProperty('--input-border-right-style', sides.right.s);
+        card.style.setProperty('--input-border-bottom-style', sides.bottom.s);
+        card.style.setProperty('--input-border-left-style', sides.left.s);
+      })();
 
       document.getElementById('title').textContent = cfg.title || '';
       const sub = document.getElementById('subtitle');
@@ -810,67 +845,24 @@ async def dodo_webhook(request: Request):
         logger.warning("[dodo-webhook] invalid timestamp header; rejecting")
         raise HTTPException(status_code=401, detail="Invalid webhook timestamp")
 
-    # Parse signature header (support formats like: "v1=...,v2=..." or plain token)
-    def _parse_sig_tokens(s: str) -> list[str]:
-        try:
-            parts = [p.strip() for p in str(s).split(',') if p.strip()]
-            tokens: list[str] = []
-            for p in parts:
-                if '=' in p:
-                    k, v = p.split('=', 1)
-                    k = k.strip().lower()
-                    v = v.strip()
-                    # ignore timestamp keys (e.g., t=...)
-                    if k and v and k not in ('t', 'ts', 'time', 'timestamp', 'v', 'version'):
-                        tokens.append(v)
-                else:
-                    # drop bare version labels like 'v1'
-                    pv = p.lower()
-                    if pv in ('v1', 'v2', 'v3', 'version'):
-                        continue
-                    tokens.append(p)
-            # If nothing parsed, fall back to whole header
-            return tokens or [str(s)]
-        except Exception:
-            return [str(s)]
+    # Enforce Standard Webhooks library usage only
+    if not _STDWEBHOOKS_AVAILABLE:
+        logger.error("[dodo-webhook] standardwebhooks library is not available on server")
+        raise HTTPException(status_code=500, detail="Webhook verification library unavailable")
 
-    sig_tokens = _parse_sig_tokens(webhook_sig)
-
-    key = secret.encode('utf-8')
-    # Try common message templates (bytes, to preserve exact body)
-    id_b = str(webhook_id).encode('utf-8')
-    ts_b = str(webhook_ts).encode('utf-8')
-    dot_b = b'.'
-    msg_templates = [
-        id_b + dot_b + ts_b + dot_b + raw_body,  # id.ts.body
-        ts_b + dot_b + id_b + dot_b + raw_body,  # ts.id.body
-        ts_b + dot_b + raw_body,                 # ts.body
-        id_b + dot_b + raw_body,                 # id.body
-        raw_body,                                # body
-        id_b + ts_b + raw_body,                  # idtsbody
-        ts_b + id_b + raw_body,                  # tsidbody
-    ]
-
-    verified_by = None
-    for idx, m in enumerate(msg_templates):
-        digest = hmac.new(key, m, hashlib.sha256).digest()
-        expected_hex = digest.hex()
-        expected_b64 = base64.b64encode(digest).decode('utf-8')
-        for tok in sig_tokens:
-            if hmac.compare_digest(tok, expected_hex):
-                verified_by = f"template#{idx+1}:hex"
-                break
-            if hmac.compare_digest(tok, expected_b64):
-                verified_by = f"template#{idx+1}:base64"
-                break
-        if verified_by:
-            break
-
-    if not verified_by:
+    try:
+        wh = Webhook(secret)
+        std_headers = {
+            "webhook-id": webhook_id,
+            "webhook-signature": headers.get('webhook-signature') or headers.get('dodo-signature') or headers.get('x-dodo-signature') or headers.get('signature') or "",
+            "webhook-timestamp": str(webhook_ts),
+        }
+        # standardwebhooks expects the exact stringified payload
+        wh.verify(raw_text, std_headers)
+        logger.info("[dodo-webhook] signature verified via standardwebhooks")
+    except Exception:
         logger.warning("[dodo-webhook] signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
-    else:
-        logger.info("[dodo-webhook] signature verified via %s", verified_by)
 
     # Parse JSON after verification
     try:

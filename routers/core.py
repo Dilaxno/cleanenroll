@@ -1,10 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import os
 import json
 import uuid
+import hmac
+import hashlib
+import base64
+import time
 from pydantic import BaseModel, EmailStr
 
 # Email + Firebase Admin
@@ -16,12 +20,13 @@ except Exception:
     from utils.email import render_email, send_email_html  # type: ignore
 try:
     import firebase_admin
-    from firebase_admin import auth as admin_auth, credentials as admin_credentials
+    from firebase_admin import auth as admin_auth, credentials as admin_credentials, firestore as admin_firestore
     _FB_AVAILABLE = True
 except Exception:
     firebase_admin = None  # type: ignore
     admin_auth = None  # type: ignore
     admin_credentials = None  # type: ignore
+    admin_firestore = None  # type: ignore
     _FB_AVAILABLE = False
 
 router = APIRouter()
@@ -723,3 +728,161 @@ async def spa_form_redirect(path: str):
 @router.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# -----------------------------
+# Dodo Payments Webhook
+# -----------------------------
+@router.post("/api/webhooks/dodo")
+async def dodo_webhook(request: Request):
+    """Handle Dodo Payments webhook events.
+    On payment.succeeded, upgrade user's plan to 'pro' in Firestore.
+    Mapping priority: metadata.user_id -> customer.email -> ignore.
+    """
+    # Read raw body (for signature verification if needed later)
+    try:
+        raw_body = await request.body()
+        raw_text = raw_body.decode('utf-8', errors='replace')
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid body")
+
+    # Verify Standard Webhooks signature from Dodo
+    headers = request.headers
+    webhook_id = headers.get('webhook-id')
+    webhook_sig = headers.get('webhook-signature')
+    webhook_ts = headers.get('webhook-timestamp')
+    secret = os.getenv('DODO_WEBHOOK_SECRET') or os.getenv('DODO_PAYMENTS_WEBHOOK_KEY')
+
+    if not (webhook_id and webhook_sig and webhook_ts and secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Timestamp tolerance (default 5 minutes)
+    try:
+        ts = int(str(webhook_ts))
+        now = int(time.time())
+        tolerance = int(os.getenv('DODO_WEBHOOK_TOLERANCE', '300'))
+        if abs(now - ts) > tolerance:
+            raise HTTPException(status_code=401, detail="Webhook timestamp outside tolerance")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid webhook timestamp")
+
+    msg = f"{webhook_id}.{webhook_ts}.{raw_text}".encode('utf-8')
+    key = secret.encode('utf-8')
+    digest = hmac.new(key, msg, hashlib.sha256).digest()
+    expected_hex = digest.hex()
+    expected_b64 = base64.b64encode(digest).decode('utf-8')
+
+    if not (hmac.compare_digest(webhook_sig, expected_hex) or hmac.compare_digest(webhook_sig, expected_b64)):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Parse JSON after verification
+    try:
+        payload = json.loads(raw_text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Extract event type (support multiple keys)
+    event_type = (
+        payload.get("event_type")
+        or payload.get("type")
+        or payload.get("eventType")
+    )
+    if not event_type:
+        # Not a valid Dodo webhook payload
+        return {"status": "ignored", "reason": "missing event type"}
+
+    # Only act on payment.succeeded
+    if event_type != "payment.succeeded":
+        return {"status": "ignored", "event_type": event_type}
+
+    data = payload.get("data", {}) or {}
+    metadata = data.get("metadata", {}) or payload.get("metadata", {}) or {}
+
+    # Attempt to derive identifiers
+    user_id = metadata.get("user_id") or metadata.get("uid") or metadata.get("firebase_uid")
+
+    customer = data.get("customer") or {}
+    customer_email = None
+    if isinstance(customer, dict):
+        customer_email = customer.get("email") or customer.get("customer_email")
+    if not customer_email:
+        customer_email = data.get("customer_email") or data.get("email")
+
+    # Collect some reference ids for audit
+    subscription_id = (
+        data.get("subscription_id")
+        or (data.get("subscription") or {}).get("subscription_id")
+    )
+    product_id = data.get("product_id") or (data.get("product") or {}).get("product_id")
+    payment_id = data.get("payment_id") or data.get("id") or payload.get("id")
+
+    # Initialize Firebase Admin and Firestore; implement idempotency using webhook-id
+    try:
+        _ensure_firebase_initialized()
+        if admin_firestore is None:
+            raise RuntimeError("Firestore client unavailable")
+        fs = admin_firestore.client()
+        # Idempotency: if we've already seen this webhook-id, acknowledge and return
+        try:
+            seen_ref = fs.collection("webhooks").document(webhook_id)
+            seen_snap = seen_ref.get()
+            if seen_snap.exists:
+                return {"status": "ok", "duplicate": True}
+            # Mark as seen (no user-specific info yet)
+            seen_ref.set({
+                "receivedAt": admin_firestore.SERVER_TIMESTAMP,
+                "event_type": event_type,
+                "verified": True,
+            }, merge=False)
+        except Exception as e:
+            # Log but continue; idempotency failures should not block processing
+            print(f"[webhook] idempotency record error: {e}")
+    except HTTPException as e:
+        # Fail explicitly on server misconfiguration
+        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
+
+    # Resolve UID
+    resolved_uid = None
+    try:
+        if user_id:
+            resolved_uid = user_id
+        elif customer_email:
+            # Map email to Firebase auth user
+            u = admin_auth.get_user_by_email(customer_email)
+            resolved_uid = u.uid
+    except Exception:
+        resolved_uid = None
+
+    if not resolved_uid:
+        # Can't map this payment to a user; acknowledge to avoid retries, but log intent
+        print("[webhook] payment.succeeded received but no user could be resolved", {
+            "email": customer_email,
+            "metadata": metadata,
+            "payment_id": payment_id,
+        })
+        return {"status": "ok", "mapped": False}
+
+    # Update Firestore user doc
+    try:
+        if admin_firestore is None:
+            raise RuntimeError("Firestore client unavailable")
+        fs = admin_firestore.client()
+        user_ref = fs.collection("users").document(resolved_uid)
+        update = {
+            "plan": "pro",
+            "planUpdatedAt": admin_firestore.SERVER_TIMESTAMP,
+            "planSource": "dodo",
+            "planDetails": {
+                "payment_provider": "dodo",
+                "event_type": event_type,
+                "payment_id": payment_id,
+                "subscription_id": subscription_id,
+                "product_id": product_id,
+            },
+        }
+        user_ref.set(update, merge=True)
+        print(f"[webhook] Upgraded user {resolved_uid} to pro via Dodo payment {payment_id}")
+        return {"status": "ok", "mapped": True, "uid": resolved_uid}
+    except Exception as e:
+        print(f"[webhook] Failed to update user plan: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update user plan")

@@ -9,6 +9,8 @@ import hmac
 import hashlib
 import base64
 import time
+import logging
+import traceback
 from pydantic import BaseModel, EmailStr
 
 # Email + Firebase Admin
@@ -30,6 +32,18 @@ except Exception:
     _FB_AVAILABLE = False
 
 router = APIRouter()
+
+# --- Logging helpers ---
+
+def _mask_email(email: str | None) -> str:
+  if not email or '@' not in email:
+    return str(email)
+  local, domain = email.split('@', 1)
+  if len(local) <= 2:
+    masked_local = (local[:1] + "*") if local else "*"
+  else:
+    masked_local = local[0] + "***" + local[-1]
+  return f"{masked_local}@{domain}"
 
 # Persistence dir (filesystem-based)
 DATA_DIR = os.path.join(os.getcwd(), "data", "forms")
@@ -743,7 +757,9 @@ async def dodo_webhook(request: Request):
     try:
         raw_body = await request.body()
         raw_text = raw_body.decode('utf-8', errors='replace')
+        print(f"[dodo-webhook] received: body_len={len(raw_text)}")
     except Exception:
+        print("[dodo-webhook] failed to read body")
         raise HTTPException(status_code=400, detail="Invalid body")
 
     # Verify Standard Webhooks signature from Dodo
@@ -753,7 +769,9 @@ async def dodo_webhook(request: Request):
     webhook_ts = headers.get('webhook-timestamp')
     secret = os.getenv('DODO_WEBHOOK_SECRET') or os.getenv('DODO_PAYMENTS_WEBHOOK_KEY')
 
+    print(f"[dodo-webhook] headers present: id={bool(webhook_id)} ts={bool(webhook_ts)} sig={bool(webhook_sig)} secret={bool(secret)}")
     if not (webhook_id and webhook_sig and webhook_ts and secret):
+        print("[dodo-webhook] missing required headers or secret; rejecting")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     # Timestamp tolerance (default 5 minutes)
@@ -761,9 +779,13 @@ async def dodo_webhook(request: Request):
         ts = int(str(webhook_ts))
         now = int(time.time())
         tolerance = int(os.getenv('DODO_WEBHOOK_TOLERANCE', '300'))
-        if abs(now - ts) > tolerance:
+        delta = now - ts
+        print(f"[dodo-webhook] timestamp check: now={now} ts={ts} delta={delta}s tolerance={tolerance}s")
+        if abs(delta) > tolerance:
+            print("[dodo-webhook] timestamp outside tolerance; rejecting")
             raise HTTPException(status_code=401, detail="Webhook timestamp outside tolerance")
     except ValueError:
+        print("[dodo-webhook] invalid timestamp header; rejecting")
         raise HTTPException(status_code=401, detail="Invalid webhook timestamp")
 
     msg = f"{webhook_id}.{webhook_ts}.{raw_text}".encode('utf-8')
@@ -772,8 +794,14 @@ async def dodo_webhook(request: Request):
     expected_hex = digest.hex()
     expected_b64 = base64.b64encode(digest).decode('utf-8')
 
-    if not (hmac.compare_digest(webhook_sig, expected_hex) or hmac.compare_digest(webhook_sig, expected_b64)):
+    match_hex = hmac.compare_digest(webhook_sig, expected_hex)
+    match_b64 = hmac.compare_digest(webhook_sig, expected_b64)
+    verified_by = 'hex' if match_hex else ('base64' if match_b64 else None)
+    if not verified_by:
+        print("[dodo-webhook] signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    else:
+        print(f"[dodo-webhook] signature verified via {verified_by}")
 
     # Parse JSON after verification
     try:
@@ -788,11 +816,13 @@ async def dodo_webhook(request: Request):
         or payload.get("eventType")
     )
     if not event_type:
-        # Not a valid Dodo webhook payload
+        print("[dodo-webhook] missing event type; ignoring")
         return {"status": "ignored", "reason": "missing event type"}
 
     # Only act on payment.succeeded
+    print(f"[dodo-webhook] event_type={event_type}")
     if event_type != "payment.succeeded":
+        print(f"[dodo-webhook] ignoring event_type={event_type}")
         return {"status": "ignored", "event_type": event_type}
 
     data = payload.get("data", {}) or {}
@@ -827,6 +857,7 @@ async def dodo_webhook(request: Request):
             seen_ref = fs.collection("webhooks").document(webhook_id)
             seen_snap = seen_ref.get()
             if seen_snap.exists:
+                print(f"[dodo-webhook] duplicate webhook-id={webhook_id}; skipping")
                 return {"status": "ok", "duplicate": True}
             # Mark as seen (no user-specific info yet)
             seen_ref.set({
@@ -834,6 +865,7 @@ async def dodo_webhook(request: Request):
                 "event_type": event_type,
                 "verified": True,
             }, merge=False)
+            print(f"[dodo-webhook] idempotency recorded webhook-id={webhook_id}")
         except Exception as e:
             # Log but continue; idempotency failures should not block processing
             print(f"[webhook] idempotency record error: {e}")
@@ -845,12 +877,18 @@ async def dodo_webhook(request: Request):
     resolved_uid = None
     try:
         if user_id:
+            print(f"[dodo-webhook] metadata.user_id present: {user_id}")
             resolved_uid = user_id
         elif customer_email:
+            masked = _mask_email(customer_email)
+            print(f"[dodo-webhook] resolving by email: {masked}")
             # Map email to Firebase auth user
             u = admin_auth.get_user_by_email(customer_email)
             resolved_uid = u.uid
-    except Exception:
+            print(f"[dodo-webhook] resolved uid: {resolved_uid}")
+    except Exception as e:
+        print(f"[dodo-webhook] failed to resolve user: {e}")
+        traceback.print_exc()
         resolved_uid = None
 
     if not resolved_uid:
@@ -880,9 +918,22 @@ async def dodo_webhook(request: Request):
                 "product_id": product_id,
             },
         }
+        print(f"[dodo-webhook] updating Firestore: users/{resolved_uid} -> pro")
         user_ref.set(update, merge=True)
-        print(f"[webhook] Upgraded user {resolved_uid} to pro via Dodo payment {payment_id}")
+        # Enrich idempotency record with mapping info
+        try:
+            fs.collection("webhooks").document(webhook_id).set({
+                "uid": resolved_uid,
+                "payment_id": payment_id,
+                "subscription_id": subscription_id,
+                "product_id": product_id,
+                "updatedUser": True,
+            }, merge=True)
+        except Exception as e:
+            print(f"[dodo-webhook] failed to enrich idempotency record: {e}")
+        print(f"[dodo-webhook] upgraded user {resolved_uid} to pro via Dodo payment {payment_id}")
         return {"status": "ok", "mapped": True, "uid": resolved_uid}
     except Exception as e:
-        print(f"[webhook] Failed to update user plan: {e}")
+        print(f"[dodo-webhook] failed to update user plan: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Failed to update user plan")

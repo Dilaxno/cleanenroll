@@ -129,12 +129,14 @@ async def send_password_reset_email(req: PasswordResetRequest):
 
     link = None
     try:
+        # Firebase Admin expects an ActionCodeSettings object, not a dict
+        acs = admin_auth.ActionCodeSettings(
+            url=continue_url,
+            handle_code_in_app=True,
+        )
         link = admin_auth.generate_password_reset_link(
             req.email,
-            action_code_settings={
-                "url": continue_url,
-                "handle_code_in_app": True,
-            },
+            action_code_settings=acs,
         )
     except Exception as e:
         # Do not leak details; proceed without link, but warn in server logs

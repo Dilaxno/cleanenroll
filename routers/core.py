@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -40,6 +40,33 @@ except Exception:
     _FB_AVAILABLE = False
 
 router = APIRouter()
+
+# --- Token helpers for password reset ---
+RESET_TOKEN_LEEWAY = 60  # seconds of clock skew allowed
+
+def _verify_reset_token(token: str) -> str:
+    """Return email if token valid; raise HTTPException otherwise."""
+    try:
+        raw = base64.urlsafe_b64decode(token + "==")  # pad
+        payload, sig = raw.rsplit(b".", 1)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid token format")
+    secret = os.getenv("RESET_TOKEN_SECRET", os.getenv("SECRET_KEY", "change-me")).encode("utf-8")
+    expected = hmac.new(secret, payload, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected, sig):
+        raise HTTPException(status_code=400, detail="Invalid token signature")
+    try:
+        data = json.loads(payload.decode("utf-8"))
+        email = data.get("email")
+        exp = int(data.get("exp", 0))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid token payload")
+    now = int(time.time())
+    if now > exp + RESET_TOKEN_LEEWAY:
+        raise HTTPException(status_code=400, detail="Token expired")
+    if not email:
+        raise HTTPException(status_code=400, detail="Invalid token payload")
+    return email
 
 # --- Logging helpers ---
 
@@ -91,6 +118,10 @@ class FormConfig(BaseModel):
 class PasswordResetRequest(BaseModel):
     email: EmailStr
 
+class PasswordResetConfirmRequest(BaseModel):
+    token: str
+    password: str
+
 
 def _ensure_firebase_initialized():
     if not _FB_AVAILABLE:
@@ -125,50 +156,83 @@ async def send_password_reset_email(req: PasswordResetRequest):
         logger.warning("Firebase Admin unavailable; skipping password reset email send")
         return {"status": "ok"}
 
-    continue_url = os.getenv("RESET_CONTINUE_URL", "https://cleanenroll.com/reset-password")
+    # Build signed reset token and send branded email to our reset page
+    app_base = os.getenv("FRONTEND_URL", "https://cleanenroll.com")
+    reset_url = f"{app_base.rstrip('/')}/reset-password"
 
-    link = None
+    # Create a short-lived signed token containing the email and expiry
+    secret = os.getenv("RESET_TOKEN_SECRET", os.getenv("SECRET_KEY", "change-me"))
+    ttl_seconds = int(os.getenv("RESET_TOKEN_TTL", "900"))  # default 15 minutes
+    expires_at = int(time.time()) + ttl_seconds
+    payload = json.dumps({"email": req.email, "exp": expires_at}, separators=(",", ":")).encode("utf-8")
+    sig = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+    token = base64.urlsafe_b64encode(payload + b"." + sig).decode("utf-8").rstrip("=")
+
+    branded_link = f"{reset_url}?token={token}"
+
+    subject = "Reset your CleanEnroll password"
+    html = render_email("base.html", {
+        "subject": subject,
+        "preheader": "Create a new password to get back into your account.",
+        "title": "Reset your password",
+        "intro": "Click the button below to open the secure reset page. This link expires in 15 minutes.",
+        "content_html": "",
+        "cta_label": "Reset Password",
+        "cta_url": branded_link,
+    })
+
     try:
-        # Firebase Admin expects an ActionCodeSettings object, not a dict
-        acs = admin_auth.ActionCodeSettings(
-            url=continue_url,
-            handle_code_in_app=True,
-        )
-        link = admin_auth.generate_password_reset_link(
-            req.email,
-            action_code_settings=acs,
-        )
-    except Exception as e:
-        # Do not leak details; proceed without link, but warn in server logs
-        logger.warning("Password reset link generation failed for %s: %s", _mask_email(req.email), e)
-        link = None
-
-    if link:
-        subject = "Reset your CleanEnroll password"
-        html = render_email("base.html", {
-            "subject": subject,
-            "preheader": "Create a new password to get back into your account.",
-            "title": "Reset your password",
-            "intro": "We received a request to reset your password. Click the button below to choose a new one.",
-            "content_html": "",
-            "cta_label": "Reset Password",
-            "cta_url": link,
-        })
-
-        try:
-            send_email_html(req.email, subject, html)
-        except Exception as e:
-            # Do not leak mailer issues to client, but log on server
-            logger.exception("Failed to send password reset email")
+        send_email_html(req.email, subject, html)
+    except Exception:
+        logger.exception("Failed to send password reset email")
 
     # Always return ok to avoid user enumeration
     logger.info("Password reset responded ok for %s", _mask_email(req.email))
     return {"status": "ok"}
 
-# Explicit CORS preflight handler to prevent 405 from certain proxies/CDNs
+# Explicit CORS preflight handlers
 @router.options("/api/auth/password-reset")
 @router.options("/api/auth/password-reset/")
 async def password_reset_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+@router.post("/api/auth/password-reset/confirm")
+@router.post("/api/auth/password-reset/confirm/")
+async def password_reset_confirm(req: PasswordResetConfirmRequest):
+    """Verify token, update password in Firebase, and respond success without leaking existence."""
+    try:
+        _ensure_firebase_initialized()
+    except HTTPException:
+        logger.warning("Firebase Admin unavailable; skipping password update")
+        return {"status": "ok"}
+
+    # Verify token -> email
+    try:
+        email = _verify_reset_token(req.token)
+    except HTTPException as e:
+        # Still return ok to avoid enumeration, but log reason
+        logger.warning("Password reset confirm failed: %s", e.detail)
+        return {"status": "ok"}
+
+    # Lookup user and update password
+    try:
+        user = admin_auth.get_user_by_email(email)
+        admin_auth.update_user(user.uid, password=req.password)
+        logger.info("Password updated for %s", _mask_email(email))
+    except Exception as ex:
+        logger.warning("Password update failed for %s: %s", _mask_email(email), ex)
+        # Do not leak details
+        return {"status": "ok"}
+
+    return {"status": "ok"}
+
+@router.options("/api/auth/password-reset/confirm")
+@router.options("/api/auth/password-reset/confirm/")
+async def password_reset_confirm_options():
     return PlainTextResponse("", status_code=204, headers={
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, OPTIONS",

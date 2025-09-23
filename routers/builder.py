@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
 import logging
 from datetime import datetime
 import os
@@ -152,12 +152,17 @@ class Branding(BaseModel):
     logo: Optional[str] = None  # data URL or external URL
     logoPosition: Literal["top", "bottom"] = "top"
     logoSize: Literal["small", "medium", "large"] = "medium"
+    # New branding visuals support
+    headerImage: Optional[str] = None
+    visuals: Optional[List[Dict[str, Any]]] = []
 
 
 class ThemeSchema(BaseModel):
     primaryColor: str = "#4f46e5"
     backgroundColor: str = "#ffffff"
+    pageBackgroundColor: str = "#ffffff"
     textColor: str = "#111827"
+    titleColor: str = "#000000"
     inputBgColor: str = "#ffffff"
     inputTextColor: str = "#111827"
     inputBorderColor: str = "#d1d5db"
@@ -272,6 +277,7 @@ def _create_id() -> str:
 
 
 RECAPTCHA_SECRET = os.getenv("RECAPTCHA_SECRET_KEY") or os.getenv("RECAPTCHA_SECRET") or ""
+PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY") or ""
 
 def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
     if not RECAPTCHA_SECRET:
@@ -504,6 +510,67 @@ async def geo_check(form_id: str, request: Request):
     logger.debug("geo_check allowed id=%s ip=%s country=%s", form_id, ip, country)
     return {"allowed": True, "country": country}
 
+
+@router.get("/pixabay/search")
+async def pixabay_search(
+    q: str = Query("", description="Search query"),
+    transparent: bool = Query(False, description="Prefer transparent PNG illustrations"),
+    per_page: int = Query(24, ge=1, le=200),
+    order: str = Query("popular", regex="^(popular|latest)$"),
+    orientation: str = Query("horizontal", regex="^(all|horizontal|vertical)$"),
+):
+    """Proxy Pixabay search to avoid exposing API key to the client.
+    Returns subset of fields for each hit.
+    """
+    if not PIXABAY_API_KEY:
+        raise HTTPException(status_code=500, detail="Pixabay API not configured on server")
+    try:
+        query = (q or "").strip()
+        if not query:
+            query = "background" if transparent else "form"
+        image_type = "illustration" if transparent else "photo"
+        params = urllib.parse.urlencode({
+            "key": PIXABAY_API_KEY,
+            "q": query,
+            "image_type": image_type,
+            "safesearch": "true",
+            "per_page": str(int(per_page)),
+            "orientation": orientation,
+            "order": order,
+        })
+        url = f"https://pixabay.com/api/?{params}"
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+        data = json.loads(body)
+        hits = data.get("hits") or []
+        # If transparent requested, heuristically keep PNGs
+        if transparent:
+            def is_png(u: str) -> bool:
+                try:
+                    return str(u or "").lower().endswith(".png")
+                except Exception:
+                    return False
+            hits = [h for h in hits if is_png(h.get("largeImageURL") or h.get("webformatURL") or "")]
+        # Map to subset
+        out = []
+        for h in hits:
+            out.append({
+                "id": h.get("id"),
+                "tags": h.get("tags"),
+                "previewURL": h.get("previewURL"),
+                "webformatURL": h.get("webformatURL"),
+                "largeImageURL": h.get("largeImageURL"),
+                "pageURL": h.get("pageURL"),
+                "user": h.get("user"),
+                "userImageURL": h.get("userImageURL"),
+                "type": h.get("type"),
+            })
+        return {"total": data.get("total", 0), "totalHits": data.get("totalHits", 0), "hits": out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("pixabay_search error")
+        raise HTTPException(status_code=500, detail=f"Pixabay search failed: {e}")
 
 @router.post("/recaptcha/verify")
 async def recaptcha_verify(request: Request, payload: Dict = None):

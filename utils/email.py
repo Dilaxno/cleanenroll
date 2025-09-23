@@ -1,8 +1,5 @@
 import os
 import logging
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from datetime import datetime
 import json
@@ -16,11 +13,7 @@ except Exception:
     resend = None  # type: ignore
     _RESEND_AVAILABLE = False
 
-# Email configuration from environment
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
+# Email configuration from environment (Resend only)
 SMTP_FROM = os.getenv("SMTP_FROM", "no-reply@cleanenroll.com")
 
 # Resend configuration
@@ -52,92 +45,64 @@ def render_email(template_name: str, context: dict) -> str:
 
 def send_email_html(to_email: str, subject: str, html_body: str):
     """
-    Send email using Resend (preferred) or fallback to SMTP if Resend is not configured.
+    Send email using Resend only (no SMTP fallback).
 
     Environment variables:
-      - RESEND_API_KEY: If present, use Resend API
+      - RESEND_API_KEY: Required. Resend API key
       - RESEND_FROM: Optional custom from for Resend (defaults to SMTP_FROM)
-      - SMTP_*: Fallback SMTP credentials
     """
+    if not RESEND_API_KEY:
+        logger.error("Resend API key missing; cannot send email")
+        raise RuntimeError("Email is not configured. Provide RESEND_API_KEY.")
 
-    # Try Resend first if configured
-    if RESEND_API_KEY:
-        try:
-            if _RESEND_AVAILABLE:
-                resend.api_key = RESEND_API_KEY  # type: ignore[attr-defined]
-                payload = {
-                    "from": RESEND_FROM,
-                    "to": [to_email],
-                    "subject": subject,
-                    "html": html_body,
-                }
-                _elog(f"Using Resend SDK. From={RESEND_FROM}, To={to_email}")
-                result = resend.Emails.send(payload)  # type: ignore[attr-defined]
-                # result contains an id when accepted
-                msg_id = None
-                try:
-                    msg_id = result.get('id') if isinstance(result, dict) else getattr(result, 'id', None)
-                except Exception:
-                    msg_id = None
-                _elog(f"Resend accepted email id={msg_id or 'unknown'}")
-                return
-            else:
-                # Fallback to HTTP API if SDK not available
-                payload = {
-                    "from": RESEND_FROM,
-                    "to": [to_email],
-                    "subject": subject,
-                    "html": html_body,
-                }
-                _elog(f"Using Resend HTTP. From={RESEND_FROM}, To={to_email}")
-                req = urllib.request.Request(
-                    url="https://api.resend.com/emails",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {RESEND_API_KEY}",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if resp.status in (200, 201, 202):
-                        _elog(f"Resend accepted email with status {resp.status}")
-                        return
-                    _elog(f"Resend returned status {resp.status}, falling back to SMTP")
-        except urllib.error.HTTPError as e:
+    try:
+        if _RESEND_AVAILABLE:
+            resend.api_key = RESEND_API_KEY  # type: ignore[attr-defined]
+            payload = {
+                "from": RESEND_FROM,
+                "to": [to_email],
+                "subject": subject,
+                "html": html_body,
+            }
+            _elog(f"Using Resend SDK. From={RESEND_FROM}, To={to_email}")
+            result = resend.Emails.send(payload)  # type: ignore[attr-defined]
+            msg_id = None
             try:
-                body = e.read().decode("utf-8")
+                msg_id = result.get('id') if isinstance(result, dict) else getattr(result, 'id', None)
             except Exception:
-                body = str(e)
-            logger.warning("Resend HTTPError %s: %s", getattr(e, 'code', 'n/a'), body)
-        except Exception as ex:
-            logger.warning("Resend send failed: %s; falling back to SMTP", ex)
-
-    # Fallback to SMTP if Resend not configured or failed
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
-        logger.error("Email not configured: missing SMTP credentials and no RESEND_API_KEY")
-        raise RuntimeError(
-            "Email is not configured. Provide RESEND_API_KEY (preferred) or SMTP_HOST/SMTP_USER/SMTP_PASS."
-        )
-
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = SMTP_FROM
-    msg['To'] = to_email
-
-    # Plaintext fallback
-    msg.attach(MIMEText("This email requires an HTML-capable client.", 'plain', 'utf-8'))
-    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
-
-    _elog(f"Using SMTP provider host={SMTP_HOST} port={SMTP_PORT} user={'***' if SMTP_USER else ''}")
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-        server.ehlo()
+                msg_id = None
+            _elog(f"Resend accepted email id={msg_id or 'unknown'}")
+            return
+        else:
+            # HTTP API when SDK not installed
+            payload = {
+                "from": RESEND_FROM,
+                "to": [to_email],
+                "subject": subject,
+                "html": html_body,
+            }
+            _elog(f"Using Resend HTTP. From={RESEND_FROM}, To={to_email}")
+            req = urllib.request.Request(
+                url="https://api.resend.com/emails",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status in (200, 201, 202):
+                    _elog(f"Resend accepted email with status {resp.status}")
+                    return
+                raise RuntimeError(f"Resend returned unexpected status {resp.status}")
+    except urllib.error.HTTPError as e:
         try:
-            server.starttls()
-            _elog("SMTP STARTTLS successful")
-        except Exception as e:
-            logger.debug("SMTP STARTTLS skipped/failed: %s", e)
-        server.login(SMTP_USER, SMTP_PASS)
-        _elog("SMTP AUTH successful, sending message")
-        server.send_message(msg)
-        _elog("SMTP send complete")
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = str(e)
+        logger.warning("Resend HTTPError %s: %s", getattr(e, 'code', 'n/a'), body)
+        raise RuntimeError("Failed to send email via Resend")
+    except Exception as ex:
+        logger.exception("Resend send failed: %s", ex)
+        raise RuntimeError("Failed to send email via Resend")

@@ -993,13 +993,17 @@ async def dodo_webhook(request: Request):
         if admin_firestore is None:
             raise RuntimeError("Firestore client unavailable")
         fs = admin_firestore.client()
-        # Idempotency: if we've already seen this webhook-id, acknowledge and return
+        # Idempotency: if we've already seen this webhook-id and successfully updated user, acknowledge and return
         try:
             seen_ref = fs.collection("webhooks").document(webhook_id)
             seen_snap = seen_ref.get()
             if seen_snap.exists:
-                logger.info("[dodo-webhook] duplicate webhook-id=%s; skipping", webhook_id)
-                return {"status": "ok", "duplicate": True}
+                seen_data = seen_snap.to_dict()
+                if seen_data.get("updatedUser"):
+                    logger.info("[dodo-webhook] duplicate webhook-id=%s already processed successfully; skipping", webhook_id)
+                    return {"status": "ok", "duplicate": True}
+                else:
+                    logger.warning("[dodo-webhook] duplicate webhook-id=%s exists but user not updated; retrying", webhook_id)
             # Mark as seen (no user-specific info yet)
             seen_ref.set({
                 "receivedAt": admin_firestore.SERVER_TIMESTAMP,

@@ -21,6 +21,46 @@ except Exception:
 
 logger = logging.getLogger("backend.core")
 
+# Email deliverability validation utilities
+try:
+    from email_validator import validate_email as _validate_email, EmailNotValidError as _EmailNotValidError  # type: ignore
+    _EMAIL_VALIDATOR_AVAILABLE = True
+except Exception:
+    _EMAIL_VALIDATOR_AVAILABLE = False
+
+try:
+    import dns.resolver as _dns_resolver  # type: ignore
+    _DNSPY_AVAILABLE = True
+except Exception:
+    _dns_resolver = None  # type: ignore
+    _DNSPY_AVAILABLE = False
+
+# Rate limiter shared instance
+try:
+    from ..utils.limiter import limiter  # type: ignore
+except Exception:
+    from utils.limiter import limiter  # type: ignore
+
+
+def _mx_lookup(domain: str) -> list[str]:
+    """Return list of MX hosts for a domain using dnspython; empty if none or on error."""
+    if not _DNSPY_AVAILABLE:
+        return []
+    try:
+        answers = _dns_resolver.resolve(domain, "MX", lifetime=2.0)  # type: ignore
+        hosts: list[str] = []
+        for rdata in answers:
+            try:
+                host = str(rdata.exchange).rstrip(".")
+                if host:
+                    hosts.append(host)
+            except Exception:
+                continue
+        hosts.sort()
+        return hosts
+    except Exception:
+        return []
+
 # Email + Firebase Admin
 try:
     # When running as a package (e.g., backend.*)
@@ -239,6 +279,73 @@ async def password_reset_confirm_options():
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
     })
 
+
+@router.get("/api/validate-email")
+@router.get("/api/validate-email/")
+@limiter.limit("30/minute")
+async def validate_email_deliverability(email: str, request: Request):
+    """Validate email syntax and MX deliverability in real time.
+    Returns a JSON payload with syntax_valid, has_mx, deliverable, and mx_hosts.
+    """
+    raw = (email or "").strip()
+    result = {
+        "input": raw,
+        "normalized": "",
+        "syntax_valid": False,
+        "deliverable": False,
+        "has_mx": False,
+        "mx_hosts": [],
+        "reason": "",
+    }
+    if not raw:
+        result["reason"] = "Email is required"
+        return result
+
+    domain = ""
+
+    # Prefer email-validator if available (does syntax + deliverability checks)
+    if _EMAIL_VALIDATOR_AVAILABLE:
+        try:
+            info = _validate_email(raw, check_deliverability=True)  # type: ignore
+            result["syntax_valid"] = True
+            try:
+                result["normalized"] = getattr(info, "normalized", None) or getattr(info, "email", "")  # type: ignore
+            except Exception:
+                result["normalized"] = raw
+            domain = (getattr(info, "domain", "") or getattr(info, "ascii_domain", "") or "")
+        except _EmailNotValidError as e:  # type: ignore
+            result["reason"] = str(e)
+            try:
+                domain = raw.split("@", 1)[1]
+            except Exception:
+                domain = ""
+        except Exception as e:
+            result["reason"] = f"Validation error: {e}"
+            try:
+                domain = raw.split("@", 1)[1]
+            except Exception:
+                domain = ""
+    else:
+        # Fallback basic syntax check
+        if "@" in raw and "." in raw.split("@")[-1]:
+            result["syntax_valid"] = True
+            try:
+                domain = raw.split("@", 1)[1]
+            except Exception:
+                domain = ""
+        else:
+            result["reason"] = "Invalid email format"
+            return result
+
+    # Explicit MX check via dnspython to surface MX hosts in response
+    mx_hosts = _mx_lookup(domain) if domain else []
+    result["mx_hosts"] = mx_hosts
+    result["has_mx"] = len(mx_hosts) > 0
+    result["deliverable"] = bool(result["syntax_valid"] and result["has_mx"])
+    if not result["deliverable"] and not result["reason"]:
+        result["reason"] = "No MX records found for domain"
+
+    return result
 
 # -----------------------------
 # Utility helpers

@@ -990,7 +990,7 @@ async def dodo_webhook(request: Request):
                     return v
         return None
 
-    uid_keys = ["user_uid", "uid", "userId", "firebase_uid", "user_id"]
+    uid_keys = ["user_uid", "uid", "userId", "firebase_uid", "user_id", "userUID", "userUid", "firebaseUid"]
     user_id = _first_key(metadata, uid_keys) or _first_key(query_params, uid_keys)
 
     customer = data.get("customer") or {}
@@ -1052,7 +1052,18 @@ async def dodo_webhook(request: Request):
                 resolved_uid = user_rec.uid
                 logger.info("[dodo-webhook] resolved uid via customer_email")
             except Exception:
-                logger.warning("[dodo-webhook] could not resolve uid by email")
+                logger.warning("[dodo-webhook] could not resolve uid by email via Firebase Auth; trying Firestore lookup")
+        # Secondary fallback: lookup Firestore users collection by email
+        if not resolved_uid and customer_email and admin_firestore is not None:
+            try:
+                fs = admin_firestore.client()
+                q = fs.collection("users").where("email", "==", customer_email).limit(1)
+                docs = list(q.stream())
+                if docs:
+                    resolved_uid = docs[0].id
+                    logger.info("[dodo-webhook] resolved uid via Firestore email match")
+            except Exception:
+                logger.warning("[dodo-webhook] Firestore email lookup failed")
         if not resolved_uid:
             logger.warning("[dodo-webhook] missing uid in metadata/query_params and could not resolve by email; rejecting")
             raise HTTPException(status_code=400, detail="Missing user UID; not resolvable")

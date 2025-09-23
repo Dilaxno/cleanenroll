@@ -1,8 +1,4 @@
 from fastapi import APIRouter, HTTPException, Query, Request
-from slowapi.util import get_remote_address
-from slowapi import Limiter
-from slowapi.errors import RateLimitExceeded
-from slowapi.decorator import limiter as limiter_decorator
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Literal
 import logging
@@ -103,12 +99,11 @@ _GEOIP_AVAILABLE = _GEOIP_IMPORTED and Path(GEOIP_DB_PATH).exists()
 
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
 
-# Use the global limiter from app.state if available
-limiter: Limiter | None = None
+# Use the shared limiter instance configured in utils.limiter
 try:
-    from fastapi import FastAPI
+    from ..utils.limiter import limiter  # type: ignore
 except Exception:
-    FastAPI = None  # type: ignore 
+    from utils.limiter import limiter  # type: ignore
 
 # Storage
 BACKING_DIR = os.path.join(os.getcwd(), "data", "forms")
@@ -551,7 +546,7 @@ async def notify_submission(payload: Dict = None):
     return {"success": True}
 
 @router.post("/forms/{form_id}/submit")
-@limiter_decorator.limit("5/minute")
+@limiter.limit("5/minute")
 async def submit_form(form_id: str, request: Request, payload: Dict = None):
     """Simple submission endpoint that enforces country restrictions.
     On success returns {success: True, message, redirectUrl?}.

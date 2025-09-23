@@ -136,8 +136,9 @@ async def send_password_reset_email(req: PasswordResetRequest):
                 "handle_code_in_app": True,
             },
         )
-    except Exception:
-        # Do not leak details; proceed without link
+    except Exception as e:
+        # Do not leak details; proceed without link, but warn in server logs
+        logger.warning("Password reset link generation failed for %s: %s", _mask_email(req.email), e)
         link = None
 
     if link:

@@ -1,6 +1,6 @@
 import os
 import logging
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, select_autoescape, TemplateNotFound
 from datetime import datetime
 import json
 import urllib.request
@@ -30,14 +30,35 @@ def _elog(msg: str):
     if EMAIL_DEBUG:
         logger.debug(msg)
 
+from pathlib import Path
+
+# Build robust template search paths (CWD-based, file-based, and env override)
+template_search_paths = []
+try:
+    template_search_paths.append(str((Path(os.getcwd()).resolve() / "backend" / "templates" / "email")))
+except Exception:
+    pass
+try:
+    template_search_paths.append(str((Path(__file__).resolve().parents[1] / "templates" / "email")))
+except Exception:
+    pass
+_env_dir = os.getenv("EMAIL_TEMPLATE_DIR")
+if _env_dir:
+    template_search_paths.append(_env_dir)
+
+_elog(f"Email template search paths: {template_search_paths}")
 _templates_env = Environment(
-    loader=FileSystemLoader(os.path.join(os.getcwd(), "backend", "templates", "email")),
+    loader=FileSystemLoader(template_search_paths),
     autoescape=select_autoescape(["html", "xml"]),
 )
 
 
 def render_email(template_name: str, context: dict) -> str:
-    template = _templates_env.get_template(template_name)
+    try:
+        template = _templates_env.get_template(template_name)
+    except TemplateNotFound as e:
+        logger.error("Email template '%s' not found. Paths searched: %s", template_name, template_search_paths)
+        raise
     base_context = {"year": datetime.utcnow().year}
     base_context.update(context or {})
     return template.render(**base_context)

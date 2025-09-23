@@ -1018,13 +1018,23 @@ async def dodo_webhook(request: Request):
         # Fail explicitly on server misconfiguration
         raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
 
-    # Resolve UID (strict)
+    # Resolve UID (try metadata/query_params, then fallback via customer email)
     resolved_uid = None
-    if not user_id:
-        logger.warning("[dodo-webhook] missing uid in metadata/query_params; rejecting")
-        raise HTTPException(status_code=400, detail="Missing user UID in webhook metadata/query_params")
-    logger.info("[dodo-webhook] uid found in metadata/query_params")
-    resolved_uid = user_id
+    if user_id:
+        logger.info("[dodo-webhook] uid found in metadata/query_params")
+        resolved_uid = user_id
+    else:
+        # Fallback: try mapping by customer email using Firebase Admin
+        if customer_email and _FB_AVAILABLE:
+            try:
+                user_rec = admin_auth.get_user_by_email(customer_email)
+                resolved_uid = user_rec.uid
+                logger.info("[dodo-webhook] resolved uid via customer_email")
+            except Exception:
+                logger.warning("[dodo-webhook] could not resolve uid by email")
+        if not resolved_uid:
+            logger.warning("[dodo-webhook] missing uid in metadata/query_params and could not resolve by email; rejecting")
+            raise HTTPException(status_code=400, detail="Missing user UID; not resolvable")
 
     # Determine plan (from metadata/query_params if present)
     plan = (
@@ -1052,7 +1062,7 @@ async def dodo_webhook(request: Request):
                 "requested_plan": plan,
             },
         }
-        logger.info("[dodo-webhook] updating Firestore: users/%s -> pro", resolved_uid)
+        logger.info("[dodo-webhook] updating Firestore: users/%s -> %s", resolved_uid, plan)
         user_ref.set(update, merge=True)
         # Enrich idempotency record with mapping info
         try:

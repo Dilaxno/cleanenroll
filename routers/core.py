@@ -957,6 +957,27 @@ async def dodo_webhook(request: Request):
     metadata = data.get("metadata", {}) or payload.get("metadata", {}) or {}
     query_params = data.get("query_params", {}) or {}
 
+    # Support flattened metadata keys like metadata_user_uid, metadata_plan
+    if (not isinstance(metadata, dict)) or (not metadata):
+        try:
+            def _extract_flat_metadata(container: dict) -> dict:
+                md: dict = {}
+                if isinstance(container, dict):
+                    for k, v in container.items():
+                        if isinstance(k, str) and k.startswith("metadata_"):
+                            key = k[len("metadata_"):]
+                            if key:
+                                md[key] = v
+                return md
+            flat_meta = _extract_flat_metadata(data)
+            if not flat_meta:
+                flat_meta = _extract_flat_metadata(payload)
+            if flat_meta:
+                metadata = {**(metadata if isinstance(metadata, dict) else {}), **flat_meta}
+                logger.debug("[dodo-webhook] reconstructed metadata from flattened keys: %s", list(metadata.keys()))
+        except Exception:
+            pass
+
     # Attempt to derive identifiers (prefer explicit UID over email)
     def _first_key(d: dict, keys: list[str]):
         for k in keys:

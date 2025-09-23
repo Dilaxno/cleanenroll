@@ -9,6 +9,12 @@ import uuid
 import urllib.parse
 import urllib.request
 
+# Email sender (Resend preferred)
+try:
+    from ..utils.email import send_email_html  # type: ignore
+except Exception:
+    from utils.email import send_email_html  # type: ignore
+
 # Email validation
 from email_validator import validate_email as _validate_email, EmailNotValidError as _EmailNotValidError
 
@@ -502,6 +508,35 @@ async def recaptcha_verify(request: Request, payload: Dict = None):
     if not ok:
         raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
     logger.info("recaptcha verified success ip=%s", client_ip)
+    return {"success": True}
+
+@router.post("/notify-submission")
+async def notify_submission(payload: Dict = None):
+    """Send a submission notification email using Resend (or SMTP fallback).
+    Expected payload: { to: str, subject?: str, html?: str, formTitle?: str, summary?: str }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    to = (payload.get("to") or "").strip()
+    if not to:
+        raise HTTPException(status_code=400, detail="Missing 'to' email")
+    subject = (payload.get("subject") or f"New form submission").strip()
+    html = payload.get("html")
+    if not html:
+        form_title = (payload.get("formTitle") or "").strip() or "Form"
+        summary = (payload.get("summary") or "A new submission was received.").strip()
+        html = f"""
+        <div style='font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;'>
+          <h2 style='margin:0 0 10px'>New submission: {form_title}</h2>
+          <p style='margin:0 0 12px;color:#374151'>{summary}</p>
+          <p style='margin:12px 0 0;color:#6b7280;font-size:12px'>This is an automated notification.</p>
+        </div>
+        """
+    try:
+        send_email_html(to, subject, html)
+    except Exception as e:
+        logger.exception("notify_submission send failed to=%s", to)
+        raise HTTPException(status_code=500, detail=f"Failed to send: {e}")
     return {"success": True}
 
 @router.post("/forms/{form_id}/submit")

@@ -9,3 +9,6 @@ Jinja2>=3.1.4
 
 # Signature verification per Standard Webhooks
 standardwebhooks>=0.4.1
+
+# Email provider SDK (Resend)
+resend>=2.0.0

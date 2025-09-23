@@ -9,6 +9,13 @@ import json
 import urllib.request
 import urllib.error
 
+try:
+    import resend  # type: ignore
+    _RESEND_AVAILABLE = True
+except Exception:
+    resend = None  # type: ignore
+    _RESEND_AVAILABLE = False
+
 # Email configuration from environment
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -56,40 +63,55 @@ def send_email_html(to_email: str, subject: str, html_body: str):
     # Try Resend first if configured
     if RESEND_API_KEY:
         try:
-            payload = {
-                "from": RESEND_FROM,
-                "to": [to_email],
-                "subject": subject,
-                "html": html_body,
-            }
-            _elog(f"Using Resend provider. From={RESEND_FROM}, To={to_email}")
-            req = urllib.request.Request(
-                url="https://api.resend.com/emails",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {RESEND_API_KEY}",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                # 200/201 are considered success by Resend
-                if resp.status not in (200, 201, 202):
-                    # fall through to SMTP
+            if _RESEND_AVAILABLE:
+                resend.api_key = RESEND_API_KEY  # type: ignore[attr-defined]
+                payload = {
+                    "from": RESEND_FROM,
+                    "to": [to_email],
+                    "subject": subject,
+                    "html": html_body,
+                }
+                _elog(f"Using Resend SDK. From={RESEND_FROM}, To={to_email}")
+                result = resend.Emails.send(payload)  # type: ignore[attr-defined]
+                # result contains an id when accepted
+                msg_id = None
+                try:
+                    msg_id = result.get('id') if isinstance(result, dict) else getattr(result, 'id', None)
+                except Exception:
+                    msg_id = None
+                _elog(f"Resend accepted email id={msg_id or 'unknown'}")
+                return
+            else:
+                # Fallback to HTTP API if SDK not available
+                payload = {
+                    "from": RESEND_FROM,
+                    "to": [to_email],
+                    "subject": subject,
+                    "html": html_body,
+                }
+                _elog(f"Using Resend HTTP. From={RESEND_FROM}, To={to_email}")
+                req = urllib.request.Request(
+                    url="https://api.resend.com/emails",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {RESEND_API_KEY}",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status in (200, 201, 202):
+                        _elog(f"Resend accepted email with status {resp.status}")
+                        return
                     _elog(f"Resend returned status {resp.status}, falling back to SMTP")
-                else:
-                    _elog(f"Resend accepted email with status {resp.status}")
-                    return
         except urllib.error.HTTPError as e:
-            # Log and fall back to SMTP
             try:
                 body = e.read().decode("utf-8")
             except Exception:
                 body = str(e)
             logger.warning("Resend HTTPError %s: %s", getattr(e, 'code', 'n/a'), body)
         except Exception as ex:
-            # Fall back to SMTP silently
-            logger.warning("Resend request failed: %s; falling back to SMTP", ex)
+            logger.warning("Resend send failed: %s; falling back to SMTP", ex)
 
     # Fallback to SMTP if Resend not configured or failed
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS):

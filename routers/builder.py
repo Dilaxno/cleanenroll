@@ -166,6 +166,9 @@ class ThemeSchema(BaseModel):
     inputBorderWidth: int = 1
     inputBorderStyle: Literal["none", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset"] = "solid"
     inputBorderSide: Literal["all", "top", "right", "bottom", "left"] = "all"
+    # Thank-you screen colors
+    thankYouBgColor: str = "#ecfdf5"
+    thankYouTextColor: str = "#065f46"
 
 
 class RedirectConfig(BaseModel):

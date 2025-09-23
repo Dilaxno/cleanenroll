@@ -217,6 +217,9 @@ class FormConfig(BaseModel):
     redirect: RedirectConfig = RedirectConfig()
     emailValidationEnabled: bool = False
     recaptchaEnabled: bool = False
+    gdprComplianceEnabled: bool = False
+    passwordProtectionEnabled: bool = False
+    passwordHash: Optional[str] = None
     preventDuplicateByUID: bool = False
     isPublished: bool = False
     submitButton: SubmitButton = SubmitButton()
@@ -556,6 +559,27 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         raise HTTPException(status_code=404, detail="Form not found")
 
     form_data = _read_json(path)
+
+    # Password protection enforcement
+    try:
+        if bool(form_data.get("passwordProtectionEnabled")) and form_data.get("passwordHash"):
+            supplied = None
+            if isinstance(payload, dict):
+                try:
+                    supplied = (payload.get("_password") or payload.get("password") or "").strip()
+                except Exception:
+                    supplied = None
+            if not supplied:
+                raise HTTPException(status_code=401, detail="Password required to submit the form")
+            import hashlib
+            h = hashlib.sha256(supplied.encode("utf-8")).hexdigest()
+            if h != str(form_data.get("passwordHash")):
+                raise HTTPException(status_code=403, detail="Invalid password")
+    except HTTPException:
+        raise
+    except Exception:
+        # Do not leak details
+        raise HTTPException(status_code=400, detail="Password verification failed")
 
     # Geo restriction enforcement
     restricted = _normalize_country_list(form_data.get("restrictedCountries") or [])

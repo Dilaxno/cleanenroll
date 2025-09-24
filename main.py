@@ -32,6 +32,51 @@ except Exception:
 
 app = FastAPI(title="CleanEnroll API")
 
+# Production-safe error responses
+from fastapi import Request, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+
+def _is_production() -> bool:
+    return (os.getenv("ENV") or os.getenv("APP_ENV") or os.getenv("NODE_ENV") or "").lower() == "production"
+
+def _safe_message(status_code: int) -> str:
+    mapping = {
+        400: "Invalid request.",
+        401: "Unauthorized.",
+        403: "Action not allowed.",
+        404: "Not found.",
+        405: "Method not allowed.",
+        409: "Conflict.",
+        413: "Request too large.",
+        415: "Unsupported request.",
+        422: "Invalid request.",
+        429: "Too many requests.",
+        500: "Something went wrong. Please try again.",
+        502: "Temporary service issue. Please try again.",
+        503: "Service unavailable. Please try again.",
+        504: "Timeout. Please try again.",
+    }
+    return mapping.get(int(status_code or 500), "Something went wrong. Please try again.")
+
+@app.exception_handler(HTTPException)
+async def http_exception_sanitizer(request: Request, exc: HTTPException):
+    if _is_production():
+        # Preserve status code; sanitize message
+        return JSONResponse(status_code=exc.status_code, content={"detail": _safe_message(exc.status_code)})
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc.detail) if getattr(exc, "detail", None) else _safe_message(exc.status_code)})
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Always sanitize validation errors
+    status = 422
+    return JSONResponse(status_code=status, content={"detail": _safe_message(status)})
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logging.getLogger("backend").exception("Unhandled error")
+    return JSONResponse(status_code=500, content={"detail": _safe_message(500)})
+
 # Import shared forwarded_for_ip and limiter
 try:
     from .utils.limiter import forwarded_for_ip, limiter  # type: ignore

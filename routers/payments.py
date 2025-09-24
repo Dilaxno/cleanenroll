@@ -97,11 +97,17 @@ async def create_dodo_checkout(request: Request, payload: Dict):
         # Prepare auth headers (supports either Authorization: Bearer <key> or custom header via DODO_AUTH_HEADER)
         auth_header = os.getenv("DODO_AUTH_HEADER", "Authorization")
         auth_scheme = os.getenv("DODO_AUTH_SCHEME", "Bearer")
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": os.getenv("OUTBOUND_USER_AGENT", "CleanEnroll/1.0 payments (+https://cleanenroll.com)"),
+        }
         if auth_header.lower() == "authorization":
             headers["Authorization"] = f"{auth_scheme} {dodo_api_key}".strip()
         else:
             headers[auth_header] = dodo_api_key
+
+        logger.debug("[dodo-checkout] POST %s auth_header=%s scheme=%s", dodo_url, auth_header, auth_scheme)
 
         req = urllib.request.Request(
             url=dodo_url,

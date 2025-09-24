@@ -9,6 +9,7 @@ import uuid
 import urllib.parse
 import urllib.request
 import re
+import shutil
 try:
     import dns.resolver  # type: ignore
     _DNS_AVAILABLE = True
@@ -418,6 +419,13 @@ async def delete_form(form_id: str):
         raise HTTPException(status_code=404, detail="Form not found")
     try:
         os.remove(path)
+        # Also remove stored responses for this form (best-effort)
+        try:
+            resp_dir = os.path.join(RESPONSES_BASE_DIR, form_id)
+            if os.path.exists(resp_dir):
+                shutil.rmtree(resp_dir)
+        except Exception:
+            logger.exception("failed to delete responses for form %s", form_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
     logger.info("form deleted id=%s", form_id)

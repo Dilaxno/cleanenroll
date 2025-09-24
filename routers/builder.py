@@ -173,6 +173,9 @@ class FormConfig(BaseModel):
     branding: Branding = Branding()
     fields: List[FieldSchema] = []
     restrictedCountries: Optional[List[str]] = []  # ISO alpha-2 codes (e.g., ["US","FR"]) uppercased
+    # Duplicate submission prevention by IP
+    preventDuplicateByIP: bool = False
+    duplicateWindowHours: int = 24  # time window to consider duplicates
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
@@ -629,6 +632,9 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         # Do not leak details
         raise HTTPException(status_code=400, detail="Password verification failed")
 
+    # Determine client IP
+    ip = _client_ip(request)
+
     # Geo restriction enforcement
     restricted = _normalize_country_list(form_data.get("restrictedCountries") or [])
     if restricted:
@@ -636,6 +642,42 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         _, country = _country_from_ip(ip)
         if country and country in restricted:
             raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+
+    # Duplicate submission check by IP within a time window
+    if bool(form_data.get("preventDuplicateByIP")):
+        try:
+            window_hours = int(form_data.get("duplicateWindowHours") or 24)
+        except Exception:
+            window_hours = 24
+        try:
+            from datetime import timedelta
+            threshold = datetime.utcnow() - timedelta(hours=max(1, window_hours))
+            # Ensure IP is available
+            ip = ip or _client_ip(request)
+            if ip:
+                dir_path = _responses_dir(form_id)
+                if os.path.exists(dir_path):
+                    for name in os.listdir(dir_path):
+                        if not name.endswith(".json"):
+                            continue
+                        fpath = os.path.join(dir_path, name)
+                        try:
+                            rec = _read_json(fpath)
+                            rec_ip = rec.get("clientIp") or rec.get("ip") or None
+                            ts = rec.get("submittedAt") or ""
+                            if rec_ip == ip:
+                                dt = datetime.fromisoformat(ts)
+                                if dt >= threshold:
+                                    raise HTTPException(status_code=429, detail="Duplicate submission detected from this IP. Please try again later.")
+                        except HTTPException:
+                            raise
+                        except Exception:
+                            continue
+        except HTTPException:
+            raise
+        except Exception:
+            # Fail open on dedupe errors
+            pass
 
     # reCAPTCHA verification when enabled
     if form_data.get("recaptchaEnabled"):
@@ -713,6 +755,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             "responseId": response_id,
             "formId": form_id,
             "submittedAt": submitted_at,
+            "clientIp": ip,
             "answers": answers,
         }
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)

@@ -82,14 +82,23 @@ async def create_dodo_checkout(request: Request, payload: Dict):
         quantity = 1
     plan = str(payload.get("plan") or "pro").strip() or "pro"
 
+    # Determine the return URL for post-payment redirection
+    return_url = (
+        str(payload.get("return_url") or "").strip()
+        or str(payload.get("redirect_url") or "").strip()
+        or os.getenv("RETURN_URL")
+        or os.getenv("CHECKOUT_REDIRECT_URL")
+        or ""
+    )
+
     body = {
         "product_cart": [{"product_id": product_id, "quantity": quantity}],
         "metadata": {
             "user_uid": uid,
             "plan": plan,
         },
-        # optional redirect URL can be provided by client; fallback to env
-        "redirect_url": payload.get("redirect_url") or os.getenv("CHECKOUT_REDIRECT_URL") or "",
+        # provider requires 'return_url' for redirect after checkout completion
+        "return_url": return_url,
     }
 
     # Make request to Dodo API

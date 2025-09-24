@@ -362,7 +362,7 @@ async def list_forms(userId: Optional[str] = Query(default=None, description="Fi
 async def create_form(cfg: FormConfig):
     _validate_form(cfg)
     now = datetime.utcnow().isoformat()
-    form_id = _create_id()
+    form_id = (cfg.id or "").strip() or _create_id()
     data = cfg.dict()
     # Preserve provided step values; default missing/invalid to 1
     for f in data.get("fields") or []:

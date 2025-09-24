@@ -18,92 +18,18 @@ except Exception:
 # Email validation
 from email_validator import validate_email as _validate_email, EmailNotValidError as _EmailNotValidError
 
-# GeoIP
-import os
+# GeoIP via ip2geotools (no local database required)
 from typing import Tuple
-from pathlib import Path
-import tarfile
-
 try:
-    import geoip2.database  # type: ignore
-    _GEOIP_IMPORTED = True
+    from ip2geotools.databases.noncommercial import DbIpCity  # type: ignore
+    _GEO_LOOKUP_AVAILABLE = True
 except Exception:
-    geoip2 = None  # type: ignore
-    _GEOIP_IMPORTED = False
+    DbIpCity = None  # type: ignore
+    _GEO_LOOKUP_AVAILABLE = False
 
 # Logger
 logger = logging.getLogger("backend.builder")
 
-
-def _resolve_geoip_db_path() -> str:
-    r"""Resolve a usable .mmdb path.
-    Priority:
-      1) GEOIP_DB_PATH env var if it points to an existing .mmdb
-      2) GEOIP_DB_PATH env var as a .tar.gz archive -> extract first .mmdb found
-      3) Default archive path D:\CleanEnroll\GeoLite2-City_20250919.tar.gz -> extract
-      4) Fallback to data/GeoLite2-Country.mmdb
-    """
-    env_path = os.getenv("GEOIP_DB_PATH")
-    candidates = [env_path] if env_path else []
-    candidates.append("D:\\CleanEnroll\\GeoLite2-City_20250919.tar.gz")
-
-    # Helper to extract .mmdb from archive
-    def extract_from_archive(archive_path: Path) -> str:
-        try:
-            extract_root = Path(os.getcwd()) / "data" / "geoip"
-            extract_root.mkdir(parents=True, exist_ok=True)
-            # Extract only .mmdb entries safely
-            with tarfile.open(str(archive_path), "r:gz") as tar:
-                # Find first .mmdb member
-                mmdb_member = next((m for m in tar.getmembers() if m.name.lower().endswith(".mmdb")), None)
-                if not mmdb_member:
-                    return ""
-                # Normalize target filename
-                target = extract_root / Path(mmdb_member.name).name
-                if not target.exists():
-                    # Extract to temp dir then move specific file
-                    tar.extract(mmdb_member, path=str(extract_root))
-                    extracted_path = extract_root / mmdb_member.name
-                    # If extracted nested, move into extract_root
-                    if extracted_path.exists() and extracted_path.is_file():
-                        extracted_path.rename(target)
-                    elif extracted_path.exists() and extracted_path.is_dir():
-                        for p in extracted_path.rglob("*.mmdb"):
-                            p.rename(extract_root / p.name)
-                            target = extract_root / p.name
-                            break
-                return str(target)
-        except Exception:
-            return ""
-
-    # Try candidates
-    for c in candidates:
-        if not c:
-            continue
-        p = Path(c)
-        # .mmdb direct
-        if p.suffix.lower() == ".mmdb" and p.exists():
-            return str(p)
-        # .tar.gz
-        if str(p).lower().endswith(".tar.gz") and p.exists():
-            resolved = extract_from_archive(p)
-            if resolved and Path(resolved).exists():
-                return resolved
-
-    # Fallback
-    return str(Path(os.getcwd()) / "data" / "GeoLite2-Country.mmdb")
-
-
-GEOIP_DB_PATH = _resolve_geoip_db_path()
-_GEOIP_AVAILABLE = _GEOIP_IMPORTED and Path(GEOIP_DB_PATH).exists()
-
-router = APIRouter(prefix="/api/builder", tags=["builder"]) 
-
-# Use the shared limiter instance configured in utils.limiter
-try:
-    from ..utils.limiter import limiter  # type: ignore
-except Exception:
-    from utils.limiter import limiter  # type: ignore
 
 # Storage
 BACKING_DIR = os.path.join(os.getcwd(), "data", "forms")
@@ -331,17 +257,12 @@ def _client_ip(request: Request) -> str:
 
 
 def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
-    if not _GEOIP_AVAILABLE:
-        return False, None
-    if not ip:
-        return False, None
-    if not os.path.exists(GEOIP_DB_PATH):
+    if not _GEO_LOOKUP_AVAILABLE or not ip:
         return False, None
     try:
-        with geoip2.database.Reader(GEOIP_DB_PATH) as reader:  # type: ignore
-            resp = reader.country(ip)
-            code = (resp.country.iso_code or "").upper() if resp and resp.country else None
-            return True, code
+        result = DbIpCity.get(ip, api_key="free")  # type: ignore
+        code = (getattr(result, "country", None) or "").upper()
+        return True, code or None
     except Exception:
         return False, None
 
@@ -349,6 +270,14 @@ def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
 # -----------------------------
 # Routes
 # -----------------------------
+
+router = APIRouter(prefix="/api/builder", tags=["builder"]) 
+
+# Use the shared limiter instance configured in utils.limiter
+try:
+    from ..utils.limiter import limiter  # type: ignore
+except Exception:
+    from utils.limiter import limiter  # type: ignore
 
 @router.get("/forms")
 async def list_forms(userId: Optional[str] = Query(default=None, description="Filter by userId")):

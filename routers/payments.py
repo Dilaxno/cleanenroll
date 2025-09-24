@@ -20,6 +20,7 @@ except Exception:
     _FB_AVAILABLE = False
 
 import urllib.request
+import urllib.error
 
 
 def _verify_id_token_from_header(request: Request) -> Optional[str]:
@@ -93,13 +94,19 @@ async def create_dodo_checkout(request: Request, payload: Dict):
 
     # Make request to Dodo API
     try:
+        # Prepare auth headers (supports either Authorization: Bearer <key> or custom header via DODO_AUTH_HEADER)
+        auth_header = os.getenv("DODO_AUTH_HEADER", "Authorization")
+        auth_scheme = os.getenv("DODO_AUTH_SCHEME", "Bearer")
+        headers = {"Content-Type": "application/json"}
+        if auth_header.lower() == "authorization":
+            headers["Authorization"] = f"{auth_scheme} {dodo_api_key}".strip()
+        else:
+            headers[auth_header] = dodo_api_key
+
         req = urllib.request.Request(
             url=dodo_url,
             data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {dodo_api_key}",
-            },
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -115,6 +122,16 @@ async def create_dodo_checkout(request: Request, payload: Dict):
             return data
     except HTTPException:
         raise
+    except urllib.error.HTTPError as he:  # type: ignore[attr-defined]
+        try:
+            err_body = he.read().decode("utf-8", errors="replace")  # type: ignore[call-arg]
+        except Exception:
+            err_body = ""
+        logger.warning("[dodo-checkout] HTTPError status=%s body=%s", getattr(he, 'code', 'n/a'), err_body[:500])
+        raise HTTPException(status_code=502, detail=f"Checkout provider error ({getattr(he, 'code', 'n/a')})")
+    except urllib.error.URLError as ue:  # type: ignore[attr-defined]
+        logger.warning("[dodo-checkout] URLError reason=%s", getattr(ue, 'reason', ue))
+        raise HTTPException(status_code=502, detail="Checkout provider unreachable")
     except Exception as e:
         logger.exception("[dodo-checkout] request failed")
         raise HTTPException(status_code=502, detail="Checkout provider error")

@@ -8,6 +8,13 @@ import json
 import uuid
 import urllib.parse
 import urllib.request
+import re
+try:
+    import dns.resolver  # type: ignore
+    _DNS_AVAILABLE = True
+except Exception:
+    dns = None  # type: ignore
+    _DNS_AVAILABLE = False
 
 # Email sender (Resend preferred)
 try:
@@ -176,6 +183,9 @@ class FormConfig(BaseModel):
     # Duplicate submission prevention by IP
     preventDuplicateByIP: bool = False
     duplicateWindowHours: int = 24  # time window to consider duplicates
+    # Custom domain configuration
+    customDomain: Optional[str] = None
+    customDomainVerified: bool = False
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
@@ -222,6 +232,8 @@ def _create_id() -> str:
 
 RECAPTCHA_SECRET = os.getenv("RECAPTCHA_SECRET_KEY") or os.getenv("RECAPTCHA_SECRET") or ""
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY") or ""
+# Custom domain target for CNAME verification
+CUSTOM_DOMAIN_TARGET = (os.getenv("CUSTOM_DOMAIN_TARGET") or "cname.cleanenroll.com").strip('.').lower()
 
 def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
     if not RECAPTCHA_SECRET:
@@ -246,6 +258,19 @@ def _normalize_country_list(codes: Optional[List[str]]) -> List[str]:
     if not codes:
         return []
     return [str(c).strip().upper() for c in codes if str(c).strip()]
+
+
+def _normalize_domain(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    try:
+        d = str(s).strip().lower()
+        d = re.sub(r"^https?://", "", d)
+        d = d.split("/")[0]
+        d = d.strip('.')
+        return d or None
+    except Exception:
+        return None
 
 
 def _client_ip(request: Request) -> str:
@@ -324,6 +349,9 @@ async def create_form(cfg: FormConfig):
     data["createdAt"] = now
     data["updatedAt"] = now
     data["isPublished"] = bool(data.get("isPublished", False))
+    # Custom domain normalization
+    data["customDomain"] = _normalize_domain(data.get("customDomain"))
+    data["customDomainVerified"] = bool(data.get("customDomainVerified")) and bool(data.get("customDomain"))
     _write_json(_form_path(form_id), data)
 
     embed_url = f"/embed/{form_id}"
@@ -360,6 +388,14 @@ async def update_form(form_id: str, cfg: FormConfig):
     data["restrictedCountries"] = _normalize_country_list(data.get("restrictedCountries") or [])
     data["id"] = form_id
     prev = _read_json(path)
+    # Normalize custom domain and reset verification if changed
+    incoming_domain = _normalize_domain(data.get("customDomain"))
+    prev_domain = _normalize_domain(prev.get("customDomain"))
+    data["customDomain"] = incoming_domain
+    if incoming_domain != prev_domain:
+        data["customDomainVerified"] = False
+    else:
+        data["customDomainVerified"] = bool(prev.get("customDomainVerified"))
     # Preserve published state if not explicitly provided
     existing_published = prev.get("isPublished", False)
     incoming_published = data.get("isPublished")
@@ -767,6 +803,36 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
     logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp
+
+@router.post("/forms/{form_id}/custom-domain/verify")
+async def verify_custom_domain(form_id: str):
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    domain = _normalize_domain(data.get("customDomain"))
+    if not domain:
+        raise HTTPException(status_code=400, detail="No custom domain configured")
+    if not _DNS_AVAILABLE:
+        raise HTTPException(status_code=500, detail="DNS library not available on server")
+    # Resolve CNAME and validate target
+    try:
+        answers = dns.resolver.resolve(domain + ".", "CNAME")  # type: ignore[attr-defined]
+        targets = [str(rdata.target).rstrip('.').lower() for rdata in answers]
+        ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
+        if not ok:
+            raise HTTPException(status_code=400, detail=f"CNAME for {domain} must point to {CUSTOM_DOMAIN_TARGET}")
+        # Mark verified
+        data["customDomainVerified"] = True
+        data["customDomain"] = domain
+        data["updatedAt"] = datetime.utcnow().isoformat()
+        _write_json(path, data)
+        return {"verified": True, "domain": domain, "target": CUSTOM_DOMAIN_TARGET}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"DNS verification failed: {e}")
+
 
 @router.get("/forms/{form_id}/responses")
 async def list_responses(form_id: str, limit: int = 100, offset: int = 0):

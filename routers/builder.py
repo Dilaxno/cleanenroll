@@ -11,9 +11,9 @@ import urllib.request
 
 # Email sender (Resend preferred)
 try:
-    from ..utils.email import send_email_html  # type: ignore
+    from ..utils.email import render_email, send_email_html  # type: ignore
 except Exception:
-    from utils.email import send_email_html  # type: ignore
+    from utils.email import render_email, send_email_html  # type: ignore
 
 # Email validation
 from email_validator import validate_email as _validate_email, EmailNotValidError as _EmailNotValidError
@@ -591,27 +591,61 @@ async def recaptcha_verify(request: Request, payload: Dict = None):
 
 @router.post("/notify-submission")
 async def notify_submission(payload: Dict = None):
-    """Send a submission notification email using Resend (or SMTP fallback).
-    Expected payload: { to: str, subject?: str, html?: str, formTitle?: str, summary?: str }
+    """Send a notification email using the unified base template.
+    Expected payload (flexible):
+      { to: str,
+        subject?: str,
+        title?: str,
+        preheader?: str,
+        intro?: str,
+        content_html?: str,  # preferred rich content block
+        html?: str,          # legacy; treated as content_html
+        formTitle?: str,     # legacy convenience
+        summary?: str,       # legacy convenience
+        cta_label?: str,
+        cta_url?: str }
     """
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid payload")
+
     to = (payload.get("to") or "").strip()
     if not to:
         raise HTTPException(status_code=400, detail="Missing 'to' email")
-    subject = (payload.get("subject") or f"New form submission").strip()
-    html = payload.get("html")
-    if not html:
-        form_title = (payload.get("formTitle") or "").strip() or "Form"
-        summary = (payload.get("summary") or "A new submission was received.").strip()
-        html = f"""
-        <div style='font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;'>
-          <h2 style='margin:0 0 10px'>New submission: {form_title}</h2>
-          <p style='margin:0 0 12px;color:#374151'>{summary}</p>
-          <p style='margin:12px 0 0;color:#6b7280;font-size:12px'>This is an automated notification.</p>
-        </div>
-        """
+
+    # Subject and title
+    subject = (payload.get("subject") or "New form submission").strip()
+    title = (payload.get("title") or subject).strip()
+
+    # Legacy helpers
+    form_title = (payload.get("formTitle") or "").strip()
+    summary = (payload.get("summary") or "").strip()
+
+    # Content assembly
+    content_html = payload.get("content_html") or payload.get("html") or ""
+    intro = (payload.get("intro") or (summary if summary else "")).strip()
+    if (not content_html) and (form_title or summary):
+        # Build a simple content block if only legacy fields are provided
+        ft = form_title or "Form"
+        sm = summary or "A new submission was received."
+        content_html = (
+            f"<div><p style='margin:0 0 12px;color:#d1d5db'>New submission: <strong>{ft}</strong></p>"
+            f"<p style='margin:0;color:#d1d5db'>{sm}</p></div>"
+        )
+
+    preheader = (payload.get("preheader") or intro or "Automated notification from CleanEnroll").strip()
+
+    ctx = {
+        "subject": subject,
+        "preheader": preheader,
+        "title": title,
+        "intro": intro,
+        "content_html": content_html,
+        "cta_label": (payload.get("cta_label") or "View details"),
+        "cta_url": (payload.get("cta_url") or "https://cleanenroll.com/dashboard"),
+    }
+
     try:
+        html = render_email("base.html", ctx)
         send_email_html(to, subject, html)
     except Exception as e:
         logger.exception("notify_submission send failed to=%s", to)

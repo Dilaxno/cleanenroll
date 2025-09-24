@@ -39,7 +39,7 @@
         --accentText: #000000;        /* button text black */
       }
 
-      body { background: var(--bg); color: var(--text); font-family: 'Outfit', Arial, Helvetica, sans-serif; }
+      body { background: var(--bg); color: var(--text); font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; }
       a { color: var(--accent); text-decoration: none; }
     </style>
     <!--[if gte mso 9]>
@@ -59,12 +59,12 @@
 
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: var(--bg);">
       <tr>
-        <td align="center" style="padding: 24px 12px;">
+        <td align="center" style="padding: 24px 12px; font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif;">
           <!-- Container -->
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" class="container" style="width:600px; max-width: 600px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" class="container" style="width:600px; max-width: 600px; font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif;">
             <!-- Header / Logo -->
             <tr>
-              <td align="left" class="px-24" style="padding: 12px 24px 8px;">
+              <td align="left" class="px-24" style="padding: 12px 24px 16px;">
                 <a href="https://cleanenroll.com" target="_blank" style="display:inline-flex; align-items:center; gap:8px;">
                   <img src="https://cleanenroll.com/Logo%20CleanEnroll.svg" width="140" height="40" alt="CleanEnroll" class="logo" style="display:block; height:32px; width:auto;">
                 </a>
@@ -77,15 +77,15 @@
                 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
                   <!-- Title -->
                   <tr>
-                    <td style="padding: 4px 0 8px;">
-                      <h1 style="margin:0; font-size: 22px; line-height: 1.35; font-weight: 700; color: var(--text);">{{title}}</h1>
+                    <td style="padding: 8px 0 12px;">
+                      <h1 style="margin:0; font-size: 22px; line-height: 1.35; font-weight: 700; color: var(--text); font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; letter-spacing: 0.2px;">{{title}}</h1>
                     </td>
                   </tr>
 
                   <!-- Intro / Message -->
                   <tr>
-                    <td style="padding: 8px 0 4px;">
-                      <p style="margin:0; font-size: 15px; line-height: 1.7; color: var(--muted);">
+                    <td style="padding: 12px 0 8px;">
+                      <p style="margin:0; font-size: 15px; line-height: 1.7; color: var(--muted); font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; letter-spacing: 0.1px;">
                         {{intro}}
                       </p>
                     </td>
@@ -93,8 +93,8 @@
 
                   <!-- Dynamic content HTML -->
                   <tr>
-                    <td style="padding-top: 12px;">
-                      <div style="font-size: 15px; line-height: 1.7; color: var(--text);">
+                    <td style="padding-top: 16px;"> 
+                    <div style="font-size: 15px; line-height: 1.7; color: var(--text); font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif;">
                         {{content_html}}
                       </div>
                     </td>
@@ -114,8 +114,8 @@
 
                   <!--[if !mso]><!-- -->
                   <tr>
-                    <td style="padding-top: 20px;">
-                      <a href="{{cta_url}}" class="btn" style="display:inline-block; background: var(--accent); color: var(--accentText); font-weight:700; font-size:16px; line-height: 20px; padding: 12px 20px; border-radius: 10px;">
+                    <td style="padding-top: 24px;">
+                      <a href="{{cta_url}}" class="btn" style="display:inline-block; background: var(--accent); color: var(--accentText); font-weight:700; font-size:16px; line-height: 20px; padding: 12px 20px; border-radius: 10px; font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; letter-spacing: 0.2px;">
                         {{cta_label}}
                       </a>
                     </td>
@@ -124,8 +124,8 @@
 
                   <!-- Secondary links (optional) -->
                   <tr>
-                    <td style="padding-top: 12px;">
-                      <p style="margin:0; font-size: 13px; color: var(--muted);">
+                    <td style="padding-top: 16px;">
+                      <p style="margin:0; font-size: 13px; color: var(--muted); font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; letter-spacing: 0.1px;">
                         Or copy this link into your browser: <a href="{{cta_url}}" style="color: var(--accent);">{{cta_url}}</a>
                       </p>
                     </td>
@@ -140,11 +140,11 @@
 
                   <!-- Footer -->
                   <tr>
-                    <td style="padding-top: 16px;">
-                      <p style="margin:0 0 6px 0; font-size: 12px; color: var(--muted);">
+                    <td style="padding-top: 20px;">
+                      <p style="margin:0 0 6px 0; font-size: 12px; color: var(--muted); font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; letter-spacing: 0.1px;">
                         You’re receiving this email because you use CleanEnroll.
                       </p>
-                      <p style="margin:0; font-size: 12px; color: var(--muted);">
+                      <p style="margin:0; font-size: 12px; color: var(--muted); font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; letter-spacing: 0.1px;">
                         © {{year}} CleanEnroll • <a href="https://cleanenroll.com/legal#privacy-policy" style="color: var(--accent);">Privacy</a> • <a href="https://cleanenroll.com/legal#terms-of-service" style="color: var(--accent);">Terms</a>
                       </p>
                     </td>

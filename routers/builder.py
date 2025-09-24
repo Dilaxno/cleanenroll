@@ -196,6 +196,9 @@ class FieldSchema(BaseModel):
         "address",
         "url",
         "file",
+        "image",
+        "video",
+        "audio",
     ]
     required: bool = False
     placeholder: Optional[str] = None
@@ -204,6 +207,14 @@ class FieldSchema(BaseModel):
     maxLength: Optional[int] = Field(default=None, gt=0)
     accept: Optional[str] = None
     multiple: Optional[bool] = None
+    # Media-specific configuration
+    mediaUrl: Optional[str] = None
+    poster: Optional[str] = None  # video thumbnail
+    caption: Optional[str] = None
+    autoplay: Optional[bool] = None
+    loop: Optional[bool] = None
+    controls: Optional[bool] = None
+    muted: Optional[bool] = None
 
     @validator("options", always=True)
     def normalize_options(cls, v, values):
@@ -256,6 +267,10 @@ EXTENDED_ALLOWED_TYPES = {
     "address",
     "url",
     "file",
+    # Media display (non-interactive)
+    "image",
+    "video",
+    "audio",
 }
 
 

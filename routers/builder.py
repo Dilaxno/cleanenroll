@@ -25,6 +25,18 @@ except Exception:
 
 # Email validation
 from email_validator import validate_email as _validate_email, EmailNotValidError as _EmailNotValidError
+try:
+    from disposable_email_domains import blocklist as _DISPOSABLE_BLOCKLIST  # type: ignore
+    _DISPOSABLE_SET = set(map(str.lower, _DISPOSABLE_BLOCKLIST or []))
+except Exception:
+    _DISPOSABLE_SET = set()
+
+# Common free email providers
+_FREE_EMAIL_PROVIDERS = {
+    'gmail.com','googlemail.com','yahoo.com','ymail.com','rocketmail.com','outlook.com','hotmail.com','live.com',
+    'msn.com','aol.com','icloud.com','me.com','mac.com','protonmail.com','pm.me','mail.com','gmx.com','gmx.net',
+    'zoho.com','yandex.com','yandex.ru','inbox.ru','list.ru','bk.ru','mail.ru'
+}
 
 # GeoIP via ip2geotools (no local database required)
 from typing import Tuple
@@ -169,6 +181,7 @@ class FormConfig(BaseModel):
     thankYouMessage: str = "Thank you for your submission! We'll get back to you soon."
     redirect: RedirectConfig = RedirectConfig()
     emailValidationEnabled: bool = False
+    professionalEmailsOnly: bool = False
     recaptchaEnabled: bool = False
     gdprComplianceEnabled: bool = False
     passwordProtectionEnabled: bool = False
@@ -764,7 +777,19 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         emails_to_check.append((label, str(val)))
         for lab, addr in emails_to_check:
             try:
+                # Syntax + MX deliverability
                 _validate_email(addr, check_deliverability=True)
+                # Enforce professional/business emails if enabled
+                if bool(form_data.get("professionalEmailsOnly")):
+                    try:
+                        domain = addr.split('@', 1)[1].strip().lower()
+                    except Exception:
+                        domain = ''
+                    if not domain:
+                        raise HTTPException(status_code=400, detail=f"Invalid email for field '{lab}': domain missing")
+                    # Reject if domain is free provider or disposable provider
+                    if domain in _FREE_EMAIL_PROVIDERS or domain in _DISPOSABLE_SET:
+                        raise HTTPException(status_code=400, detail=f"Please use your professional work email address for '{lab}'. Personal or disposable email domains are not accepted.")
             except _EmailNotValidError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid email for field '{lab}': {str(e)}")
 

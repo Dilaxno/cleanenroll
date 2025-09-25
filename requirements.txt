@@ -20,3 +20,4 @@ slowapi>=0.1.8
 # IP-based signup throttling (server-side)
 fastratelimiter>=0.0.4
 itsdangerous>=2.2.0
+requests>=2.31.0

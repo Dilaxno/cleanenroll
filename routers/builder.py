@@ -199,6 +199,8 @@ EXTENDED_ALLOWED_TYPES = {
     "text",
     "textarea",
     "number",
+    "price",
+    "phone",
     "checkbox",
     "dropdown",
     "multiple",

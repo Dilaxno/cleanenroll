@@ -161,6 +161,15 @@ class FieldSchema(BaseModel):
     loop: Optional[bool] = None
     controls: Optional[bool] = None
     muted: Optional[bool] = None
+    # Validation options for special field types
+    # Full name
+    fullNameRequireTwoWords: Optional[bool] = True
+    # Password strength
+    passwordMinLength: Optional[int] = 8
+    passwordRequireUppercase: Optional[bool] = True
+    passwordRequireLowercase: Optional[bool] = True
+    passwordRequireNumber: Optional[bool] = True
+    passwordRequireSpecial: Optional[bool] = False
 
     @validator("options", always=True)
     def normalize_options(cls, v, values):
@@ -222,6 +231,9 @@ EXTENDED_ALLOWED_TYPES = {
     "address",
     "url",
     "file",
+    # Sensitive/validated input types
+    "full-name",
+    "password",
     # Media display (non-interactive)
     "image",
     "video",
@@ -239,6 +251,12 @@ def _validate_form(cfg: FormConfig):
                 raise HTTPException(status_code=400, detail=f"Field '{f.label}' requires at least one option")
         if f.type in ("text", "textarea") and f.maxLength is not None and f.maxLength <= 0:
             raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid maxLength")
+        if f.type == "password":
+            try:
+                if f.passwordMinLength is not None and int(f.passwordMinLength) < 1:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid passwordMinLength")
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid passwordMinLength")
 
     
 
@@ -792,6 +810,59 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         raise HTTPException(status_code=400, detail=f"Please use your professional work email address for '{lab}'. Personal or disposable email domains are not accepted.")
             except _EmailNotValidError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid email for field '{lab}': {str(e)}")
+
+    # Field-level validations for full-name and password
+    try:
+        fields_def = form_data.get("fields") or []
+        if isinstance(payload, dict):
+            for f in fields_def:
+                try:
+                    ftype = f.get("type")
+                    fid = str(f.get("id"))
+                    label = str(f.get("label") or "")
+                except Exception:
+                    continue
+                val = payload.get(fid)
+                if val is None and label:
+                    val = payload.get(label)
+                # Full name: require at least two words with at least 2 letters each (basic heuristic)
+                if ftype == "full-name":
+                    if val:
+                        s = str(val).strip()
+                        parts = [p for p in re.split(r"\s+", s) if p]
+                        if len(parts) < 2 or any(len(p) < 2 for p in parts[:2]):
+                            raise HTTPException(status_code=400, detail=f"Please enter a full name (first and last) for '{label}'.")
+                    elif f.get("required"):
+                        raise HTTPException(status_code=400, detail=f"'{label}' is required.")
+                # Password: enforce strength based on field options or defaults
+                elif ftype == "password":
+                    if val:
+                        s = str(val)
+                        try:
+                            min_len = max(1, int(f.get("passwordMinLength") or 8))
+                        except Exception:
+                            min_len = 8
+                        req_u = bool(f.get("passwordRequireUppercase", True))
+                        req_l = bool(f.get("passwordRequireLowercase", True))
+                        req_d = bool(f.get("passwordRequireNumber", True))
+                        req_s = bool(f.get("passwordRequireSpecial", False))
+                        if len(s) < min_len:
+                            raise HTTPException(status_code=400, detail=f"Password for '{label}' must be at least {min_len} characters.")
+                        if req_u and not re.search(r"[A-Z]", s):
+                            raise HTTPException(status_code=400, detail=f"Password for '{label}' must contain an uppercase letter.")
+                        if req_l and not re.search(r"[a-z]", s):
+                            raise HTTPException(status_code=400, detail=f"Password for '{label}' must contain a lowercase letter.")
+                        if req_d and not re.search(r"[0-9]", s):
+                            raise HTTPException(status_code=400, detail=f"Password for '{label}' must contain a number.")
+                        if req_s and not re.search(r"[^A-Za-z0-9]", s):
+                            raise HTTPException(status_code=400, detail=f"Password for '{label}' must contain a special character.")
+                    elif f.get("required"):
+                        raise HTTPException(status_code=400, detail=f"'{label}' is required.")
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail closed on malformed validation config
+        raise HTTPException(status_code=400, detail="Validation failed for one or more fields")
 
     # Success payload mirrors configured behavior
     # Build response payload for client

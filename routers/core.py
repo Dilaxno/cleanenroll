@@ -12,6 +12,7 @@ import time
 import logging
 import traceback
 from pydantic import BaseModel, EmailStr
+from datetime import timedelta
 try:
     from standardwebhooks import Webhook  # type: ignore
     _STDWEBHOOKS_AVAILABLE = True
@@ -38,8 +39,12 @@ except Exception:
 # Rate limiter shared instance
 try:
     from ..utils.limiter import limiter  # type: ignore
+    from ..utils.limiter import forwarded_for_ip as _ip_from_req  # type: ignore
+    from ..utils.limiter import can_signup_ip as _can_signup_ip, record_signup_ip as _record_signup_ip  # type: ignore
 except Exception:
     from utils.limiter import limiter  # type: ignore
+    from utils.limiter import forwarded_for_ip as _ip_from_req  # type: ignore
+    from utils.limiter import can_signup_ip as _can_signup_ip, record_signup_ip as _record_signup_ip  # type: ignore
 
 
 def _mx_lookup(domain: str) -> list[str]:
@@ -80,6 +85,45 @@ except Exception:
     _FB_AVAILABLE = False
 
 router = APIRouter()
+
+class SignupCheckResponse(BaseModel):
+    allowed: bool
+    retry_after: int | None = None
+
+@router.options("/api/auth/signup/check")
+@router.options("/api/auth/signup/check/")
+async def signup_check_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+@router.get("/api/auth/signup/check", response_model=SignupCheckResponse)
+@router.get("/api/auth/signup/check/", response_model=SignupCheckResponse)
+async def signup_check(request: Request):
+    """Server-side IP-based throttle for account creation.
+    Enforces a 24h gap between signups from the same IP.
+    Returns {allowed: true} if allowed, else raises 429 with detail.
+    """
+    ip = _ip_from_req(request)
+    allowed, retry = _can_signup_ip(ip, window_hours=24)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Too many signups from this IP. Try again in {retry} seconds.")
+    return {"allowed": True, "retry_after": None}
+
+@router.post("/api/auth/signup/record")
+@router.post("/api/auth/signup/record/")
+async def signup_record(request: Request):
+    """Record a successful signup attempt for the caller IP.
+    Should be called only after account creation succeeds to start the 24h window.
+    """
+    ip = _ip_from_req(request)
+    try:
+        _record_signup_ip(ip)
+    except Exception:
+        pass
+    return {"status": "ok"}
 
 # --- Token helpers for password reset ---
 RESET_TOKEN_LEEWAY = 60  # seconds of clock skew allowed

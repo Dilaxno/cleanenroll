@@ -5,6 +5,26 @@ from datetime import datetime
 import json
 import urllib.request
 import urllib.error
+import re
+
+try:
+    import bleach  # type: ignore
+    from bleach.css_sanitizer import CSSSanitizer  # type: ignore
+    _BLEACH_AVAILABLE = True
+    _CSS_SANITIZER = CSSSanitizer(
+        allowed_css_properties=[
+            "color","background-color","font-weight","font-style","text-decoration",
+            "text-align","margin","margin-left","margin-right","margin-top","margin-bottom",
+            "padding","padding-left","padding-right","padding-top","padding-bottom",
+            "border","border-left","border-right","border-top","border-bottom","border-radius",
+            "display","vertical-align","width","height","max-width","min-width","line-height"
+        ],
+        allowed_svg_properties=[],
+    )
+except Exception:
+    bleach = None  # type: ignore
+    _BLEACH_AVAILABLE = False
+    _CSS_SANITIZER = None
 
 try:
     import resend  # type: ignore
@@ -52,6 +72,60 @@ _templates_env = Environment(
     autoescape=select_autoescape(["html", "xml"]),
 )
 
+def sanitize_url(url: str) -> str:
+    try:
+        u = str(url or "").strip()
+    except Exception:
+        return ""
+    if u.lower().startswith(("http://", "https://")):
+        return u
+    return ""
+
+
+def sanitize_html(html: str) -> str:
+    """
+    Sanitize a small subset of HTML suitable for email bodies.
+    Allows formatting and simple layout while removing scripts, iframes, etc.
+    """
+    s = str(html or "")
+    if not s:
+        return ""
+    if _BLEACH_AVAILABLE:
+        allowed_tags = [
+            "a","p","br","strong","em","b","i","ul","ol","li","blockquote",
+            "code","pre","div","span","table","thead","tbody","tfoot","tr","td","th",
+            "h1","h2","h3","h4","h5","h6","img","hr"
+        ]
+        allowed_attrs = {
+            "*": ["style"],
+            "a": ["href","title","target","rel"],
+            "img": ["src","alt","width","height","style"],
+            "table": ["border","cellpadding","cellspacing","align","style"],
+            "td": ["colspan","rowspan","align","valign","style"],
+            "th": ["colspan","rowspan","align","valign","scope","style"],
+            "div": ["style","align"],
+            "span": ["style"],
+        }
+        protocols = ["http","https","mailto","tel"]
+        cleaned = bleach.clean(
+            s,
+            tags=allowed_tags,
+            attributes=allowed_attrs,
+            protocols=protocols,
+            strip=True,
+            css_sanitizer=_CSS_SANITIZER,
+        )
+        # Ensure links are safe targets in emails
+        cleaned = cleaned.replace(' target="_blank"', ' target="_blank" rel="noopener noreferrer"')
+        return cleaned
+    else:
+        # Fallback: rudimentary removal of dangerous elements/handlers
+        s = re.sub(r"(?is)<(script|style|iframe|object|embed)[^>]*>.*?</\\1>", "", s)
+        s = re.sub(r"\s+on\w+=\"[^\"]*\"", "", s)
+        s = re.sub(r"\s+on\w+=\'[^\']*\'", "", s)
+        s = re.sub(r"\s+on\w+=([^ >]+)", "", s)
+        return s
+
 
 def render_email(template_name: str, context: dict) -> str:
     try:
@@ -61,7 +135,13 @@ def render_email(template_name: str, context: dict) -> str:
         raise
     base_context = {"year": datetime.utcnow().year}
     base_context.update(context or {})
-    return template.render(**base_context)
+    # Sanitize dynamic HTML/URLs
+    safe_ctx = dict(base_context)
+    if "cta_url" in safe_ctx:
+        safe_ctx["cta_url"] = sanitize_url(safe_ctx.get("cta_url"))
+    if "content_html" in safe_ctx:
+        safe_ctx["content_html"] = sanitize_html(safe_ctx.get("content_html"))
+    return template.render(**safe_ctx)
 
 
 import smtplib

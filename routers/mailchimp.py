@@ -1,0 +1,258 @@
+import os
+import json
+import base64
+import hmac
+import hashlib
+import logging
+from typing import Dict, Any, List, Optional
+from urllib.parse import urlencode, quote_plus
+
+import requests
+from fastapi import APIRouter, HTTPException, Request, Query
+
+# Firebase Admin
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+logger = logging.getLogger("backend.mailchimp")
+
+# Initialize Firebase app if not already
+if not firebase_admin._apps:
+    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.path.join(os.getcwd(), "cleanenroll-fd36a-firebase-adminsdk-fbsvc-7d79b92b3f.json")
+    if not os.path.exists(cred_path):
+        raise RuntimeError("Firebase credentials JSON not found; set GOOGLE_APPLICATION_CREDENTIALS")
+    cred = credentials.Certificate(cred_path)
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+router = APIRouter(prefix="/api/integrations/mailchimp", tags=["mailchimp"]) 
+
+# OAuth config (set via env)
+MAILCHIMP_CLIENT_ID = os.getenv("MAILCHIMP_CLIENT_ID", "")
+MAILCHIMP_CLIENT_SECRET = os.getenv("MAILCHIMP_CLIENT_SECRET", "")
+MAILCHIMP_REDIRECT_URI = os.getenv("MAILCHIMP_REDIRECT_URI", "https://api.cleanenroll.com/api/integrations/mailchimp/callback")
+ENCRYPTION_SECRET = (os.getenv("ENCRYPTION_SECRET") or "change-this-secret").encode("utf-8")
+
+if not MAILCHIMP_CLIENT_ID or not MAILCHIMP_CLIENT_SECRET:
+    logger.warning("Mailchimp OAuth not configured: missing client id/secret")
+
+# Simple symmetric encryption using HMAC+XOR for demonstration
+# In production, use a proper KMS or cryptography.Fernet with key rotation
+
+def _xor_bytes(data: bytes, key: bytes) -> bytes:
+    out = bytearray()
+    for i, b in enumerate(data):
+        out.append(b ^ key[i % len(key)])
+    return bytes(out)
+
+
+def _encrypt_token(token: str) -> str:
+    raw = token.encode("utf-8")
+    mac = hmac.new(ENCRYPTION_SECRET, raw, hashlib.sha256).digest()
+    xored = _xor_bytes(raw, mac)
+    return base64.urlsafe_b64encode(mac + xored).decode("utf-8")
+
+
+def _decrypt_token(ciphertext: str) -> str:
+    blob = base64.urlsafe_b64decode(ciphertext.encode("utf-8"))
+    mac = blob[:32]
+    xored = blob[32:]
+    raw = _xor_bytes(xored, mac)
+    # Verify MAC
+    if not hmac.compare_digest(mac, hmac.new(ENCRYPTION_SECRET, raw, hashlib.sha256).digest()):
+        raise ValueError("Token MAC verification failed")
+    return raw.decode("utf-8")
+
+
+def _get_user_doc(user_id: str):
+    return db.collection("users").document(user_id)
+
+
+@router.get("/authorize")
+def authorize(userId: str = Query(...)):
+    """
+    Step 1: Redirect URL for Mailchimp OAuth. Frontend should redirect the user-agent here.
+    We return the URL so the client can navigate to it.
+    """
+    if not MAILCHIMP_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Mailchimp not configured")
+
+    scope = "audience:read audience:write"  # lists read/write
+    state = json.dumps({"userId": userId})
+    params = {
+        "response_type": "code",
+        "client_id": MAILCHIMP_CLIENT_ID,
+        "redirect_uri": MAILCHIMP_REDIRECT_URI,
+        "scope": scope,
+        "state": state,
+    }
+    url = f"https://login.mailchimp.com/oauth2/authorize?{urlencode(params, quote_via=quote_plus)}"
+    return {"authorize_url": url}
+
+
+@router.get("/callback")
+def callback(code: str = Query(None), state: str = Query("{}")):
+    """
+    Step 2: OAuth callback. Exchanges code for access token and stores it (encrypted) under the user document.
+    """
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing code")
+    try:
+        parsed_state = json.loads(state or "{}")
+    except Exception:
+        parsed_state = {}
+    user_id = parsed_state.get("userId")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing userId in state")
+
+    token_url = "https://login.mailchimp.com/oauth2/token"
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": MAILCHIMP_CLIENT_ID,
+        "client_secret": MAILCHIMP_CLIENT_SECRET,
+        "redirect_uri": MAILCHIMP_REDIRECT_URI,
+        "code": code,
+    }
+    resp = requests.post(token_url, data=data, timeout=15)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"OAuth exchange failed: {resp.text}")
+    token_payload = resp.json()
+    access_token = token_payload.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="OAuth exchange missing access_token")
+
+    # Determine API base (data center) via metadata endpoint
+    meta_resp = requests.get(
+        "https://login.mailchimp.com/oauth2/metadata",
+        headers={"Authorization": f"OAuth {access_token}"},
+        timeout=15,
+    )
+    if meta_resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Failed to read metadata: {meta_resp.text}")
+    meta = meta_resp.json()
+    dc = meta.get("dc")
+    api_base = f"https://{dc}.api.mailchimp.com/3.0"
+
+    # Store encrypted token + dc under users/{userId}/integrations/mailchimp
+    enc = _encrypt_token(access_token)
+    doc = _get_user_doc(user_id)
+    doc.set({
+        "integrations": {
+            "mailchimp": {
+                "token": enc,
+                "dc": dc,
+                "apiBase": api_base,
+            }
+        }
+    }, merge=True)
+
+    return {"connected": True}
+
+
+def _get_mailchimp_auth(user_id: str) -> Dict[str, str]:
+    doc = _get_user_doc(user_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    data = doc.to_dict() or {}
+    integ = ((data.get("integrations") or {}).get("mailchimp") or {})
+    token_enc = integ.get("token")
+    dc = integ.get("dc")
+    api_base = integ.get("apiBase")
+    if not token_enc or not dc:
+        raise HTTPException(status_code=400, detail="Mailchimp not connected for this user")
+    token = _decrypt_token(token_enc)
+    return {"token": token, "dc": dc, "api_base": api_base or f"https://{dc}.api.mailchimp.com/3.0"}
+
+
+@router.get("/audiences")
+def list_audiences(userId: str = Query(...)):
+    """List audiences (lists) for the connected Mailchimp account."""
+    auth = _get_mailchimp_auth(userId)
+    url = f"{auth['api_base']}/lists"
+    resp = requests.get(url, headers={"Authorization": f"OAuth {auth['token']}"}, timeout=20)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Failed to list audiences: {resp.text}")
+    data = resp.json()
+    # Return minimal fields
+    out = [{
+        "id": x.get("id"),
+        "name": x.get("name"),
+        "member_count": (x.get("stats") or {}).get("member_count"),
+    } for x in (data.get("lists") or [])]
+    return {"lists": out}
+
+
+@router.post("/export")
+def export_members(
+    userId: str = Query(...),
+    formId: str = Query(...),
+    listId: str = Query(...),
+    status: str = Query("subscribed"),  # or "pending" for double opt-in
+):
+    """
+    Export subscribers collected for a form to a Mailchimp audience.
+    Reads stored responses for that form and submits members to /lists/{list_id}/members
+    """
+    if status not in ("subscribed", "pending"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    # Read responses from filesystem store used by builder router
+    responses_dir = os.path.join(os.getcwd(), "data", "responses", formId)
+    if not os.path.exists(responses_dir):
+        return {"exported": 0, "skipped": 0}
+
+    # Gather emails and merge fields heuristically from stored answers
+    members: List[Dict[str, Any]] = []
+    for name in os.listdir(responses_dir):
+        if not name.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(responses_dir, name), 'r', encoding='utf-8') as f:
+                rec = json.load(f)
+            answers = rec.get('answers') or {}
+            email = None
+            merge_fields: Dict[str, Any] = {}
+            # Try typical keys
+            for k, v in answers.items():
+                lk = str(k).lower()
+                try:
+                    sv = v if isinstance(v, str) else (v[0] if isinstance(v, list) and v else None)
+                except Exception:
+                    sv = None
+                if not sv:
+                    continue
+                if ("email" in lk) and (not email):
+                    email = str(sv).strip()
+                elif any(x in lk for x in ["name", "full-name", "first", "last", "phone", "company"]):
+                    merge_fields[lk[:10].upper()] = str(sv)[:255]
+            if email:
+                members.append({"email_address": email, "status": status, "merge_fields": merge_fields})
+        except Exception:
+            continue
+
+    if not members:
+        return {"exported": 0, "skipped": 0}
+
+    auth = _get_mailchimp_auth(userId)
+    url = f"{auth['api_base']}/lists/{listId}/members"
+
+    exported = 0
+    skipped = 0
+    for m in members:
+        resp = requests.post(url, headers={"Authorization": f"OAuth {auth['token']}", "Content-Type": "application/json"}, data=json.dumps(m), timeout=20)
+        if resp.status_code in (200, 201):
+            exported += 1
+        else:
+            # If member exists (400 with title "Member Exists"), count as skipped
+            try:
+                err = resp.json()
+                if str(err.get('title')).lower().find('exists') != -1:
+                    skipped += 1
+                    continue
+            except Exception:
+                pass
+            logger.warning("Mailchimp add member failed: %s", resp.text)
+            skipped += 1
+
+    return {"exported": exported, "skipped": skipped, "total": len(members)}

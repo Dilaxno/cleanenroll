@@ -19,3 +19,4 @@ resend>=2.0.0
 slowapi>=0.1.8
 # IP-based signup throttling (server-side)
 fastratelimiter>=0.0.4
+itsdangerous>=2.2.0

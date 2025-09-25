@@ -323,6 +323,134 @@ async def password_reset_confirm_options():
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
     })
 
+# -----------------------------
+# Email Verification (itsdangerous)
+# -----------------------------
+class VerifySendRequest(BaseModel):
+    email: EmailStr
+
+
+def _get_verify_serializer():
+    try:
+        from itsdangerous import URLSafeTimedSerializer  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="Email verification is not configured (itsdangerous missing)")
+    secret = os.getenv("EMAIL_VERIFY_SECRET", os.getenv("SECRET_KEY", "change-me"))
+    salt = os.getenv("EMAIL_VERIFY_SALT", "email-verify")
+    return URLSafeTimedSerializer(secret, salt=salt)
+
+
+@router.post("/api/auth/verify/send")
+@router.post("/api/auth/verify/send/")
+async def verify_send(req: VerifySendRequest):
+    """Send an email verification link with a 24h signed token.
+    Always responds 200 to avoid user enumeration.
+    """
+    try:
+        s = _get_verify_serializer()
+        token = s.dumps({"email": req.email})
+        app_base = os.getenv("FRONTEND_URL", "https://cleanenroll.com")
+        verify_url = f"{app_base.rstrip('/')}/verify?token={token}"
+        try:
+            ttl = int(os.getenv("EMAIL_VERIFY_TTL", "86400"))  # 24h default
+        except Exception:
+            ttl = 86400
+        ttl_hours = max(1, int(round(ttl / 3600)))
+
+        subject = "Verify your email for CleanEnroll"
+        html = render_email("base.html", {
+            "subject": subject,
+            "preheader": "Confirm your email address to activate your account.",
+            "title": "Verify your email",
+            "intro": f"Click the button below to confirm your email address. This link expires in {ttl_hours} hours.",
+            "content_html": "",
+            "cta_label": "Verify Email",
+            "cta_url": verify_url,
+        })
+        try:
+            send_email_html(req.email, subject, html)
+        except Exception:
+            logger.exception("Failed to send verification email")
+        return {"status": "ok"}
+    except Exception:
+        # Do not leak details
+        return {"status": "ok"}
+
+
+@router.options("/api/auth/verify/send")
+@router.options("/api/auth/verify/send/")
+async def verify_send_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+
+@router.get("/api/auth/verify/confirm")
+@router.get("/api/auth/verify/confirm/")
+async def verify_confirm(token: str):
+    """Confirm email verification from a signed token and mark the user verified.
+    Returns JSON status. Frontend can redirect after calling this endpoint.
+    """
+    try:
+        s = _get_verify_serializer()
+        try:
+            from itsdangerous import BadSignature, SignatureExpired  # type: ignore
+        except Exception:
+            # Should not happen if serializer import worked
+            BadSignature = Exception  # type: ignore
+            SignatureExpired = Exception  # type: ignore
+        try:
+            ttl = int(os.getenv("EMAIL_VERIFY_TTL", "86400"))
+        except Exception:
+            ttl = 86400
+        try:
+            data = s.loads(token, max_age=ttl)
+        except SignatureExpired:
+            return {"status": "expired"}
+        except BadSignature:
+            return {"status": "invalid"}
+        except Exception:
+            return {"status": "invalid"}
+        email = (data or {}).get("email")
+        if not email:
+            return {"status": "invalid"}
+
+        # Try to mark verified in Firebase Auth and Firestore
+        try:
+            _ensure_firebase_initialized()
+        except HTTPException:
+            # Continue without failing the confirmation
+            pass
+        try:
+            if _FB_AVAILABLE and admin_auth is not None:
+                try:
+                    user = admin_auth.get_user_by_email(email)
+                    if not getattr(user, "email_verified", False):
+                        admin_auth.update_user(user.uid, email_verified=True)
+                        logger.info("Email verified via token for %s", _mask_email(email))
+                except Exception:
+                    logger.warning("Failed to update Firebase Auth emailVerified for %s", _mask_email(email))
+        except Exception:
+            pass
+        try:
+            if admin_firestore is not None:
+                fs = admin_firestore.client()
+                # Update users collection doc if present
+                q = fs.collection("users").where("email", "==", email).limit(1)
+                docs = list(q.stream())
+                if docs:
+                    fs.collection("users").document(docs[0].id).set({
+                        "emailVerified": True,
+                        "emailVerifiedAt": admin_firestore.SERVER_TIMESTAMP,
+                    }, merge=True)
+        except Exception:
+            pass
+        return {"status": "ok"}
+    except Exception:
+        return {"status": "invalid"}
+
 
 @router.get("/api/validate-email")
 @router.get("/api/validate-email/")

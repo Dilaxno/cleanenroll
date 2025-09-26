@@ -130,6 +130,8 @@ class ThemeSchema(BaseModel):
     pageBackgroundColor: str = "#ffffff"
     textColor: str = "#111827"
     titleColor: str = "#000000"
+    # Field label customization
+    fieldLabelColor: str = "#cccccc"
     inputBgColor: str = "#ffffff"
     inputTextColor: str = "#111827"
     inputBorderColor: str = "#d1d5db"
@@ -138,6 +140,8 @@ class ThemeSchema(BaseModel):
     inputBorderWidth: int = 1
     inputBorderStyle: Literal["none", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset"] = "solid"
     inputBorderSide: Literal["all", "top", "right", "bottom", "left"] = "all"
+    # Optional input shadow
+    inputShadowEnabled: bool = False
     # Thank-you screen colors
     thankYouBgColor: str = "#ecfdf5"
     thankYouTextColor: str = "#065f46"

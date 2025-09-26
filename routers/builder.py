@@ -289,7 +289,7 @@ def _create_id() -> str:
 RECAPTCHA_SECRET = os.getenv("RECAPTCHA_SECRET_KEY") or os.getenv("RECAPTCHA_SECRET") or ""
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY") or ""
 # Custom domain target for CNAME verification
-CUSTOM_DOMAIN_TARGET = (os.getenv("CUSTOM_DOMAIN_TARGET") or "cname.cleanenroll.com").strip('.').lower()
+CUSTOM_DOMAIN_TARGET = (os.getenv("CUSTOM_DOMAIN_TARGET") or "api.cleanenroll.com").strip('.').lower()
 
 def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
     if not RECAPTCHA_SECRET:

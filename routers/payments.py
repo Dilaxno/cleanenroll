@@ -9,6 +9,13 @@ logger = logging.getLogger("backend.payments")
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])  # /api/payments/*
 
+# Firestore Admin to update user's plan/billing
+try:
+    from firebase_admin import firestore as _fs
+    _FS_AVAILABLE = True
+except Exception:
+    _FS_AVAILABLE = False
+
 # Firebase Admin (optional auth verification)
 try:
     import firebase_admin
@@ -40,6 +47,30 @@ def _verify_id_token_from_header(request: Request) -> Optional[str]:
         return decoded.get("uid")
     except Exception:
         return None
+
+
+def _update_user_billing(uid: str, updates: Dict):
+    if not _FS_AVAILABLE or not uid:
+        return
+    try:
+        ref = _fs.client().collection('users').document(uid)
+        doc = ref.get()
+        data = doc.to_dict() or {}
+        billing = data.get('billing') or {}
+        billing.update(updates)
+        ref.update({'billing': billing})
+    except Exception:
+        logger.exception('[payments] failed to update user billing uid=%s', uid)
+
+
+def _set_user_plan(uid: str, plan: str):
+    if not _FS_AVAILABLE or not uid:
+        return
+    try:
+        ref = _fs.client().collection('users').document(uid)
+        ref.update({'plan': plan})
+    except Exception:
+        logger.exception('[payments] failed to set user plan uid=%s', uid)
 
 
 @router.post("/dodo/checkout")
@@ -150,3 +181,117 @@ async def create_dodo_checkout(request: Request, payload: Dict):
     except Exception as e:
         logger.exception("[dodo-checkout] request failed")
         raise HTTPException(status_code=502, detail="Checkout provider error")
+
+
+@router.post('/dodo/cancel')
+async def dodo_cancel_or_resume(request: Request, payload: Dict):
+    """Request cancel at period end, resume, or cancel now subscription with Dodo.
+    - cancel_at_period_end: mark to cancel at end of current period
+    - resume: undo the above
+    - cancel_now: immediate cancellation; we will also emit subscription.cancelled side-effects
+    """
+    action = (payload or {}).get('action')
+    if action not in ('cancel_at_period_end', 'resume', 'cancel_now'):
+        raise HTTPException(status_code=400, detail='Invalid action')
+
+    # Identify user
+    uid = _verify_id_token_from_header(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail='Unauthorized')
+
+    # Optionally call Dodo API for cancel/resume if configured
+    manage_url = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL')
+    api_key = os.getenv('DODO_API_KEY')
+    if manage_url and api_key:
+        try:
+            auth_header = os.getenv('DODO_AUTH_HEADER', 'Authorization')
+            auth_scheme = os.getenv('DODO_AUTH_SCHEME', 'Bearer')
+            headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }
+            if auth_header.lower() == 'authorization':
+                headers['Authorization'] = f"{auth_scheme} {api_key}".strip()
+            else:
+                headers[auth_header] = api_key
+            body = { 'action': action, 'user_uid': uid }
+            req = urllib.request.Request(url=manage_url, data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                _ = resp.read()
+        except Exception:
+            logger.warning('[dodo-cancel] provider manage call failed; proceeding with local state update')
+
+    # Update Firestore billing flags
+    if action == 'cancel_at_period_end':
+        _update_user_billing(uid, { 'cancelAtPeriodEnd': True })
+        return { 'success': True }
+    if action == 'resume':
+        _update_user_billing(uid, { 'cancelAtPeriodEnd': False })
+        return { 'success': True }
+
+    # cancel_now flow: update provider and set plan to free + clear billing
+    try:
+        # Emit internal webhook event to unify state changes
+        await dodo_webhook({
+            'type': 'subscription.cancelled',
+            'data': { 'metadata': { 'user_uid': uid } }
+        }, request)
+        return { 'success': True, 'cancelled': True }
+    except Exception:
+        logger.exception('[dodo-cancel] failed to cancel now')
+        raise HTTPException(status_code=500, detail='Failed to cancel subscription now')
+
+
+@router.post('/dodo/webhook')
+async def dodo_webhook(payload: Dict, request: Request):
+    """Handle Dodo Payments webhook events.
+    Expected event types include: subscription.cancelled, subscription.renewed, subscription.created
+    We update Firestore billing and plan accordingly.
+    """
+    try:
+        event_type = str(payload.get('type') or payload.get('event') or '').strip().lower()
+        data = payload.get('data') or payload.get('object') or {}
+        meta = data.get('metadata') or {}
+        uid = meta.get('user_uid') or meta.get('uid') or data.get('user_uid') or ''
+        next_billing = data.get('current_period_end') or data.get('next_billing_at') or data.get('renews_at')
+        price_amount = data.get('amount') or data.get('price') or None
+        currency = (data.get('currency') or 'USD').upper()
+
+        # Normalize timestamp from seconds or ISO
+        def normalize_ts(v):
+            if not v:
+                return None
+            try:
+                if isinstance(v, (int, float)):
+                    return int(v) * 1000  # ms for frontend convenience
+                s = str(v)
+                from datetime import datetime
+                return datetime.fromisoformat(s.replace('Z','+00:00')).isoformat()
+            except Exception:
+                return v
+
+        if event_type == 'subscription.cancelled':
+            # Immediately set plan to free and clear billing flags
+            if uid:
+                _set_user_plan(uid, 'free')
+                _update_user_billing(uid, {
+                    'nextBillingAt': None,
+                    'cancelAtPeriodEnd': False,
+                    'status': 'cancelled',
+                })
+        elif event_type in ('subscription.renewed', 'subscription.created', 'invoice.paid'):
+            if uid:
+                _set_user_plan(uid, 'pro')
+                _update_user_billing(uid, {
+                    'nextBillingAt': normalize_ts(next_billing),
+                    'cancelAtPeriodEnd': False,
+                    'currency': currency,
+                    'price': price_amount if isinstance(price_amount, (int, float)) else None,
+                    'status': 'active',
+                })
+        else:
+            logger.info('[dodo-webhook] unhandled event type=%s', event_type)
+        return { 'received': True }
+    except Exception:
+        logger.exception('[dodo-webhook] error handling event')
+        raise HTTPException(status_code=400, detail='Webhook handling failed')

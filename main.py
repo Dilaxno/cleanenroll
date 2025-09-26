@@ -7,6 +7,7 @@ import os
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # Centralized logging setup
 try:
@@ -42,12 +43,23 @@ import os as _os
 
 DATA_FORMS_DIR = _os.path.join(_os.getcwd(), "data", "forms")
 _os.makedirs(DATA_FORMS_DIR, exist_ok=True)
+# ACME HTTP-01 challenge directory and static mount
+ACME_CHALLENGE_DIR = _os.path.join(_os.getcwd(), "data", "acme", ".well-known", "acme-challenge")
+_os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+app.mount("/.well-known/acme-challenge", StaticFiles(directory=ACME_CHALLENGE_DIR), name="acme-challenge")
 
 @app.middleware("http")
 async def custom_domain_routing(request: Request, call_next):
     try:
         host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
         host = (host.split(":")[0] or "").strip().lower().strip(".")
+        # Allow ACME HTTP-01 challenges to pass through without redirect
+        try:
+            path = request.url.path or ""
+        except Exception:
+            path = ""
+        if path.startswith("/.well-known/acme-challenge/"):
+            return await call_next(request)
         if host:
             for name in _os.listdir(DATA_FORMS_DIR):
                 if not name.endswith(".json"):

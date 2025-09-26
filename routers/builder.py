@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 import re
 import shutil
+import subprocess
 try:
     import dns.resolver  # type: ignore
     _DNS_AVAILABLE = True
@@ -294,6 +295,12 @@ RECAPTCHA_SECRET = os.getenv("RECAPTCHA_SECRET_KEY") or os.getenv("RECAPTCHA_SEC
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY") or ""
 # Custom domain target for CNAME verification
 CUSTOM_DOMAIN_TARGET = (os.getenv("CUSTOM_DOMAIN_TARGET") or "api.cleanenroll.com").strip('.').lower()
+# ACME/Certbot configuration
+ACME_WEBROOT = os.path.join(os.getcwd(), "data", "acme")
+ACME_CHALLENGE_DIR = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
+os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+CERTBOT_BIN = os.getenv("CERTBOT_BIN") or "certbot"
+EMAIL_FOR_LE = os.getenv("LETSENCRYPT_EMAIL") or os.getenv("LE_EMAIL") or "admin@cleanenroll.com"
 
 def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
     if not RECAPTCHA_SECRET:
@@ -1011,6 +1018,74 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"DNS verification failed: {e}")
+
+@router.post("/forms/{form_id}/custom-domain/issue-cert")
+async def issue_cert(form_id: str):
+    """
+    Attempt to obtain/renew a Let's Encrypt SSL certificate for the verified custom domain.
+    Requirements:
+      - The custom domain must be verified (CNAME -> CUSTOM_DOMAIN_TARGET).
+      - The app must serve ACME HTTP-01 challenges from /.well-known/acme-challenge (webroot path).
+      - Certbot must be installed and accessible (CERTBOT_BIN), with permissions to write to system cert store.
+    Returns the stdout/stderr combined output for diagnostics.
+    """
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    domain_val = _normalize_domain(data.get("customDomain"))
+    if not domain_val:
+        raise HTTPException(status_code=400, detail="No custom domain configured")
+    if not bool(data.get("customDomainVerified")):
+        raise HTTPException(status_code=400, detail="Custom domain not verified")
+
+    # Compose certbot command using webroot method
+    webroot = ACME_WEBROOT
+    cmd = [
+        CERTBOT_BIN,
+        "certonly",
+        "--agree-tos",
+        "--non-interactive",
+        "--email", EMAIL_FOR_LE,
+        "--webroot",
+        "-w", webroot,
+        "-d", domain_val,
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+        out = proc.stdout or ""
+        if proc.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Certbot failed: {out[-4000:]}")
+        return {"success": True, "output": out[-4000:], "domain": domain_val}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cert issuance error: {e}")
+
+@router.post("/acme/challenge")
+async def acme_write_challenge(payload: Dict = None):
+    """
+    Create an ACME HTTP-01 challenge file. This is useful if an external ACME client
+    or orchestrator needs to drop a token into the webroot. This endpoint should be
+    protected behind internal auth or disabled in production if not used.
+
+    Expected payload: { token: string, content: string }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    token = str(payload.get("token") or "").strip()
+    content = str(payload.get("content") or "").strip()
+    if not token or not content:
+        raise HTTPException(status_code=400, detail="Missing token or content")
+    if not re.fullmatch(r"[A-Za-z0-9_\-.]+", token):
+        raise HTTPException(status_code=400, detail="Invalid token format")
+    try:
+        fpath = os.path.join(ACME_CHALLENGE_DIR, token)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write challenge: {e}")
 
 
 @router.get("/forms/{form_id}/responses")

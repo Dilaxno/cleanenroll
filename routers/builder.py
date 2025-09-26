@@ -236,6 +236,7 @@ class FormConfig(BaseModel):
     # Custom domain configuration
     customDomain: Optional[str] = None
     customDomainVerified: bool = False
+    sslVerified: bool = False
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
@@ -961,9 +962,10 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 @router.post("/forms/{form_id}/custom-domain/verify")
 async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optional[str] = None):
     """
-    Verify custom domain by resolving its CNAME to our target. If the form JSON does not
-    exist yet (e.g., frontend didn't upsert the backend form file), allow passing the
-    domain via request body or query param to create a minimal stub so verification can proceed.
+    Verify custom domain by resolving its CNAME to our target. Also prevent duplicate domain
+    assignments across forms and attempt a simple HTTPS check to report SSL status.
+    If the form JSON does not exist yet, allow passing the domain to create a minimal stub so
+    verification can proceed.
     """
     path = _form_path(form_id)
     data: Dict = {}
@@ -983,12 +985,12 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
                 "subtitle": "",
                 "customDomain": inbound_domain,
                 "customDomainVerified": False,
+                "sslVerified": False,
                 "createdAt": now,
                 "updatedAt": now,
             }
             _write_json(path, data)
         else:
-            # Without an existing file or inbound domain, we cannot continue
             raise HTTPException(status_code=404, detail="Form not found")
 
     domain_val = _normalize_domain(
@@ -999,8 +1001,29 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
     )
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
+
+    # Enforce uniqueness: domain cannot be assigned to another form
+    try:
+        for name in os.listdir(BACKING_DIR):
+            if not name.endswith('.json'):
+                continue
+            other_path = os.path.join(BACKING_DIR, name)
+            try:
+                other = _read_json(other_path)
+            except Exception:
+                continue
+            oid = str(other.get('id') or name.replace('.json',''))
+            odomain = _normalize_domain(other.get('customDomain'))
+            if odomain and odomain == domain_val and oid != form_id:
+                raise HTTPException(status_code=409, detail=f"This domain is already connected to another form (id={oid}). Remove it there first.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
     if not _DNS_AVAILABLE:
         raise HTTPException(status_code=500, detail="DNS library not available on server")
+
     # Resolve CNAME and validate target
     try:
         answers = dns.resolver.resolve(domain_val + ".", "CNAME")  # type: ignore[attr-defined]
@@ -1008,12 +1031,28 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
         ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
         if not ok:
             raise HTTPException(status_code=400, detail=f"CNAME for {domain_val} must point to {CUSTOM_DOMAIN_TARGET}")
-        # Mark verified
+
+        # Simple SSL check via HTTPS HEAD/GET
+        ssl_ok = False
+        try:
+            req = urllib.request.Request(url=f"https://{domain_val}", method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:  # type: ignore
+                ssl_ok = 200 <= getattr(resp, 'status', 200) < 400
+        except Exception:
+            try:
+                # Fallback to GET if HEAD blocked
+                with urllib.request.urlopen(f"https://{domain_val}", timeout=6) as resp:  # type: ignore
+                    ssl_ok = 200 <= getattr(resp, 'status', 200) < 400
+            except Exception:
+                ssl_ok = False
+
+        # Persist verification and SSL state
         data["customDomainVerified"] = True
+        data["sslVerified"] = bool(ssl_ok)
         data["customDomain"] = domain_val
         data["updatedAt"] = datetime.utcnow().isoformat()
         _write_json(path, data)
-        return {"verified": True, "domain": domain_val, "target": CUSTOM_DOMAIN_TARGET}
+        return {"verified": True, "domain": domain_val, "target": CUSTOM_DOMAIN_TARGET, "sslVerified": bool(ssl_ok)}
     except HTTPException:
         raise
     except Exception as e:

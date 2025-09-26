@@ -952,8 +952,27 @@ BUILDER_HTML = """<!doctype html>
 
 
 @router.get("/")
-async def root():
-    # Lightweight health/info message for the root path
+async def root(request: Request):
+    # Host-based custom domain routing -> redirect to form embed when matched
+    try:
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+        host = (host.split(":")[0] or "").strip().lower().strip(".")
+        if host:
+            # Scan stored forms for a verified customDomain matching this host
+            for name in os.listdir(DATA_DIR):
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(DATA_DIR, name), "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if data.get("customDomainVerified") and (str(data.get("customDomain") or "").strip().lower().strip(".") == host):
+                        form_id = data.get("id") or name.replace(".json", "")
+                        return RedirectResponse(url=f"/embed/{form_id}", status_code=307)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    # Fallback health/info message
     return PlainTextResponse("app is running")
 
 

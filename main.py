@@ -34,6 +34,38 @@ except Exception:
 
 app = FastAPI(title="CleanEnroll API")
 
+# Custom domain routing middleware: redirect host matches to SPA /form/{id}
+from fastapi import Request
+from fastapi.responses import RedirectResponse
+import json as _json
+import os as _os
+
+DATA_FORMS_DIR = _os.path.join(_os.getcwd(), "data", "forms")
+_os.makedirs(DATA_FORMS_DIR, exist_ok=True)
+
+@app.middleware("http")
+async def custom_domain_routing(request: Request, call_next):
+    try:
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+        host = (host.split(":")[0] or "").strip().lower().strip(".")
+        if host:
+            for name in _os.listdir(DATA_FORMS_DIR):
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    with open(_os.path.join(DATA_FORMS_DIR, name), "r", encoding="utf-8") as f:
+                        data = _json.load(f)
+                    if data.get("customDomainVerified") and (str(data.get("customDomain") or "").strip().lower().strip(".") == host):
+                        form_id = data.get("id") or name.replace(".json", "")
+                        # Redirect to frontend SPA /form/{id}; the core router has a helper to forward to FRONTEND_URL if configured
+                        return RedirectResponse(url=f"/form/{form_id}", status_code=307)
+                except Exception:
+                    continue
+    except Exception:
+        # On any error, continue normal handling
+        pass
+    return await call_next(request)
+
 # Production-safe error responses
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse

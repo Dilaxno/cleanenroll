@@ -542,21 +542,21 @@ async def geo_check(form_id: str, request: Request):
 
     ip = _client_ip(request)
     _, country = _country_from_ip(ip)
+    print(f"[DEBUG] ip={ip}, country={country}, allowed={allowed}, restricted={restricted}")
 
-    # If we cannot determine country (no DB or IP), allow by default
+    # Require valid country
     if not country:
-        logger.debug("geo_check id=%s ip=%s country undetermined (allow)", form_id, ip)
-        return {"allowed": True, "country": None}
+        raise HTTPException(status_code=403, detail="Could not determine your location")
 
     # Enforce allowed countries whitelist when present
     if allowed and country not in allowed:
         logger.info("geo_check blocked (not allowed) id=%s ip=%s country=%s", form_id, ip, country)
-        raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+        raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form")
 
     # Enforce restricted blacklist
     if restricted and country in restricted:
         logger.info("geo_check blocked (restricted) id=%s ip=%s country=%s", form_id, ip, country)
-        raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+        raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form")
 
     logger.debug("geo_check allowed id=%s ip=%s country=%s", form_id, ip, country)
     return {"allowed": True, "country": country}
@@ -948,29 +948,61 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     return resp
 
 @router.post("/forms/{form_id}/custom-domain/verify")
-async def verify_custom_domain(form_id: str):
+async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optional[str] = None):
+    """
+    Verify custom domain by resolving its CNAME to our target. If the form JSON does not
+    exist yet (e.g., frontend didn't upsert the backend form file), allow passing the
+    domain via request body or query param to create a minimal stub so verification can proceed.
+    """
     path = _form_path(form_id)
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Form not found")
-    data = _read_json(path)
-    domain = _normalize_domain(data.get("customDomain"))
-    if not domain:
+    data: Dict = {}
+    if os.path.exists(path):
+        data = _read_json(path)
+    else:
+        inbound_domain = _normalize_domain(
+            domain
+            or ((payload or {}).get("customDomain") if isinstance(payload, dict) else None)
+            or ((payload or {}).get("domain") if isinstance(payload, dict) else None)
+        )
+        if inbound_domain:
+            now = datetime.utcnow().isoformat()
+            data = {
+                "id": form_id,
+                "title": "Untitled Form",
+                "subtitle": "",
+                "customDomain": inbound_domain,
+                "customDomainVerified": False,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            _write_json(path, data)
+        else:
+            # Without an existing file or inbound domain, we cannot continue
+            raise HTTPException(status_code=404, detail="Form not found")
+
+    domain_val = _normalize_domain(
+        data.get("customDomain")
+        or domain
+        or ((payload or {}).get("customDomain") if isinstance(payload, dict) else None)
+        or ((payload or {}).get("domain") if isinstance(payload, dict) else None)
+    )
+    if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
     if not _DNS_AVAILABLE:
         raise HTTPException(status_code=500, detail="DNS library not available on server")
     # Resolve CNAME and validate target
     try:
-        answers = dns.resolver.resolve(domain + ".", "CNAME")  # type: ignore[attr-defined]
+        answers = dns.resolver.resolve(domain_val + ".", "CNAME")  # type: ignore[attr-defined]
         targets = [str(rdata.target).rstrip('.').lower() for rdata in answers]
         ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
         if not ok:
-            raise HTTPException(status_code=400, detail=f"CNAME for {domain} must point to {CUSTOM_DOMAIN_TARGET}")
+            raise HTTPException(status_code=400, detail=f"CNAME for {domain_val} must point to {CUSTOM_DOMAIN_TARGET}")
         # Mark verified
         data["customDomainVerified"] = True
-        data["customDomain"] = domain
+        data["customDomain"] = domain_val
         data["updatedAt"] = datetime.utcnow().isoformat()
         _write_json(path, data)
-        return {"verified": True, "domain": domain, "target": CUSTOM_DOMAIN_TARGET}
+        return {"verified": True, "domain": domain_val, "target": CUSTOM_DOMAIN_TARGET}
     except HTTPException:
         raise
     except Exception as e:

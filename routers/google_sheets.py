@@ -334,6 +334,28 @@ def toggle_sync(userId: str = Query(...), formId: str = Query(...), payload: Dic
     return {"synced": desired}
 
 
+@router.get("/mappings")
+def list_mappings(userId: str = Query(...)):
+    """Return all Google Sheets mappings created by this user (formId -> mapping)."""
+    snap = _get_user_doc(userId).get()
+    data = snap.to_dict() or {}
+    gs_map = ((data.get("integrations") or {}).get("googleSheetsMappings") or {})
+    out: List[Dict[str, Any]] = []
+    for form_id, mapping in gs_map.items():
+        if not isinstance(mapping, dict):
+            continue
+        entry = {
+            "formId": form_id,
+            "title": mapping.get("title") or mapping.get("sheetName") or "Sheet",
+            "spreadsheetId": mapping.get("spreadsheetId"),
+            "sheetName": mapping.get("sheetName") or "Sheet1",
+            "synced": bool(mapping.get("synced")),
+            "url": (f"https://docs.google.com/spreadsheets/d/{mapping.get('spreadsheetId')}" if mapping.get("spreadsheetId") else None),
+        }
+        out.append(entry)
+    return {"mappings": out}
+
+
 # Helper used by builder.submit_form to auto-append new rows when synced
 
 def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str, Any]):

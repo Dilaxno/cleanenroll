@@ -224,6 +224,7 @@ class FormConfig(BaseModel):
     branding: Branding = Branding()
     fields: List[FieldSchema] = []
     restrictedCountries: Optional[List[str]] = []  # ISO alpha-2 codes (e.g., ["US","FR"]) uppercased
+    allowedCountries: Optional[List[str]] = []  # ISO alpha-2 whitelist; when set, only these can submit
     # Duplicate submission prevention by IP
     preventDuplicateByIP: bool = False
     duplicateWindowHours: int = 24  # time window to consider duplicates
@@ -398,8 +399,9 @@ async def create_form(cfg: FormConfig):
             f["step"] = max(1, step_val)
         except Exception:
             f["step"] = 1
-    # Normalize restrictedCountries to upper-case ISO codes
+    # Normalize restrictedCountries/allowedCountries to upper-case ISO codes
     data["restrictedCountries"] = _normalize_country_list(data.get("restrictedCountries") or [])
+    data["allowedCountries"] = _normalize_country_list(data.get("allowedCountries") or [])
     data["id"] = form_id
     data["createdAt"] = now
     data["updatedAt"] = now
@@ -439,8 +441,9 @@ async def update_form(form_id: str, cfg: FormConfig):
             f["step"] = max(1, step_val)
         except Exception:
             f["step"] = 1
-    # Normalize restrictedCountries to upper-case ISO codes
+    # Normalize restrictedCountries/allowedCountries to upper-case ISO codes
     data["restrictedCountries"] = _normalize_country_list(data.get("restrictedCountries") or [])
+    data["allowedCountries"] = _normalize_country_list(data.get("allowedCountries") or [])
     data["id"] = form_id
     prev = _read_json(path)
     # Normalize custom domain and reset verification if changed
@@ -534,10 +537,8 @@ async def geo_check(form_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Form not found")
     form_data = _read_json(path)
 
+    allowed = _normalize_country_list(form_data.get("allowedCountries") or [])
     restricted = _normalize_country_list(form_data.get("restrictedCountries") or [])
-    if not restricted:
-        logger.debug("geo_check id=%s unrestricted", form_id)
-        return {"allowed": True, "country": None}
 
     ip = _client_ip(request)
     _, country = _country_from_ip(ip)
@@ -547,9 +548,14 @@ async def geo_check(form_id: str, request: Request):
         logger.debug("geo_check id=%s ip=%s country undetermined (allow)", form_id, ip)
         return {"allowed": True, "country": None}
 
-    if country in restricted:
-        # Block with required message
-        logger.info("geo_check blocked id=%s ip=%s country=%s", form_id, ip, country)
+    # Enforce allowed countries whitelist when present
+    if allowed and country not in allowed:
+        logger.info("geo_check blocked (not allowed) id=%s ip=%s country=%s", form_id, ip, country)
+        raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+
+    # Enforce restricted blacklist
+    if restricted and country in restricted:
+        logger.info("geo_check blocked (restricted) id=%s ip=%s country=%s", form_id, ip, country)
         raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
 
     logger.debug("geo_check allowed id=%s ip=%s country=%s", form_id, ip, country)
@@ -739,10 +745,14 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     # Determine client IP
     ip = _client_ip(request)
 
-    # Geo restriction enforcement
+    # Geo restriction enforcement (allowed whitelist takes precedence when provided)
+    allowed = _normalize_country_list(form_data.get("allowedCountries") or []) if is_pro else []
     restricted = _normalize_country_list(form_data.get("restrictedCountries") or []) if is_pro else []
+    if allowed:
+        _, country = _country_from_ip(ip)
+        if country and country not in allowed:
+            raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
     if restricted:
-        ip = _client_ip(request)
         _, country = _country_from_ip(ip)
         if country and country in restricted:
             raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")

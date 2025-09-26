@@ -256,6 +256,8 @@ async def dodo_webhook(payload: Dict, request: Request):
         next_billing = data.get('current_period_end') or data.get('next_billing_at') or data.get('renews_at')
         price_amount = data.get('amount') or data.get('price') or None
         currency = (data.get('currency') or 'USD').upper()
+        # Payment method details (if present)
+        payment_method = data.get('payment_method') or data.get('paymentMethod') or {}
 
         # Normalize timestamp from seconds or ISO
         def normalize_ts(v):
@@ -288,6 +290,7 @@ async def dodo_webhook(payload: Dict, request: Request):
                     'currency': currency,
                     'price': price_amount if isinstance(price_amount, (int, float)) else None,
                     'status': 'active',
+                    'paymentMethod': payment_method if isinstance(payment_method, dict) else None,
                 })
         else:
             logger.info('[dodo-webhook] unhandled event type=%s', event_type)

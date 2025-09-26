@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Literal, Any
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import json
 import uuid
@@ -1010,10 +1010,46 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
 
 
 @router.get("/forms/{form_id}/responses")
-async def list_responses(form_id: str, limit: int = 100, offset: int = 0):
+async def list_responses(
+    form_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    from_ts: Optional[str] = Query(default=None, alias="from", description="ISO datetime lower bound (inclusive)"),
+    to_ts: Optional[str] = Query(default=None, alias="to", description="ISO datetime upper bound (inclusive)"),
+):
     """
     List stored responses for a form. Results are sorted by submittedAt descending.
+    Optional query params:
+      - from (ISO datetime): include responses with submittedAt >= this
+      - to (ISO datetime): include responses with submittedAt <= this
     """
+    def _parse_bound_ms(val: Optional[str]) -> Optional[int]:
+        if not val:
+            return None
+        try:
+            s = str(val).strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except Exception:
+            return None
+
+    def _submitted_ms(rec: Dict) -> int:
+        ts = rec.get("submittedAt") or ""
+        try:
+            s = str(ts).strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except Exception:
+            return 0
+
     dir_path = _responses_dir(form_id)
     items: List[Dict] = []
     if os.path.exists(dir_path):
@@ -1024,6 +1060,24 @@ async def list_responses(form_id: str, limit: int = 100, offset: int = 0):
                     items.append(_read_json(fpath))
                 except Exception:
                     continue
-    items.sort(key=lambda d: d.get("submittedAt") or "", reverse=True)
+
+    # Apply server-side date filters when provided
+    lower = _parse_bound_ms(from_ts)
+    upper = _parse_bound_ms(to_ts)
+    if (lower is not None) or (upper is not None):
+        filtered: List[Dict] = []
+        for rec in items:
+            ms = _submitted_ms(rec)
+            if (lower is not None) and (ms < lower):
+                continue
+            if (upper is not None) and (ms > upper):
+                continue
+            filtered.append(rec)
+        items = filtered
+
+    # Sort by submittedAt desc (fallback to 0 when missing)
+    items.sort(key=lambda d: _submitted_ms(d), reverse=True)
+
+    # Pagination
     sliced = items[offset: offset + max(0, int(limit))]
     return {"count": len(items), "responses": sliced}

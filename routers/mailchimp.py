@@ -9,6 +9,7 @@ from urllib.parse import urlencode, quote_plus
 
 import requests
 from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi.responses import RedirectResponse
 
 # Firebase Admin
 import firebase_admin
@@ -33,6 +34,8 @@ MAILCHIMP_CLIENT_ID = os.getenv("MAILCHIMP_CLIENT_ID", "")
 MAILCHIMP_CLIENT_SECRET = os.getenv("MAILCHIMP_CLIENT_SECRET", "")
 MAILCHIMP_REDIRECT_URI = os.getenv("MAILCHIMP_REDIRECT_URI", "https://api.cleanenroll.com/api/integrations/mailchimp/callback")
 ENCRYPTION_SECRET = (os.getenv("ENCRYPTION_SECRET") or "change-this-secret").encode("utf-8")
+# Optional: where to send users after successful connect (e.g., your dashboard)
+FRONTEND_REDIRECT_URL = os.getenv("FRONTEND_REDIRECT_URL", "https://cleanenroll.com/dashboard?integrations=mailchimp&status=connected")
 
 if not MAILCHIMP_CLIENT_ID or not MAILCHIMP_CLIENT_SECRET:
     logger.warning("Mailchimp OAuth not configured: missing client id/secret")
@@ -70,7 +73,7 @@ def _get_user_doc(user_id: str):
 
 
 @router.get("/authorize")
-def authorize(userId: str = Query(...)):
+def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
     """
     Step 1: Redirect URL for Mailchimp OAuth. Frontend should redirect the user-agent here.
     We return the URL so the client can navigate to it.
@@ -79,7 +82,10 @@ def authorize(userId: str = Query(...)):
         raise HTTPException(status_code=500, detail="Mailchimp not configured")
 
     scope = "audience:read audience:write"  # lists read/write
-    state = json.dumps({"userId": userId})
+    state_data = {"userId": userId}
+    if redirect:
+        state_data["redirect"] = redirect
+    state = json.dumps(state_data)
     params = {
         "response_type": "code",
         "client_id": MAILCHIMP_CLIENT_ID,
@@ -146,6 +152,11 @@ def callback(code: str = Query(None), state: str = Query("{}")):
             }
         }
     }, merge=True)
+
+    # After successful connection, redirect user back to the frontend if configured
+    redirect_target = parsed_state.get("redirect") or FRONTEND_REDIRECT_URL
+    if redirect_target:
+        return RedirectResponse(url=redirect_target, status_code=302)
 
     return {"connected": True}
 

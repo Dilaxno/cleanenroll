@@ -950,6 +950,18 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             "answers": answers,
         }
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)
+        # Attempt Google Sheets append if syncing is enabled for this form
+        try:
+            # try import via package-aware path first
+            try:
+                from .google_sheets import try_append_submission_for_form  # type: ignore
+            except Exception:
+                from routers.google_sheets import try_append_submission_for_form  # type: ignore
+            owner_id = str(form_data.get("userId") or "").strip() or None
+            if owner_id:
+                try_append_submission_for_form(owner_id, form_id, record)
+        except Exception:
+            logger.exception("google_sheets sync append failed form_id=%s", form_id)
         # Optionally return responseId to the client
         resp["responseId"] = response_id  # type: ignore
     except Exception:

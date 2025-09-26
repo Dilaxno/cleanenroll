@@ -50,6 +50,27 @@ except Exception:
 # Logger
 logger = logging.getLogger("backend.builder")
 
+# Firestore plan check (to gate Pro features on server)
+try:
+    import firebase_admin  # type: ignore
+    from firebase_admin import firestore as _fs  # type: ignore
+    _FS_AVAILABLE = True
+except Exception:
+    _FS_AVAILABLE = False
+
+from typing import Optional as _Optional
+
+def _is_pro_plan(user_id: _Optional[str]) -> bool:
+    if not _FS_AVAILABLE or not user_id:
+        return False
+    try:
+        doc = _fs.client().collection("users").document(user_id).get()
+        data = doc.to_dict() or {}
+        plan = str(data.get("plan") or "").lower()
+        return plan in ("pro", "business", "enterprise")
+    except Exception:
+        return False
+
 
 # Storage
 BACKING_DIR = os.path.join(os.getcwd(), "data", "forms")
@@ -687,10 +708,16 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         raise HTTPException(status_code=404, detail="Form not found")
 
     form_data = _read_json(path)
+    # Determine if owner has Pro plan (fallback to Free if unknown)
+    try:
+        owner_id = str(form_data.get("userId") or "").strip() or None
+    except Exception:
+        owner_id = None
+    is_pro = _is_pro_plan(owner_id)
 
     # Password protection enforcement
     try:
-        if bool(form_data.get("passwordProtectionEnabled")) and form_data.get("passwordHash"):
+        if is_pro and bool(form_data.get("passwordProtectionEnabled")) and form_data.get("passwordHash"):
             supplied = None
             if isinstance(payload, dict):
                 try:
@@ -713,7 +740,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     ip = _client_ip(request)
 
     # Geo restriction enforcement
-    restricted = _normalize_country_list(form_data.get("restrictedCountries") or [])
+    restricted = _normalize_country_list(form_data.get("restrictedCountries") or []) if is_pro else []
     if restricted:
         ip = _client_ip(request)
         _, country = _country_from_ip(ip)
@@ -721,7 +748,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
 
     # Duplicate submission check by IP within a time window
-    if bool(form_data.get("preventDuplicateByIP")):
+    if is_pro and bool(form_data.get("preventDuplicateByIP")):
         try:
             window_hours = int(form_data.get("duplicateWindowHours") or 24)
         except Exception:
@@ -757,7 +784,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             pass
 
     # reCAPTCHA verification when enabled
-    if form_data.get("recaptchaEnabled"):
+    if is_pro and form_data.get("recaptchaEnabled"):
         if not isinstance(payload, dict):
             payload = payload or {}
         token = (
@@ -774,7 +801,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         logger.debug("submit_form recaptcha ok id=%s ip=%s", form_id, client_ip)
 
     # Email validation (format + MX) when enabled
-    if form_data.get("emailValidationEnabled"):
+    if is_pro and form_data.get("emailValidationEnabled"):
         if not isinstance(payload, dict):
             payload = payload or {}
         fields_def = form_data.get("fields") or []

@@ -1072,26 +1072,20 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
 
 @router.post("/forms/{form_id}/custom-domain/issue-cert")
 async def issue_cert(form_id: str):
-    """
-    Attempt to obtain/renew a Let's Encrypt SSL certificate for the verified custom domain.
-    Requirements:
-      - The custom domain must be verified (CNAME -> CUSTOM_DOMAIN_TARGET).
-      - The app must serve ACME HTTP-01 challenges from /.well-known/acme-challenge (webroot path).
-      - Certbot must be installed and accessible (CERTBOT_BIN), with permissions to write to system cert store.
-    Returns the stdout/stderr combined output for diagnostics.
-    """
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
     data = _read_json(path)
+
     domain_val = _normalize_domain(data.get("customDomain"))
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
-    if not bool(data.get("customDomainVerified")):
-        raise HTTPException(status_code=400, detail="Custom domain not verified")
+    if not data.get("customDomainVerified"):
+        raise HTTPException(status_code=400, detail="Domain not verified yet")
 
-    # Compose certbot command using webroot method
-    webroot = ACME_WEBROOT
+    # Ensure ACME challenge dir exists
+    os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+
     cmd = [
         CERTBOT_BIN,
         "certonly",
@@ -1099,29 +1093,26 @@ async def issue_cert(form_id: str):
         "--non-interactive",
         "--email", EMAIL_FOR_LE,
         "--webroot",
-        "-w", webroot,
+        "-w", ACME_WEBROOT,
         "-d", domain_val,
     ]
+
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
         out = proc.stdout or ""
         if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Certbot failed: {out[-4000:]}")
+            raise HTTPException(status_code=500, detail=f"Certbot failed:\n{out[-4000:]}")
+        # Persist SSL verified = True after successful cert issuance
+        data["sslVerified"] = True
+        data["updatedAt"] = datetime.utcnow().isoformat()
+        _write_json(path, data)
         return {"success": True, "output": out[-4000:], "domain": domain_val}
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cert issuance error: {e}")
 
+# ---- 3. ACME challenge helper (optional) ----
 @router.post("/acme/challenge")
 async def acme_write_challenge(payload: Dict = None):
-    """
-    Create an ACME HTTP-01 challenge file. This is useful if an external ACME client
-    or orchestrator needs to drop a token into the webroot. This endpoint should be
-    protected behind internal auth or disabled in production if not used.
-
-    Expected payload: { token: string, content: string }
-    """
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid payload")
     token = str(payload.get("token") or "").strip()
@@ -1130,7 +1121,9 @@ async def acme_write_challenge(payload: Dict = None):
         raise HTTPException(status_code=400, detail="Missing token or content")
     if not re.fullmatch(r"[A-Za-z0-9_\-.]+", token):
         raise HTTPException(status_code=400, detail="Invalid token format")
+
     try:
+        os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
         fpath = os.path.join(ACME_CHALLENGE_DIR, token)
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)

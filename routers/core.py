@@ -98,6 +98,40 @@ try:
 except Exception:  # pragma: no cover
     _FSFieldFilter = None  # type: ignore
 
+# Temporary/disposable domains cache (Firestore-backed)
+TEMP_DOMAINS_CACHE: set[str] = set()
+TEMP_DOMAINS_LOADED_AT: float = 0
+TEMP_DOMAINS_TTL_SECONDS: int = 600
+
+async def _ensure_temp_domains_loaded(force: bool = False):
+    """
+    Load 'temporary-domains' collection into an in-memory set for fast lookups.
+    The document ID or 'domain' field is used as the domain string.
+    """
+    global TEMP_DOMAINS_CACHE, TEMP_DOMAINS_LOADED_AT
+    try:
+        import time as _time
+        if not force and TEMP_DOMAINS_LOADED_AT and (_time.time() - TEMP_DOMAINS_LOADED_AT) < TEMP_DOMAINS_TTL_SECONDS:
+            return
+        if admin_firestore is None:
+            return
+        fs = admin_firestore.client()
+        stream = fs.collection("temporary-domains").stream()
+        s: set[str] = set()
+        for doc in stream:
+            try:
+                data = doc.to_dict() or {}
+                dom = (str(data.get("domain") or doc.id or "")).strip().lower()
+                if dom:
+                    s.add(dom)
+            except Exception:
+                continue
+        TEMP_DOMAINS_CACHE = s
+        TEMP_DOMAINS_LOADED_AT = _time.time()
+    except Exception:
+        # Keep cache as-is on failure
+        pass
+
 router = APIRouter()
 
 class SignupCheckResponse(BaseModel):
@@ -466,6 +500,81 @@ async def verify_confirm(token: str):
         return {"status": "invalid"}
 
 
+@router.post("/api/disposable/sync")
+@router.post("/api/disposable/sync/")
+async def sync_disposable_domains(strict: bool = True):
+    """Fetch disposable domain lists and store into Firestore collection 'temporary-domains'."""
+    try:
+        _ensure_firebase_initialized()
+    except HTTPException as e:
+        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+
+    # Fetch upstream lists
+    try:
+        import urllib.request as _url
+        sources = [
+            "https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains.txt",
+        ]
+        if strict:
+            sources.append("https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains_strict.txt")
+        domains: set[str] = set()
+        for u in sources:
+            try:
+                with _url.urlopen(u, timeout=20) as resp:
+                    text = resp.read().decode("utf-8", errors="ignore")
+                    for line in text.splitlines():
+                        dom = line.strip().lower()
+                        if dom and not dom.startswith('#'):
+                            domains.add(dom)
+            except Exception:
+                continue
+        if not domains:
+            raise HTTPException(status_code=502, detail="Failed to fetch disposable domains from upstream")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fetch error: {e}")
+
+    fs = admin_firestore.client()
+    col = fs.collection("temporary-domains")
+    # Clear existing docs (best-effort)
+    try:
+        existing = list(col.stream())
+        i = 0
+        while i < len(existing):
+            batch = fs.batch()
+            for doc in existing[i:i+400]:
+                batch.delete(doc.reference)
+            batch.commit()
+            i += 400
+    except Exception:
+        pass
+
+    # Insert new items in batches
+    count = 0
+    items = list(domains)
+    i = 0
+    while i < len(items):
+        batch = fs.batch()
+        for dom in items[i:i+400]:
+            ref = col.document(dom)
+            batch.set(ref, {
+                "domain": dom,
+                "source": "disposable-email-domains",
+                "strict": bool(strict),
+                "updatedAt": admin_firestore.SERVER_TIMESTAMP,
+            })
+            count += 1
+        batch.commit()
+        i += 400
+
+    # Refresh in-memory cache
+    await _ensure_temp_domains_loaded(force=True)
+
+    return {"status": "ok", "count": count}
+
 @router.get("/api/validate-email")
 @router.get("/api/validate-email/")
 @limiter.limit("30/minute")
@@ -487,6 +596,7 @@ async def validate_email_deliverability(email: str, request: Request):
         "suggestion": "",
         "suggestion_domain": "",
         "suggestion_distance": None,
+        "disposable": False,
     }
     if not raw:
         result["reason"] = "Email is required"
@@ -533,6 +643,17 @@ async def validate_email_deliverability(email: str, request: Request):
     result["mx_hosts"] = mx_hosts
     result["has_mx"] = len(mx_hosts) > 0
     result["deliverable"] = bool(result["syntax_valid"] and result["has_mx"])
+    # Check Firestore-backed disposable domains list
+    try:
+        await _ensure_temp_domains_loaded()
+        dom_lower = (domain or "").strip().lower()
+        if dom_lower and dom_lower in TEMP_DOMAINS_CACHE:
+            result["disposable"] = True
+            result["deliverable"] = False
+            if not result["reason"]:
+                result["reason"] = "Disposable email domains are not accepted"
+    except Exception:
+        pass
     if not result["deliverable"] and not result["reason"]:
         result["reason"] = "No MX records found for domain"
 

@@ -483,6 +483,25 @@ def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
         return False, None
 
 
+def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[float]]:
+    """Return (countryISO2, lat, lon) best-effort."""
+    if not _GEO_LOOKUP_AVAILABLE or not ip:
+        return None, None, None
+    try:
+        res = DbIpCity.get(ip, api_key="free")  # type: ignore
+        country = (getattr(res, "country", None) or "").upper() or None
+        lat = None
+        lon = None
+        try:
+            lat = float(getattr(res, "latitude", None)) if getattr(res, "latitude", None) is not None else None
+            lon = float(getattr(res, "longitude", None)) if getattr(res, "longitude", None) is not None else None
+        except Exception:
+            lat, lon = None, None
+        return country, lat, lon
+    except Exception:
+        return None, None, None
+
+
 # -----------------------------
 # Routes
 # -----------------------------
@@ -1002,11 +1021,16 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 val = payload.get(label)
             if val is not None:
                 answers[fid] = val
+        # Geo enrich from client IP
+        country_code, lat, lon = _geo_from_ip(ip)
         record = {
             "responseId": response_id,
             "formId": form_id,
             "submittedAt": submitted_at,
             "clientIp": ip,
+            "country": country_code,
+            "lat": lat,
+            "lon": lon,
             "answers": answers,
         }
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)

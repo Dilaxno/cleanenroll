@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import logging
 from typing import Dict, Any, List, Optional
+import time
 from urllib.parse import urlencode, quote_plus
 
 import requests
@@ -66,6 +67,68 @@ def _decrypt_token(ciphertext: str) -> str:
     if not hmac.compare_digest(mac, hmac.new(ENCRYPTION_SECRET, raw, hashlib.sha256).digest()):
         raise ValueError("Token MAC verification failed")
     return raw.decode("utf-8")
+
+
+# Token helpers for Mailchimp (best-effort refresh support)
+
+def _get_mailchimp_tokens(user_id: str):
+    doc = _get_user_doc(user_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    data = doc.to_dict() or {}
+    integ = ((data.get("integrations") or {}).get("mailchimp") or {})
+    tok_enc = integ.get("token")
+    rtok_enc = integ.get("refreshToken")
+    expiry = int(integ.get("expiry") or 0)
+    dc = integ.get("dc")
+    api_base = integ.get("apiBase") or (f"https://{dc}.api.mailchimp.com/3.0" if dc else None)
+    if not tok_enc or not dc:
+        raise HTTPException(status_code=400, detail="Mailchimp not connected for this user")
+    access = _decrypt_token(tok_enc)
+    refresh = _decrypt_token(rtok_enc) if rtok_enc else None
+    return access, refresh, expiry, dc, api_base
+
+
+def _save_mailchimp_tokens(user_id: str, access_token: str, refresh_token: Optional[str], expires_in: Optional[int]):
+    payload: Dict[str, Any] = {"token": _encrypt_token(access_token)}
+    if refresh_token:
+        payload["refreshToken"] = _encrypt_token(refresh_token)
+    if expires_in:
+        payload["expiry"] = int(time.time()) + int(expires_in)
+    _get_user_doc(user_id).set({"integrations": {"mailchimp": payload}}, merge=True)
+
+
+def _get_valid_mailchimp_token(user_id: str) -> str:
+    access, refresh, expiry, _dc, _api = _get_mailchimp_tokens(user_id)
+    now = int(time.time())
+    if expiry and now < (expiry - 60):
+        return access
+    if not refresh:
+        # Mailchimp typically does not issue refresh tokens; keep using current token
+        return access
+    # Attempt refresh (if provider supports it). Ignore errors and fallback to existing access.
+    try:
+        token_url = "https://login.mailchimp.com/oauth2/token"
+        data = {
+            "grant_type": "refresh_token",
+            "client_id": MAILCHIMP_CLIENT_ID,
+            "client_secret": MAILCHIMP_CLIENT_SECRET,
+            "refresh_token": refresh,
+        }
+        resp = requests.post(token_url, data=data, timeout=15)
+        if resp.status_code == 200:
+            j = resp.json()
+            new_access = j.get("access_token") or access
+            expires_in = j.get("expires_in")
+            # Mailchimp may not return refresh_token on refresh
+            _save_mailchimp_tokens(user_id, new_access, refresh, expires_in)
+            return new_access
+        else:
+            logger.warning("Mailchimp token refresh failed: %s", resp.text)
+            return access
+    except Exception:
+        logger.exception("Mailchimp token refresh error")
+        return access
 
 
 def _get_user_doc(user_id: str):
@@ -139,6 +202,10 @@ def callback(code: str = Query(None), state: str = Query("{}")):
     meta = meta_resp.json()
     dc = meta.get("dc")
     api_base = f"https://{dc}.api.mailchimp.com/3.0"
+# Optional refresh support (Mailchimp may not issue refresh_token; handle if present)
+refresh_token = token_payload.get("refresh_token")
+expires_in = token_payload.get("expires_in")
+enc_refresh = _encrypt_token(refresh_token) if refresh_token else None
 
     # Store encrypted token + dc under users/{userId}/integrations/mailchimp
     enc = _encrypt_token(access_token)
@@ -149,6 +216,8 @@ def callback(code: str = Query(None), state: str = Query("{}")):
                 "token": enc,
                 "dc": dc,
                 "apiBase": api_base,
+                "refreshToken": enc_refresh if enc_refresh else None,
+                "expiry": (int(time.time()) + int(expires_in)) if expires_in else None,
             }
         }
     }, merge=True)
@@ -162,17 +231,17 @@ def callback(code: str = Query(None), state: str = Query("{}")):
 
 
 def _get_mailchimp_auth(user_id: str) -> Dict[str, str]:
+    # Retrieve API base and data center; validate token or refresh when possible
     doc = _get_user_doc(user_id).get()
     if not doc.exists:
         raise HTTPException(status_code=404, detail="User not found")
     data = doc.to_dict() or {}
     integ = ((data.get("integrations") or {}).get("mailchimp") or {})
-    token_enc = integ.get("token")
     dc = integ.get("dc")
     api_base = integ.get("apiBase")
-    if not token_enc or not dc:
+    if not dc:
         raise HTTPException(status_code=400, detail="Mailchimp not connected for this user")
-    token = _decrypt_token(token_enc)
+    token = _get_valid_mailchimp_token(user_id)
     return {"token": token, "dc": dc, "api_base": api_base or f"https://{dc}.api.mailchimp.com/3.0"}
 
 

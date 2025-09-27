@@ -236,6 +236,11 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
             'type': 'subscription.cancelled',
             'data': { 'metadata': { 'user_uid': uid } }
         }, request)
+        # Also forward event to provider webhook so dashboard reflects cancellation
+        try:
+            _forward_dodo_event('subscription.cancelled', uid)
+        except Exception:
+            pass
         return { 'success': True, 'cancelled': True }
     except Exception:
         logger.exception('[dodo-cancel] failed to cancel now')

@@ -202,10 +202,10 @@ def callback(code: str = Query(None), state: str = Query("{}")):
     meta = meta_resp.json()
     dc = meta.get("dc")
     api_base = f"https://{dc}.api.mailchimp.com/3.0"
-# Optional refresh support (Mailchimp may not issue refresh_token; handle if present)
-refresh_token = token_payload.get("refresh_token")
-expires_in = token_payload.get("expires_in")
-enc_refresh = _encrypt_token(refresh_token) if refresh_token else None
+    # Optional refresh support (Mailchimp may not issue refresh_token; handle if present)
+    refresh_token = token_payload.get("refresh_token")
+    expires_in = token_payload.get("expires_in")
+    enc_refresh = _encrypt_token(refresh_token) if refresh_token else None
 
     # Store encrypted token + dc under users/{userId}/integrations/mailchimp
     enc = _encrypt_token(access_token)

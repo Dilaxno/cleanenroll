@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Literal, Any
 import logging
@@ -509,6 +510,39 @@ def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[floa
 # -----------------------------
 
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
+
+# In-memory cache for world countries GeoJSON to reduce outbound fetches
+_WORLD_COUNTRIES_CACHE: Dict[str, Any] = {"data": None, "ts": 0}
+
+@router.get("/geo/world-countries")
+async def get_world_countries():
+    """Serve world countries GeoJSON (with ISO-2 'cca2') from server domain to comply with CSP.
+    Tries jsDelivr, falls back to unpkg. Cached in-memory for 6h.
+    """
+    import time
+    now = time.time()
+    try:
+        if _WORLD_COUNTRIES_CACHE.get("data") and (now - float(_WORLD_COUNTRIES_CACHE.get("ts") or 0) < 6 * 3600):
+            return JSONResponse(content=_WORLD_COUNTRIES_CACHE["data"])  # type: ignore
+    except Exception:
+        pass
+    sources = [
+        "https://cdn.jsdelivr.net/npm/world-countries@4.0.0/countries.geo.json",
+        "https://unpkg.com/world-countries@4.0.0/countries.geo.json",
+    ]
+    last_err = None
+    for url in sources:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:  # type: ignore
+                raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+                _WORLD_COUNTRIES_CACHE["data"] = data
+                _WORLD_COUNTRIES_CACHE["ts"] = now
+                return JSONResponse(content=data)
+        except Exception as e:
+            last_err = e
+            continue
+    raise HTTPException(status_code=500, detail=f"Failed to load world countries: {last_err}") 
 
 # Use the shared limiter instance configured in utils.limiter
 try:

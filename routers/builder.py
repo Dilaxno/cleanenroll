@@ -245,6 +245,8 @@ class FormConfig(BaseModel):
     # Duplicate submission prevention by IP
     preventDuplicateByIP: bool = False
     duplicateWindowHours: int = 24  # time window to consider duplicates
+    # Submission limit (0 or None = unlimited)
+    submissionLimit: Optional[int] = None
     # Custom domain configuration
     customDomain: Optional[str] = None
     customDomainVerified: bool = False
@@ -805,6 +807,24 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         raise HTTPException(status_code=404, detail="Form not found")
 
     form_data = _read_json(path)
+
+    # Submission limit enforcement (file-backed count)
+    try:
+        limit_raw = form_data.get("submissionLimit")
+        limit = int(limit_raw) if limit_raw is not None else 0
+        if limit and limit > 0:
+            dir_path = _responses_dir(form_id)
+            current = 0
+            if os.path.exists(dir_path):
+                current = sum(1 for n in os.listdir(dir_path) if n.endswith('.json'))
+            if current >= limit:
+                raise HTTPException(status_code=429, detail="I'm sorry, we've reached the capacity limit, we cannot accept new submissions at this moment")
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail open on unexpected errors
+        pass
+
     # Determine if owner has Pro plan (fallback to Free if unknown)
     try:
         owner_id = str(form_data.get("userId") or "").strip() or None

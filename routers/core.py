@@ -36,6 +36,14 @@ except Exception:
     _dns_resolver = None  # type: ignore
     _DNSPY_AVAILABLE = False
 
+# Fuzzy matching for email domain typo suggestions
+try:
+    from rapidfuzz.distance import Levenshtein as _lev  # type: ignore
+    _FUZZY_AVAILABLE = True
+except Exception:
+    _lev = None  # type: ignore
+    _FUZZY_AVAILABLE = False
+
 # Rate limiter shared instance
 try:
     from ..utils.limiter import limiter  # type: ignore
@@ -463,7 +471,7 @@ async def verify_confirm(token: str):
 @limiter.limit("30/minute")
 async def validate_email_deliverability(email: str, request: Request):
     """Validate email syntax and MX deliverability in real time.
-    Returns a JSON payload with syntax_valid, has_mx, deliverable, and mx_hosts.
+    Returns a JSON payload with syntax_valid, has_mx, deliverable, mx_hosts, and typo suggestion when applicable.
     """
     raw = (email or "").strip()
     result = {
@@ -474,6 +482,11 @@ async def validate_email_deliverability(email: str, request: Request):
         "has_mx": False,
         "mx_hosts": [],
         "reason": "",
+        # Typo suggestion payload
+        "typo_suspected": False,
+        "suggestion": "",
+        "suggestion_domain": "",
+        "suggestion_distance": None,
     }
     if not raw:
         result["reason"] = "Email is required"
@@ -522,6 +535,42 @@ async def validate_email_deliverability(email: str, request: Request):
     result["deliverable"] = bool(result["syntax_valid"] and result["has_mx"])
     if not result["deliverable"] and not result["reason"]:
         result["reason"] = "No MX records found for domain"
+
+    # Smart domain typo detection against common providers using edit distance
+    try:
+        local_part = raw.split("@", 1)[0] if ("@" in raw) else ""
+        dom = (domain or "").lower().strip()
+        # Only attempt suggestions when we have a domain part
+        if dom:
+            COMMON_PROVIDERS = [
+                "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "rocketmail.com",
+                "outlook.com", "hotmail.com", "live.com", "msn.com", "aol.com",
+                "icloud.com", "me.com", "mac.com",
+                "protonmail.com", "pm.me",
+                "mail.com", "gmx.com", "gmx.net",
+                "zoho.com", "yandex.com", "yandex.ru"
+            ]
+            best = None
+            best_dist = 10**9
+            if _FUZZY_AVAILABLE:
+                for prov in COMMON_PROVIDERS:
+                    try:
+                        d = _lev.distance(dom, prov)
+                        if d < best_dist:
+                            best_dist = d
+                            best = prov
+                    except Exception:
+                        continue
+            # Suggest when edit distance <= 2 and domain not already exact
+            if best and dom != best and best_dist is not None and best_dist <= 2:
+                suggestion = f"{local_part}@{best}" if local_part else best
+                result["typo_suspected"] = True
+                result["suggestion"] = suggestion
+                result["suggestion_domain"] = best
+                result["suggestion_distance"] = int(best_dist)
+    except Exception:
+        # Non-fatal; ignore suggestion errors
+        pass
 
     return result
 

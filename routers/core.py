@@ -1267,7 +1267,13 @@ async def dodo_webhook(request: Request):
         return {"status": "ignored", "event_type": event_type}
 
     data = payload.get("data", {}) or {}
-    metadata = data.get("metadata", {}) or payload.get("metadata", {}) or {}
+    metadata = (
+        data.get("metadata")
+        or data.get("meta")
+        or payload.get("metadata")
+        or payload.get("meta")
+        or {}
+    )
     query_params = data.get("query_params", {}) or {}
 
     # Support flattened metadata keys like metadata_user_uid, metadata_plan
@@ -1306,19 +1312,51 @@ async def dodo_webhook(request: Request):
     uid_keys = ["user_uid", "uid", "userId", "firebase_uid", "user_id", "userUID", "userUid", "firebaseUid"]
     user_id = _first_key(metadata, uid_keys) or _first_key(query_params, uid_keys)
 
+    def _find_email(obj):
+        try:
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    try:
+                        key = str(k).lower()
+                    except Exception:
+                        key = ""
+                    if "email" in key and isinstance(v, str) and "@" in v:
+                        return v.strip()
+                    res = _find_email(v)
+                    if res:
+                        return res
+            elif isinstance(obj, list):
+                for it in obj:
+                    res = _find_email(it)
+                    if res:
+                        return res
+        except Exception:
+            pass
+        return None
+
     customer = data.get("customer") or {}
     customer_email = None
     if isinstance(customer, dict):
-        customer_email = customer.get("email") or customer.get("customer_email")
+        customer_email = (
+            customer.get("email")
+            or customer.get("customer_email")
+            or customer.get("customerEmail")
+            or (customer.get("details", {}) or {}).get("email")
+        )
     if not customer_email:
         customer_email = (
             data.get("customer_email")
+            or data.get("customerEmail")
             or data.get("email")
             or (metadata.get("email") if isinstance(metadata, dict) else None)
             or (metadata.get("customer_email") if isinstance(metadata, dict) else None)
+            or (metadata.get("customerEmail") if isinstance(metadata, dict) else None)
             or (query_params.get("email") if isinstance(query_params, dict) else None)
             or (query_params.get("customer_email") if isinstance(query_params, dict) else None)
+            or (query_params.get("customerEmail") if isinstance(query_params, dict) else None)
         )
+    if not customer_email:
+        customer_email = _find_email(payload)
     if isinstance(customer_email, str):
         customer_email = customer_email.strip()
 
@@ -1391,8 +1429,8 @@ async def dodo_webhook(request: Request):
             except Exception:
                 logger.warning("[dodo-webhook] Firestore email lookup failed")
         if not resolved_uid:
-            logger.warning("[dodo-webhook] missing uid in metadata/query_params and could not resolve by email; rejecting")
-            raise HTTPException(status_code=400, detail="Missing user UID; not resolvable")
+            logger.warning("[dodo-webhook] missing uid in metadata/query_params and could not resolve by email; acknowledging without mapping")
+            return {"status": "ok", "mapped": False, "reason": "uid_not_resolved"}
 
     # Determine plan baseline (override to free for terminal cancellation states)
     plan = (

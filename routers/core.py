@@ -84,6 +84,12 @@ except Exception:
     admin_firestore = None  # type: ignore
     _FB_AVAILABLE = False
 
+# Firestore FieldFilter (new query API) for deprecation-free filters
+try:
+    from google.cloud.firestore_v1 import FieldFilter as _FSFieldFilter  # type: ignore
+except Exception:  # pragma: no cover
+    _FSFieldFilter = None  # type: ignore
+
 router = APIRouter()
 
 class SignupCheckResponse(BaseModel):
@@ -1245,9 +1251,18 @@ async def dodo_webhook(request: Request):
         logger.info("[dodo-webhook] missing event type; ignoring")
         return {"status": "ignored", "reason": "missing event type"}
 
-    # Only act on payment.succeeded
+    # Process subscription lifecycle and initial payment events
     logger.info("[dodo-webhook] event_type=%s", event_type)
-    if event_type != "payment.succeeded":
+    handled_events = {
+        "subscription.active",
+        "subscription.renewed",
+        "subscription.cancelled",
+        "subscription.on_hold",
+        "subscription.failed",
+        "subscription.expired",
+        "payment.succeeded",
+    }
+    if event_type not in handled_events:
         logger.info("[dodo-webhook] ignoring event_type=%s", event_type)
         return {"status": "ignored", "event_type": event_type}
 
@@ -1296,7 +1311,16 @@ async def dodo_webhook(request: Request):
     if isinstance(customer, dict):
         customer_email = customer.get("email") or customer.get("customer_email")
     if not customer_email:
-        customer_email = data.get("customer_email") or data.get("email")
+        customer_email = (
+            data.get("customer_email")
+            or data.get("email")
+            or (metadata.get("email") if isinstance(metadata, dict) else None)
+            or (metadata.get("customer_email") if isinstance(metadata, dict) else None)
+            or (query_params.get("email") if isinstance(query_params, dict) else None)
+            or (query_params.get("customer_email") if isinstance(query_params, dict) else None)
+        )
+    if isinstance(customer_email, str):
+        customer_email = customer_email.strip()
 
     # Collect some reference ids for audit
     subscription_id = (
@@ -1355,7 +1379,11 @@ async def dodo_webhook(request: Request):
         if not resolved_uid and customer_email and admin_firestore is not None:
             try:
                 fs = admin_firestore.client()
-                q = fs.collection("users").where("email", "==", customer_email).limit(1)
+                if _FSFieldFilter is not None:
+                    q = fs.collection("users").where(filter=_FSFieldFilter("email", "==", customer_email)).limit(1)
+                else:
+                    # Fallback to positional-args where() if FieldFilter unavailable
+                    q = fs.collection("users").where("email", "==", customer_email).limit(1)
                 docs = list(q.stream())
                 if docs:
                     resolved_uid = docs[0].id
@@ -1366,12 +1394,15 @@ async def dodo_webhook(request: Request):
             logger.warning("[dodo-webhook] missing uid in metadata/query_params and could not resolve by email; rejecting")
             raise HTTPException(status_code=400, detail="Missing user UID; not resolvable")
 
-    # Determine plan (from metadata/query_params if present)
+    # Determine plan baseline (override to free for terminal cancellation states)
     plan = (
         (metadata.get("plan") if isinstance(metadata, dict) else None)
         or (query_params.get("plan") if isinstance(query_params, dict) else None)
         or "pro"
     )
+    plan_update = plan
+    if event_type in ("subscription.cancelled", "subscription.expired", "subscription.failed"):
+        plan_update = "free"
 
     # Update Firestore user doc
     try:
@@ -1379,10 +1410,23 @@ async def dodo_webhook(request: Request):
             raise RuntimeError("Firestore client unavailable")
         fs = admin_firestore.client()
         user_ref = fs.collection("users").document(resolved_uid)
+        # Map key subscription fields
+        next_billing_at = data.get("next_billing_date") or data.get("next_billing_at")
+        cancel_at_period_end = bool(data.get("cancel_at_next_billing_date") or data.get("cancel_at_period_end"))
+        status = (data.get("status") or "").lower() or (
+            "active" if event_type in ("subscription.active", "subscription.renewed", "payment.succeeded") else
+            "cancelled" if event_type == "subscription.cancelled" else
+            "on_hold" if event_type == "subscription.on_hold" else
+            "failed" if event_type == "subscription.failed" else
+            "expired" if event_type == "subscription.expired" else ""
+        )
         update = {
-            "plan": plan,
+            "plan": plan_update,
             "planUpdatedAt": admin_firestore.SERVER_TIMESTAMP,
             "planSource": "dodo",
+            "nextBillingAt": next_billing_at,
+            "cancelAtPeriodEnd": cancel_at_period_end,
+            "planStatus": status,
             "planDetails": {
                 "payment_provider": "dodo",
                 "event_type": event_type,

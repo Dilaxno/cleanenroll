@@ -120,9 +120,6 @@ class Branding(BaseModel):
     logo: Optional[str] = None  # data URL or external URL
     logoPosition: Literal["top", "bottom"] = "top"
     logoSize: Literal["small", "medium", "large"] = "medium"
-    # New branding visuals support
-    headerImage: Optional[str] = None
-    visuals: Optional[List[Dict[str, Any]]] = []
 
 
 class ThemeSchema(BaseModel):
@@ -293,15 +290,123 @@ def _create_id() -> str:
 
 
 RECAPTCHA_SECRET = os.getenv("RECAPTCHA_SECRET_KEY") or os.getenv("RECAPTCHA_SECRET") or ""
-PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY") or ""
 # Custom domain target for CNAME verification
 CUSTOM_DOMAIN_TARGET = (os.getenv("CUSTOM_DOMAIN_TARGET") or "api.cleanenroll.com").strip('.').lower()
 # ACME/Certbot configuration
-ACME_WEBROOT = os.path.join(os.getcwd(), "data", "acme")
+ACME_WEBROOT = os.getenv("ACME_WEBROOT") or os.path.join(os.getcwd(), "data", "acme")
 ACME_CHALLENGE_DIR = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
 os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
 CERTBOT_BIN = os.getenv("CERTBOT_BIN") or "certbot"
 EMAIL_FOR_LE = os.getenv("LETSENCRYPT_EMAIL") or os.getenv("LE_EMAIL") or "admin@cleanenroll.com"
+
+# --- Nginx helper templates & functions ---
+
+def _nginx_conf_http(domain: str) -> str:
+    return f"""
+server {{
+    listen 80;
+    server_name {domain};
+
+    location /.well-known/acme-challenge/ {{
+        root {ACME_WEBROOT};
+    }}
+
+    return 301 https://$host$request_uri;
+}}
+""".strip()
+
+
+def _nginx_conf_tls(domain: str) -> str:
+    cert_base = f"/etc/letsencrypt/live/{domain}"
+    return f"""
+server {{
+    listen 80;
+    server_name {domain};
+
+    location /.well-known/acme-challenge/ {{
+        root {ACME_WEBROOT};
+    }}
+
+    return 301 https://$host$request_uri;
+}}
+
+server {{
+    listen 443 ssl http2;
+    server_name {domain};
+
+    ssl_certificate     {cert_base}/fullchain.pem;
+    ssl_certificate_key {cert_base}/privkey.pem;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    location /.well-known/acme-challenge/ {{
+        root {ACME_WEBROOT};
+    }}
+
+    location / {{
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_pass {UPSTREAM_ADDR};
+        proxy_read_timeout 60s;
+    }}
+}}
+""".strip()
+
+
+def _write_text(path: str, content: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _ensure_symlink(src: str, dst: str):
+    try:
+        if os.path.islink(dst) or os.path.exists(dst):
+            try:
+                if os.path.islink(dst) and os.readlink(dst) == src:
+                    return
+                os.remove(dst)
+            except Exception:
+                pass
+        os.symlink(src, dst)
+    except Exception:
+        # On filesystems that don't support symlinks, copy the file
+        try:
+            shutil.copyfile(src, dst)
+        except Exception:
+            raise
+
+
+def _shell(cmd: str) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+
+
+def _nginx_test_and_reload() -> str:
+    out = []
+    t = _shell(NGINX_TEST_CMD)
+    out.append(t.stdout or "")
+    if t.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"nginx test failed:\n{(t.stdout or '')[-4000:]}")
+    r = _shell(NGINX_RELOAD_CMD)
+    out.append(r.stdout or "")
+    if r.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"nginx reload failed:\n{(r.stdout or '')[-4000:]}")
+    return "\n".join(out)
+# Nginx & upstream configuration (env-overridable)
+NGINX_SITES_AVAILABLE = os.getenv("NGINX_SITES_AVAILABLE") or "/etc/nginx/sites-available"
+NGINX_SITES_ENABLED  = os.getenv("NGINX_SITES_ENABLED")  or "/etc/nginx/sites-enabled"
+NGINX_BIN            = os.getenv("NGINX_BIN")            or "nginx"
+NGINX_TEST_CMD       = os.getenv("NGINX_TEST_CMD")       or "nginx -t"
+NGINX_RELOAD_CMD     = os.getenv("NGINX_RELOAD_CMD")     or "nginx -s reload"
+UPSTREAM_ADDR        = os.getenv("UPSTREAM_ADDR")        or "http://127.0.0.1:8000"
+# Optional DNS-01 configuration for Certbot (provider plugin)
+CERTBOT_DNS_PROVIDER      = os.getenv("CERTBOT_DNS_PROVIDER")  # e.g., 'cloudflare'
+CERTBOT_DNS_CREDENTIALS   = os.getenv("CERTBOT_DNS_CREDENTIALS")  # path to credentials file
 
 def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
     if not RECAPTCHA_SECRET:
@@ -574,66 +679,6 @@ async def geo_check(form_id: str, request: Request):
     return {"allowed": True, "country": country}
 
 
-@router.get("/pixabay/search")
-async def pixabay_search(
-    q: str = Query("", description="Search query"),
-    transparent: bool = Query(False, description="Prefer transparent PNG illustrations"),
-    per_page: int = Query(24, ge=1, le=200),
-    order: str = Query("popular", regex="^(popular|latest)$"),
-    orientation: str = Query("horizontal", regex="^(all|horizontal|vertical)$"),
-):
-    """Proxy Pixabay search to avoid exposing API key to the client.
-    Returns subset of fields for each hit.
-    """
-    if not PIXABAY_API_KEY:
-        raise HTTPException(status_code=500, detail="Pixabay API not configured on server")
-    try:
-        query = (q or "").strip()
-        if not query:
-            query = "background" if transparent else "form"
-        image_type = "illustration" if transparent else "photo"
-        params = urllib.parse.urlencode({
-            "key": PIXABAY_API_KEY,
-            "q": query,
-            "image_type": image_type,
-            "safesearch": "true",
-            "per_page": str(int(per_page)),
-            "orientation": orientation,
-            "order": order,
-        })
-        url = f"https://pixabay.com/api/?{params}"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            body = resp.read().decode("utf-8")
-        data = json.loads(body)
-        hits = data.get("hits") or []
-        # If transparent requested, heuristically keep PNGs
-        if transparent:
-            def is_png(u: str) -> bool:
-                try:
-                    return str(u or "").lower().endswith(".png")
-                except Exception:
-                    return False
-            hits = [h for h in hits if is_png(h.get("largeImageURL") or h.get("webformatURL") or "")]
-        # Map to subset
-        out = []
-        for h in hits:
-            out.append({
-                "id": h.get("id"),
-                "tags": h.get("tags"),
-                "previewURL": h.get("previewURL"),
-                "webformatURL": h.get("webformatURL"),
-                "largeImageURL": h.get("largeImageURL"),
-                "pageURL": h.get("pageURL"),
-                "user": h.get("user"),
-                "userImageURL": h.get("userImageURL"),
-                "type": h.get("type"),
-            })
-        return {"total": data.get("total", 0), "totalHits": data.get("totalHits", 0), "hits": out}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("pixabay_search error")
-        raise HTTPException(status_code=500, detail=f"Pixabay search failed: {e}")
 
 @router.post("/recaptcha/verify")
 async def recaptcha_verify(request: Request, payload: Dict = None):
@@ -1072,6 +1117,13 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
 
 @router.post("/forms/{form_id}/custom-domain/issue-cert")
 async def issue_cert(form_id: str):
+    """Automate per-domain certificate issuance and Nginx config deployment.
+    Steps:
+      1) Write HTTP-only vhost for ACME challenges and reload Nginx
+      2) Issue certificate via Certbot (webroot by default, DNS-01 if configured)
+      3) Write HTTPS vhost with issued cert and reload Nginx
+      4) Mark sslVerified=true in form record
+    """
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
@@ -1083,32 +1135,63 @@ async def issue_cert(form_id: str):
     if not data.get("customDomainVerified"):
         raise HTTPException(status_code=400, detail="Domain not verified yet")
 
-    # Ensure ACME challenge dir exists
+    # 1) Ensure ACME webroot exists and deploy HTTP-only conf
     os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+    conf_name = f"custom_{domain_val}.conf"
+    avail_path = os.path.join(NGINX_SITES_AVAILABLE, conf_name)
+    enabled_path = os.path.join(NGINX_SITES_ENABLED, conf_name)
+    try:
+        _write_text(avail_path, _nginx_conf_http(domain_val))
+        _ensure_symlink(avail_path, enabled_path)
+        http_reload_out = _nginx_test_and_reload()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write HTTP vhost or reload Nginx: {e}")
 
-    cmd = [
-        CERTBOT_BIN,
-        "certonly",
-        "--agree-tos",
-        "--non-interactive",
-        "--email", EMAIL_FOR_LE,
-        "--webroot",
-        "-w", ACME_WEBROOT,
-        "-d", domain_val,
-    ]
+    # 2) Run Certbot (webroot by default; DNS provider if configured)
+    cert_cmd = [CERTBOT_BIN, "certonly", "--agree-tos", "--non-interactive", "--email", EMAIL_FOR_LE]
+    if CERTBOT_DNS_PROVIDER and CERTBOT_DNS_CREDENTIALS:
+        cert_cmd += [f"-a", f"dns-{CERTBOT_DNS_PROVIDER}"]
+        # Provider-specific flags typically: --dns-<provider>-credentials <file>
+        cert_cmd += [f"--dns-{CERTBOT_DNS_PROVIDER}-credentials", CERTBOT_DNS_CREDENTIALS]
+    else:
+        cert_cmd += ["--webroot", "-w", ACME_WEBROOT]
+    cert_cmd += ["-d", domain_val]
 
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
-        out = proc.stdout or ""
+        proc = subprocess.run(cert_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600)
+        cert_out = proc.stdout or ""
         if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Certbot failed:\n{out[-4000:]}")
-        # Persist SSL verified = True after successful cert issuance
-        data["sslVerified"] = True
-        data["updatedAt"] = datetime.utcnow().isoformat()
-        _write_json(path, data)
-        return {"success": True, "output": out[-4000:], "domain": domain_val}
+            raise HTTPException(status_code=500, detail=f"Certbot failed:\n{cert_out[-4000:]}")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cert issuance error: {e}")
+        raise HTTPException(status_code=500, detail=f"Certbot execution error: {e}")
+
+    # 3) Deploy HTTPS vhost and reload Nginx
+    try:
+        _write_text(avail_path, _nginx_conf_tls(domain_val))
+        https_reload_out = _nginx_test_and_reload()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write HTTPS vhost or reload Nginx: {e}")
+
+    # 4) Persist SSL verified = True
+    data["sslVerified"] = True
+    data["updatedAt"] = datetime.utcnow().isoformat()
+    _write_json(path, data)
+
+    return {
+        "success": True,
+        "domain": domain_val,
+        "nginxHttpReload": http_reload_out,
+        "nginxHttpsReload": https_reload_out,
+        "certbot": cert_out[-4000:],
+        "sitesAvailable": avail_path,
+        "sitesEnabled": enabled_path,
+    }
 
 # ---- 3. ACME challenge helper (optional) ----
 @router.post("/acme/challenge")

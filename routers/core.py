@@ -103,6 +103,84 @@ TEMP_DOMAINS_CACHE: set[str] = set()
 TEMP_DOMAINS_LOADED_AT: float = 0
 TEMP_DOMAINS_TTL_SECONDS: int = 600
 
+# Prefer external IsTempMail API for disposable detection when configured
+# Returns True if disposable, False if not disposable, None if unknown/error or not configured
+def _istempmail_disposable_status(email: str, domain: str) -> bool | None:
+    try:
+        api_key = os.getenv("ISTEMPMAIL_API_KEY") or os.getenv("IS_TEMPMAIL_API_KEY") or ""
+        if not api_key:
+            return None
+        base = (os.getenv("ISTEMPMAIL_BASE_URL") or "https://api.istempmail.com").rstrip("/")
+        # Construct candidate endpoints to maximize compatibility without docs
+        paths = [
+            f"{base}/v1/email/validate?email=__EMAIL__",
+            f"{base}/email/validate?email=__EMAIL__",
+            f"{base}/v1/check?email=__EMAIL__",
+            f"{base}/check?email=__EMAIL__",
+        ]
+        from urllib.parse import quote
+        encoded = quote(email)
+        # Try multiple header styles commonly used by APIs
+        header_candidates = [
+            {"x-api-key": api_key},
+            {"X-API-Key": api_key},
+            {"apikey": api_key},
+            {"Authorization": f"Bearer {api_key}"},
+        ]
+        import json as _json
+        import urllib.request as _url
+        import urllib.error as _err
+        def _extract_bool(obj):
+            try:
+                if obj is None:
+                    return None
+                # Favor top-level keys
+                for k in ("disposable", "temporary", "is_temporary", "isTemporary", "isDisposable"):
+                    if isinstance(obj, dict) and k in obj:
+                        v = obj.get(k)
+                        if isinstance(v, bool):
+                            return v
+                        # Accept 0/1
+                        if isinstance(v, (int, float)):
+                            return bool(v)
+                        # Accept string "true"/"false"
+                        if isinstance(v, str):
+                            if v.lower() in ("true", "1", "yes"): return True
+                            if v.lower() in ("false", "0", "no"): return False
+                # Look into nested common container keys
+                for key in ("data", "result", "details"):
+                    sub = obj.get(key) if isinstance(obj, dict) else None
+                    if isinstance(sub, dict):
+                        b = _extract_bool(sub)
+                        if b is not None:
+                            return b
+            except Exception:
+                return None
+            return None
+        for p in paths:
+            url = p.replace("__EMAIL__", encoded)
+            for headers in header_candidates:
+                try:
+                    req = _url.Request(url, headers=headers)
+                    with _url.urlopen(req, timeout=8) as resp:
+                        raw = resp.read().decode("utf-8", errors="ignore")
+                        data = None
+                        try:
+                            data = _json.loads(raw)
+                        except Exception:
+                            data = None
+                        b = _extract_bool(data)
+                        if b is not None:
+                            return bool(b)
+                except _err.HTTPError as e:
+                    # 4xx/5xx -> try next variant; do not fail hard
+                    continue
+                except Exception:
+                    continue
+        return None
+    except Exception:
+        return None
+
 async def _ensure_temp_domains_loaded(force: bool = False):
     """
     Load 'temporary-domains' collection into an in-memory set for fast lookups.
@@ -643,7 +721,19 @@ async def validate_email_deliverability(email: str, request: Request):
     result["mx_hosts"] = mx_hosts
     result["has_mx"] = len(mx_hosts) > 0
     result["deliverable"] = bool(result["syntax_valid"] and result["has_mx"])
-    # Check Firestore-backed disposable domains list
+    # Prefer external IsTempMail API when configured
+    try:
+        ext = _istempmail_disposable_status(raw, domain)
+        if ext is True:
+            result["disposable"] = True
+            result["deliverable"] = False
+            if not result["reason"]:
+                result["reason"] = "Disposable email domains are not accepted"
+        elif ext is False:
+            result["disposable"] = False
+    except Exception:
+        pass
+    # Fallback: Firestore-backed disposable domains cache
     try:
         await _ensure_temp_domains_loaded()
         dom_lower = (domain or "").strip().lower()

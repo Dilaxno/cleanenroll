@@ -3,6 +3,33 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import os
 
+# Load environment variables from a .env file at repo root (without extra dependencies)
+def _load_env_file():
+    try:
+        root = os.getcwd()
+        env_path = os.path.join(root, '.env')
+        if not os.path.exists(env_path):
+            return
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    s = line.strip()
+                    if not s or s.startswith('#'):
+                        continue
+                    if '=' not in s:
+                        continue
+                    key, val = s.split('=', 1)
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    if key and (key not in os.environ):
+                        os.environ[key] = val
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+_load_env_file()
+
 # Rate limiting (slowapi)
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded

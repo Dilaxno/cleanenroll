@@ -12,6 +12,7 @@ import urllib.request
 import re
 import shutil
 import subprocess
+import requests
 try:
     import dns.resolver  # type: ignore
     _DNS_AVAILABLE = True
@@ -1756,3 +1757,236 @@ async def list_responses(
     # Pagination
     sliced = items[offset: offset + max(0, int(limit))]
     return {"count": len(items), "responses": sliced}
+
+# -----------------------------
+# DNS Provider: Cloudflare (API token based)
+# -----------------------------
+
+def _verify_firebase_uid(request: Request) -> str:
+    try:
+        from firebase_admin import auth as _admin_auth  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="Firebase Admin not available on server")
+    authz = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not authz or not authz.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization token")
+    token = authz.split(" ", 1)[1].strip()
+    try:
+        decoded = _admin_auth.verify_id_token(token)
+        uid = decoded.get("uid")
+        if not uid:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return uid
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def _cf_api_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def _store_cloudflare_token(uid: str, token: str) -> None:
+    try:
+        doc = _fs.client().collection("dns_integrations").document(uid)
+        doc.set({
+            "cloudflare": {
+                "token": token,
+                "updatedAt": datetime.utcnow().isoformat(),
+            }
+        }, merge=True)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to store DNS credentials")
+
+
+def _get_cloudflare_token(uid: str) -> str:
+    try:
+        doc = _fs.client().collection("dns_integrations").document(uid).get()
+        data = doc.to_dict() or {}
+        token = ((data.get("cloudflare") or {}).get("token") or "").strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Cloudflare not connected for this account")
+        return token
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to load DNS credentials")
+
+
+def _write_cloudflare_credentials_file(token: str) -> str:
+    # Write token in an ini file usable by certbot-dns-cloudflare plugin
+    path = CERTBOT_DNS_CREDENTIALS or os.path.join(os.getcwd(), "data", "letsencrypt", "cloudflare.ini")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"dns_cloudflare_api_token = {token}\n")
+        try:
+            os.chmod(path, 0o600)  # best-effort on Unix
+        except Exception:
+            pass
+        return path
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to write Cloudflare credentials file")
+
+
+@router.post("/dns/cloudflare/connect")
+async def cloudflare_connect(request: Request, payload: Dict = None):
+    """
+    Store Cloudflare API token for the current authenticated user.
+    Body: { apiToken: string }
+    """
+    uid = _verify_firebase_uid(request)
+    if not isinstance(payload, dict) or not str(payload.get("apiToken") or "").strip():
+        raise HTTPException(status_code=400, detail="Missing apiToken")
+    token = str(payload.get("apiToken")).strip()
+    _store_cloudflare_token(uid, token)
+    return {"success": True}
+
+
+@router.get("/dns/cloudflare/zones")
+async def cloudflare_list_zones(request: Request):
+    """
+    List Cloudflare zones for the connected account.
+    """
+    uid = _verify_firebase_uid(request)
+    token = _get_cloudflare_token(uid)
+    url = "https://api.cloudflare.com/client/v4/zones"
+    try:
+        resp = requests.get(url, headers=_cf_api_headers(token), timeout=15)
+        data = resp.json()
+        if not resp.ok:
+            raise HTTPException(status_code=resp.status_code, detail=str(data))
+        zones = []
+        for z in (data.get("result") or []):
+            try:
+                zones.append({"id": z.get("id"), "name": z.get("name"), "status": z.get("status")})
+            except Exception:
+                continue
+        return {"zones": zones}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cloudflare API error: {e}")
+
+
+@router.post("/dns/cloudflare/zones/{zone_id}/records")
+async def cloudflare_create_record(request: Request, zone_id: str, payload: Dict = None):
+    """
+    Create a DNS record in a Cloudflare zone.
+    Body: { type: "CNAME"|"TXT"|..., name: string, content: string, ttl?: number, proxied?: bool }
+    """
+    uid = _verify_firebase_uid(request)
+    token = _get_cloudflare_token(uid)
+    body = payload or {}
+    rtype = (body.get("type") or "").strip().upper()
+    name = (body.get("name") or "").strip()
+    content = (body.get("content") or "").strip()
+    if not rtype or not name or not content:
+        raise HTTPException(status_code=400, detail="Missing type/name/content")
+    ttl = body.get("ttl") if isinstance(body.get("ttl"), int) else 120
+    proxied = bool(body.get("proxied")) if rtype in ("A", "AAAA", "CNAME") else False
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+    try:
+        resp = requests.post(url, headers=_cf_api_headers(token), json={
+            "type": rtype, "name": name, "content": content, "ttl": ttl, "proxied": proxied
+        }, timeout=20)
+        data = resp.json()
+        if not resp.ok or not data.get("success"):
+            raise HTTPException(status_code=resp.status_code, detail=str(data))
+        return {"success": True, "record": data.get("result")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cloudflare API error: {e}")
+
+
+@router.post("/dns/cloudflare/connect-domain")
+async def cloudflare_connect_domain(request: Request, payload: Dict = None):
+    """
+    Automatically connect a custom domain for a form using Cloudflare:
+      Body: { formId: string, zoneId: string, subdomain: string }
+      - Creates CNAME record: subdomain.zone -> CUSTOM_DOMAIN_TARGET
+      - Verifies domain in builder store
+      - Writes Cloudflare credentials ini for DNS-01
+      - Issues certificate (DNS-01) or falls back to on-demand TLS
+    """
+    uid = _verify_firebase_uid(request)
+    body = payload or {}
+    form_id = (body.get("formId") or "").strip()
+    zone_id = (body.get("zoneId") or "").strip()
+    sub = (body.get("subdomain") or "").strip().strip(".")
+    if not form_id or not zone_id or not sub:
+        raise HTTPException(status_code=400, detail="Missing formId/zoneId/subdomain")
+
+    # Ensure token present
+    token = _get_cloudflare_token(uid)
+
+    # Fetch zone to get apex domain
+    try:
+        zurl = f"https://api.cloudflare.com/client/v4/zones/{zone_id}"
+        zres = requests.get(zurl, headers=_cf_api_headers(token), timeout=15)
+        zdata = zres.json()
+        if not zres.ok or not zdata.get("success"):
+            raise HTTPException(status_code=zres.status_code, detail=str(zdata))
+        apex = (zdata.get("result") or {}).get("name") or ""
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cloudflare API error: {e}")
+
+    full_domain = f"{sub}.{apex}" if apex else sub
+
+    # Create/Upsert CNAME record (idempotent best-effort)
+    try:
+        # Try to find existing record
+        list_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+        qparams = {"type": "CNAME", "name": full_domain}
+        lres = requests.get(list_url, headers=_cf_api_headers(token), params=qparams, timeout=15)
+        existing_id = None
+        if lres.ok:
+            ldata = lres.json()
+            for r in (ldata.get("result") or []):
+                if str(r.get("name")).lower() == full_domain.lower():
+                    existing_id = r.get("id")
+                    break
+        target = CUSTOM_DOMAIN_TARGET
+        if existing_id:
+            ures = requests.put(f"{list_url}/{existing_id}", headers=_cf_api_headers(token), json={
+                "type": "CNAME", "name": full_domain, "content": target, "ttl": 120, "proxied": False
+            }, timeout=20)
+            if not ures.ok or not (ures.json() or {}).get("success"):
+                raise HTTPException(status_code=ures.status_code, detail=str(ures.text))
+        else:
+            cres = requests.post(list_url, headers=_cf_api_headers(token), json={
+                "type": "CNAME", "name": full_domain, "content": target, "ttl": 120, "proxied": False
+            }, timeout=20)
+            if not cres.ok or not (cres.json() or {}).get("success"):
+                raise HTTPException(status_code=cres.status_code, detail=str(cres.text))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cloudflare API error: {e}")
+
+    # Verify domain in our builder store
+    try:
+        await verify_custom_domain(form_id, payload={"customDomain": full_domain})
+    except HTTPException as e:
+        # Not fatal; continue to cert issuance
+        logger.warning("verify_custom_domain failed: %s", e.detail)
+    except Exception:
+        logger.exception("verify_custom_domain failed")
+
+    # Prepare credentials for DNS-01 and issue cert
+    try:
+        cred_path = _write_cloudflare_credentials_file(token)
+        os.environ["CERTBOT_DNS_PROVIDER"] = "cloudflare"
+        os.environ["CERTBOT_DNS_CREDENTIALS"] = cred_path
+        result = await issue_cert(form_id)  # type: ignore
+    except HTTPException as e:
+        # Fall back to ready state (Caddy on-demand)
+        logger.warning("issue_cert failed: %s", e.detail)
+        result = {"success": True, "domain": full_domain, "mode": "fallback"}
+    except Exception as e:
+        logger.exception("issue_cert error")
+        result = {"success": True, "domain": full_domain, "mode": "fallback"}
+
+    return {"connected": True, "domain": full_domain, "details": result}

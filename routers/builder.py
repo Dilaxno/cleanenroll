@@ -48,22 +48,26 @@ _FREE_EMAIL_PROVIDERS = {
     'zoho.com','yandex.com','yandex.ru','inbox.ru','list.ru','bk.ru','mail.ru'
 }
 
-# GeoIP via ip2geotools (no local database required)
+# GeoIP providers: Geoapify preferred, ip2geotools as optional fallback
 from typing import Tuple
 try:
     from ip2geotools.databases.noncommercial import DbIpCity  # type: ignore
-    _GEO_LOOKUP_AVAILABLE = True
+    _DBIPCITY_AVAILABLE = True
 except Exception:
     DbIpCity = None  # type: ignore
-    _GEO_LOOKUP_AVAILABLE = False
+    _DBIPCITY_AVAILABLE = False
+
+GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY") or ""
+_GEOAPIFY_AVAILABLE = bool(GEOAPIFY_API_KEY)
+_GEO_LOOKUP_AVAILABLE = bool(_GEOAPIFY_AVAILABLE or _DBIPCITY_AVAILABLE)
 
 # Logger
 logger = logging.getLogger("backend.builder")
 # Log geo lookup availability at import time
 try:
-    logger.info("geo: DbIpCity available=%s", _GEO_LOOKUP_AVAILABLE)
+    logger.info("geo: providers geoapify=%s dbipcity=%s", _GEOAPIFY_AVAILABLE, _DBIPCITY_AVAILABLE)
     if not _GEO_LOOKUP_AVAILABLE:
-        logger.warning("geo: ip2geotools DbIpCity not importable; country/lat/lon enrichment disabled")
+        logger.warning("geo: no geolocation provider available; country/lat/lon enrichment disabled")
 except Exception:
     pass
 
@@ -612,40 +616,121 @@ def _client_ip(request: Request) -> str:
 
 
 def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
-    if not _GEO_LOOKUP_AVAILABLE or not ip:
-        logger.debug("geo: _country_from_ip skipped available=%s ip=%s", _GEO_LOOKUP_AVAILABLE, ip)
+    if not ip:
+        logger.debug("geo: _country_from_ip skipped ip=%s", ip)
         return False, None
-    try:
-        result = DbIpCity.get(ip, api_key="free")  # type: ignore
-        code = (getattr(result, "country", None) or "").upper()
-        logger.debug("geo: _country_from_ip ip=%s country=%s", ip, code or None)
-        return True, code or None
-    except Exception as e:
-        logger.warning("geo: _country_from_ip failed ip=%s err=%s", ip, e)
-        return False, None
+    # Prefer Geoapify when configured
+    if _GEOAPIFY_AVAILABLE:
+        try:
+            url = (
+                "https://api.geoapify.com/v1/ipinfo?"
+                + urllib.parse.urlencode({"ip": ip, "apiKey": GEOAPIFY_API_KEY})
+            )
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "CleanEnroll/1.0 (+https://cleanenroll.com)",
+                "Accept": "application/json",
+            })
+            with urllib.request.urlopen(req, timeout=6) as resp:  # type: ignore
+                raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw) if raw else {}
+            # Attempt common paths for ISO-2
+            country = None
+            try:
+                cobj = data.get("country") if isinstance(data, dict) else None
+                if isinstance(cobj, dict):
+                    country = cobj.get("iso_code") or cobj.get("iso") or cobj.get("code") or cobj.get("country_code")
+            except Exception:
+                pass
+            if not country:
+                country = data.get("country_code") or data.get("country")
+            cc = (str(country or "").strip().upper() or None)
+            logger.debug("geo: _country_from_ip (geoapify) ip=%s country=%s", ip, cc)
+            return (cc is not None), cc
+        except Exception as e:
+            logger.warning("geo: _country_from_ip geoapify failed ip=%s err=%s", ip, e)
+            # fallthrough to fallback
+    # Fallback: DbIpCity when importable
+    if DbIpCity is not None:
+        try:
+            result = DbIpCity.get(ip, api_key="free")  # type: ignore
+            code = (getattr(result, "country", None) or "").upper()
+            logger.debug("geo: _country_from_ip (dbipcity) ip=%s country=%s", ip, code or None)
+            return True, code or None
+        except Exception as e:
+            logger.warning("geo: _country_from_ip dbipcity failed ip=%s err=%s", ip, e)
+    return False, None
 
 
 def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[float]]:
     """Return (countryISO2, lat, lon) best-effort."""
-    if not _GEO_LOOKUP_AVAILABLE or not ip:
-        logger.debug("geo: _geo_from_ip skipped available=%s ip=%s", _GEO_LOOKUP_AVAILABLE, ip)
+    if not ip:
+        logger.debug("geo: _geo_from_ip skipped ip=%s", ip)
         return None, None, None
-    try:
-        res = DbIpCity.get(ip, api_key="free")  # type: ignore
-        country = (getattr(res, "country", None) or "").upper() or None
-        lat = None
-        lon = None
+    # Prefer Geoapify when configured
+    if _GEOAPIFY_AVAILABLE:
         try:
-            lat = float(getattr(res, "latitude", None)) if getattr(res, "latitude", None) is not None else None
-            lon = float(getattr(res, "longitude", None)) if getattr(res, "longitude", None) is not None else None
+            url = (
+                "https://api.geoapify.com/v1/ipinfo?"
+                + urllib.parse.urlencode({"ip": ip, "apiKey": GEOAPIFY_API_KEY})
+            )
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "CleanEnroll/1.0 (+https://cleanenroll.com)",
+                "Accept": "application/json",
+            })
+            with urllib.request.urlopen(req, timeout=6) as resp:  # type: ignore
+                raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw) if raw else {}
+            # Extract country code
+            cc = None
+            try:
+                cobj = data.get("country") if isinstance(data, dict) else None
+                if isinstance(cobj, dict):
+                    cc = cobj.get("iso_code") or cobj.get("iso") or cobj.get("code") or cobj.get("country_code")
+            except Exception:
+                pass
+            if not cc:
+                cc = data.get("country_code") or data.get("country")
+            country = (str(cc or "").strip().upper() or None)
+            # Extract latitude/longitude
+            lat = None
+            lon = None
+            try:
+                loc = data.get("location") if isinstance(data, dict) else None
+                if isinstance(loc, dict):
+                    lat = loc.get("latitude") if loc.get("latitude") is not None else loc.get("lat")
+                    lon = loc.get("longitude") if loc.get("longitude") is not None else loc.get("lon")
+                if lat is None and isinstance(data, dict):
+                    lat = data.get("latitude") or data.get("lat")
+                if lon is None and isinstance(data, dict):
+                    lon = data.get("longitude") or data.get("lon")
+                lat = float(lat) if lat is not None else None
+                lon = float(lon) if lon is not None else None
+            except Exception as e:
+                logger.debug("geo: _geo_from_ip geoapify parse lat/lon failed ip=%s err=%s", ip, e)
+                lat, lon = None, None
+            logger.debug("geo: _geo_from_ip (geoapify) ip=%s country=%s lat=%s lon=%s", ip, country, lat, lon)
+            return country, lat, lon
         except Exception as e:
-            logger.debug("geo: _geo_from_ip parse lat/lon failed ip=%s err=%s", ip, e)
-            lat, lon = None, None
-        logger.debug("geo: _geo_from_ip result ip=%s country=%s lat=%s lon=%s", ip, country, lat, lon)
-        return country, lat, lon
-    except Exception as e:
-        logger.warning("geo: _geo_from_ip failed ip=%s err=%s", ip, e)
-        return None, None, None
+            logger.warning("geo: _geo_from_ip geoapify failed ip=%s err=%s", ip, e)
+            # fallthrough
+    # Fallback: DbIpCity when available
+    if DbIpCity is not None:
+        try:
+            res = DbIpCity.get(ip, api_key="free")  # type: ignore
+            country = (getattr(res, "country", None) or "").upper() or None
+            lat = None
+            lon = None
+            try:
+                lat = float(getattr(res, "latitude", None)) if getattr(res, "latitude", None) is not None else None
+                lon = float(getattr(res, "longitude", None)) if getattr(res, "longitude", None) is not None else None
+            except Exception as e:
+                logger.debug("geo: _geo_from_ip dbipcity parse lat/lon failed ip=%s err=%s", ip, e)
+                lat, lon = None, None
+            logger.debug("geo: _geo_from_ip (dbipcity) ip=%s country=%s lat=%s lon=%s", ip, country, lat, lon)
+            return country, lat, lon
+        except Exception as e:
+            logger.warning("geo: _geo_from_ip dbipcity failed ip=%s err=%s", ip, e)
+    return None, None, None
 
 
 # -----------------------------

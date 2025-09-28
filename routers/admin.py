@@ -204,39 +204,86 @@ async def list_users(
     col = fs.collection("users")
 
     try:
+        items_map: Dict[str, Dict[str, Any]] = {}
+        q_norm = (q or "").strip()
+        plan_norm = (plan or "").strip().lower() or None
+
+        # 1) Exact matches first for best precision
+        if q_norm:
+            # by doc id (uid)
+            try:
+                d = col.document(q_norm).get()
+                if d.exists:
+                    data = d.to_dict() or {}
+                    data["id"] = d.id
+                    data.setdefault("uid", d.id)
+                    if isinstance(data.get("plan"), str):
+                        data["plan"] = data["plan"].lower()
+                    data["_score"] = 1000  # strong boost for exact id
+                    items_map[data["uid"]] = data
+            except Exception:
+                pass
+            # by email equality
+            try:
+                eq_docs = list(col.where("email", "==", q_norm.lower()).limit(5).stream())
+                for d in eq_docs:
+                    data = d.to_dict() or {}
+                    data["id"] = d.id
+                    data.setdefault("uid", d.id)
+                    if isinstance(data.get("plan"), str):
+                        data["plan"] = data["plan"].lower()
+                    data["_score"] = max(900, int(data.get("_score", 0)))
+                    items_map[data["uid"]] = data
+            except Exception:
+                pass
+
+        # 2) Broader page to fuzzy-match and/or filter by plan
         query_ref = col
-        if plan:
-            query_ref = query_ref.where("plan", "==", str(plan).lower())
+        # Try to use Firestore plan equality if provided (best-effort)
+        try:
+            if plan_norm:
+                query_ref = query_ref.where("plan", "==", plan_norm)
+        except Exception:
+            # continue without Firestore plan filter (we'll filter in-memory)
+            query_ref = col
         # Default sort by createdAt desc
         try:
             query_ref = query_ref.order_by("createdAt", direction=admin_firestore.Query.DESCENDING)  # type: ignore
         except Exception:
             pass
-
-        fetch_count = 500 if q else limit
+        # Fetch a larger slice for good fuzzy coverage when searching
+        fetch_count = 800 if q_norm else max(limit, 100)
         docs = list(query_ref.limit(fetch_count).stream())
 
-        items: List[Dict[str, Any]] = []
         for d in docs:
             data = d.to_dict() or {}
             data["id"] = d.id
             data.setdefault("uid", d.id)
-            # Normalize plan
-            if "plan" in data and isinstance(data["plan"], str):
+            if isinstance(data.get("plan"), str):
                 data["plan"] = data["plan"].lower()
-            items.append(data)
+            uid = data["uid"]
+            if uid not in items_map:
+                items_map[uid] = data
 
-        # In-memory semantic search and filter
-        if q:
+        # 3) Build list and apply fuzzy search + boost
+        items = list(items_map.values())
+
+        # In-memory plan filter for robustness (case-insensitive)
+        if plan_norm:
+            items = [it for it in items if str(it.get("plan") or "").lower() == plan_norm]
+
+        if q_norm:
             for it in items:
-                it["_score"] = _score(q, it)
+                base = int(it.get("_score", 0))
+                sc = _score(q_norm, it)
+                it["_score"] = base + sc
             items.sort(key=lambda x: x.get("_score", 0), reverse=True)
             items = [it for it in items if it.get("_score", 0) >= 40]
 
-        # Augment with Auth details (emailVerified/disabled/lastLoginAt)
+        # 4) Augment with Auth details (emailVerified/disabled/lastLoginAt)
         _augment_with_auth(items)
 
-        # Apply post-auth filters
+        # 5) Apply post-auth filters
         if email_verified is not None:
             items = [it for it in items if bool(it.get("emailVerified")) == bool(email_verified)]
         if disabled is not None:

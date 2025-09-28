@@ -709,6 +709,54 @@ try:
 except Exception:
     from utils.limiter import limiter  # type: ignore
 
+@router.get("/geo/search")
+@limiter.limit("30/minute")
+async def geo_search(q: str, limit: int = 8, lang: str = "en"):
+    """Proxy Nominatim search with proper headers to avoid 403 and comply with usage policy.
+    Returns {items: [{label, lat, lon, importance, class, type}]}.
+    """
+    try:
+        query = (q or "").strip()
+        if len(query) < 3:
+            raise HTTPException(status_code=400, detail="Query too short")
+        try:
+            lim = max(1, min(10, int(limit)))
+        except Exception:
+            lim = 8
+        # Build URL and attach a descriptive User-Agent as per Nominatim usage policy
+        url = (
+            "https://nominatim.openstreetmap.org/search?format=jsonv2"
+            + f"&q={urllib.parse.quote(query)}&addressdetails=1&limit={lim}&dedupe=1"
+        )
+        headers = {
+            "User-Agent": "CleanEnroll/1.0 (+https://cleanenroll.com/contact)",
+            "Accept-Language": (lang or "en")[:16],
+        }
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:  # type: ignore
+            raw = resp.read().decode("utf-8", errors="ignore")
+        data = json.loads(raw)
+        items = []
+        if isinstance(data, list):
+            for it in data:
+                try:
+                    items.append({
+                        "label": it.get("display_name"),
+                        "lat": it.get("lat"),
+                        "lon": it.get("lon"),
+                        "importance": it.get("importance"),
+                        "class": it.get("class"),
+                        "type": it.get("type"),
+                    })
+                except Exception:
+                    continue
+        return {"items": items[:lim]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("geo_search nominatim failed err=%s", e)
+        raise HTTPException(status_code=502, detail="Location search failed")
+
 @router.get("/forms")
 async def list_forms(userId: Optional[str] = Query(default=None, description="Filter by userId")):
     logger.debug("list_forms called userId=%s", userId)

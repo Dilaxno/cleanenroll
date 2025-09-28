@@ -1542,7 +1542,7 @@ async def issue_cert(form_id: str):
         raise HTTPException(status_code=404, detail="Form not found")
     data = _read_json(path)
 
-    domain_val = _normalize_domain(data.get("customDomain"))
+    domain_val = data.get("customDomain").strip().lower()
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
     if not data.get("customDomainVerified"):

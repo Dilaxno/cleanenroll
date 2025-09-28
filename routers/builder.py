@@ -1536,103 +1536,41 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
 
 @router.post("/forms/{form_id}/custom-domain/issue-cert")
 async def issue_cert(form_id: str):
-    """Automate per-domain certificate issuance and Nginx config deployment.
+    """
+    Enable SSL for a custom domain using Caddy on-demand TLS.
+    With Caddy in front of Nginx, certificates are automatically issued
+    the first time the domain is accessed over HTTPS.
+
     Steps:
-      1) Write HTTP-only vhost for ACME challenges and reload Nginx
-      2) Issue certificate via Certbot (webroot by default, DNS-01 if configured)
-      3) Write HTTPS vhost with issued cert and reload Nginx
-      4) Mark sslVerified=true in form record
+      1) Verify the form exists.
+      2) Check that a custom domain is configured and verified via DNS (CNAME).
+      3) Mark SSL as "ready" in the form record.
+      4) Return success – TLS will be provisioned automatically by Caddy.
     """
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
     data = _read_json(path)
 
-    domain_val = data.get("customDomain").strip().lower()
+    domain_val = (data.get("customDomain") or "").strip().lower()
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
     if not data.get("customDomainVerified"):
         raise HTTPException(status_code=400, detail="Domain not verified yet")
 
-    # 1) Ensure ACME webroot exists and deploy HTTP-only conf
-    os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
-    conf_name = f"custom_{domain_val}.conf"
-    avail_path = os.path.join(NGINX_SITES_AVAILABLE, conf_name)
-    enabled_path = os.path.join(NGINX_SITES_ENABLED, conf_name)
-    try:
-        _write_text(avail_path, _nginx_conf_http(domain_val))
-        _ensure_symlink(avail_path, enabled_path)
-        http_reload_out = _nginx_test_and_reload()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write HTTP vhost or reload Nginx: {e}")
-
-    # 2) Run Certbot (webroot by default; DNS provider if configured)
-    cert_cmd = ["sudo", CERTBOT_BIN, "certonly", "--agree-tos", "--non-interactive", "--email", EMAIL_FOR_LE]
-    if CERTBOT_DNS_PROVIDER and CERTBOT_DNS_CREDENTIALS:
-        cert_cmd += [f"-a", f"dns-{CERTBOT_DNS_PROVIDER}"]
-        # Provider-specific flags typically: --dns-<provider>-credentials <file>
-        cert_cmd += [f"--dns-{CERTBOT_DNS_PROVIDER}-credentials", CERTBOT_DNS_CREDENTIALS]
-    else:
-        cert_cmd += ["--webroot", "-w", ACME_WEBROOT]
-    cert_cmd += ["-d", domain_val]
-
-    try:
-        proc = subprocess.run(cert_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600)
-        cert_out = proc.stdout or ""
-        if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Certbot failed:\n{cert_out[-4000:]}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Certbot execution error: {e}")
-
-    # 3) Deploy HTTPS vhost and reload Nginx
-    try:
-        _write_text(avail_path, _nginx_conf_tls(domain_val))
-        https_reload_out = _nginx_test_and_reload()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write HTTPS vhost or reload Nginx: {e}")
-
-    # 4) Persist SSL verified = True
-    data["sslVerified"] = True
+    # No more Certbot / Nginx config required
+    data["sslVerified"] = True   # means "ready for auto TLS by Caddy"
     data["updatedAt"] = datetime.utcnow().isoformat()
     _write_json(path, data)
 
     return {
         "success": True,
         "domain": domain_val,
-        "nginxHttpReload": http_reload_out,
-        "nginxHttpsReload": https_reload_out,
-        "certbot": cert_out[-4000:],
-        "sitesAvailable": avail_path,
-        "sitesEnabled": enabled_path,
+        "message": (
+            "Custom domain enabled. TLS will be issued automatically by Caddy "
+            "on the first HTTPS request to this domain."
+        )
     }
-
-# ---- 3. ACME challenge helper (optional) ----
-@router.post("/acme/challenge")
-async def acme_write_challenge(payload: Dict = None):
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Invalid payload")
-    token = str(payload.get("token") or "").strip()
-    content = str(payload.get("content") or "").strip()
-    if not token or not content:
-        raise HTTPException(status_code=400, detail="Missing token or content")
-    if not re.fullmatch(r"[A-Za-z0-9_\-.]+", token):
-        raise HTTPException(status_code=400, detail="Invalid token format")
-
-    try:
-        os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
-        fpath = os.path.join(ACME_CHALLENGE_DIR, token)
-        with open(fpath, "w", encoding="utf-8") as f:
-            f.write(content)
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write challenge: {e}")
-
 
 @router.get("/forms/{form_id}/responses")
 async def list_responses(

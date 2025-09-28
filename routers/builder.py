@@ -1563,7 +1563,7 @@ async def issue_cert(form_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to write HTTP vhost or reload Nginx: {e}")
 
     # 2) Run Certbot (webroot by default; DNS provider if configured)
-    cert_cmd = [CERTBOT_BIN, "certonly", "--agree-tos", "--non-interactive", "--email", EMAIL_FOR_LE]
+    cert_cmd = ["sudo", CERTBOT_BIN, "certonly", "--agree-tos", "--non-interactive", "--email", EMAIL_FOR_LE]
     if CERTBOT_DNS_PROVIDER and CERTBOT_DNS_CREDENTIALS:
         cert_cmd += [f"-a", f"dns-{CERTBOT_DNS_PROVIDER}"]
         # Provider-specific flags typically: --dns-<provider>-credentials <file>

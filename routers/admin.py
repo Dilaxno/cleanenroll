@@ -159,22 +159,26 @@ def _score(query: str, user: Dict[str, Any]) -> int:
         str(user.get("plan") or ""),
         str(user.get("uid") or user.get("id") or ""),
     ]).lower()
+    email_lower = str(user.get("email") or "").lower()
     q = (query or "").lower().strip()
     if not q:
         return 0
+    # Boost results that have the email containing the prefix directly
+    boost = 0
+    if q in email_lower:
+        boost += 30 if len(q) < 5 else 15
     if fuzz is None:
         # Simple containment preference
-        if q in hay:
-            return 85 + min(15, len(q))
-        return 0
+        return (85 + min(15, len(q)) + boost) if q in hay else boost
     try:
-        return int(max(
+        base = int(max(
             fuzz.partial_ratio(q, hay),
             fuzz.token_set_ratio(q, hay),
             fuzz.WRatio(q, hay),
         ))
+        return base + boost
     except Exception:
-        return 0
+        return boost
 
 
 # --- Endpoints
@@ -236,6 +240,23 @@ async def list_users(
                     items_map[data["uid"]] = data
             except Exception:
                 pass
+            # by email prefix (best-effort; assumes stored emails are lowercase)
+            try:
+                ql = q_norm.lower()
+                if ql:
+                    prefix_docs = list(
+                        col.where("email", ">=", ql).where("email", "<", ql + "\uf8ff").limit(50).stream()
+                    )
+                    for d in prefix_docs:
+                        data = d.to_dict() or {}
+                        data["id"] = d.id
+                        data.setdefault("uid", d.id)
+                        if isinstance(data.get("plan"), str):
+                            data["plan"] = data["plan"].lower()
+                        data["_score"] = max(800, int(data.get("_score", 0)))
+                        items_map[data["uid"]] = data
+            except Exception:
+                pass
 
         # 2) Broader page to fuzzy-match and/or filter by plan
         query_ref = col
@@ -278,7 +299,8 @@ async def list_users(
                 sc = _score(q_norm, it)
                 it["_score"] = base + sc
             items.sort(key=lambda x: x.get("_score", 0), reverse=True)
-            items = [it for it in items if it.get("_score", 0) >= 40]
+            thr = 15 if len(q_norm) <= 3 else (25 if len(q_norm) <= 5 else 40)
+            items = [it for it in items if it.get("_score", 0) >= thr]
 
         # 4) Augment with Auth details (emailVerified/disabled/lastLoginAt)
         _augment_with_auth(items)

@@ -1537,15 +1537,13 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
 @router.post("/forms/{form_id}/custom-domain/issue-cert")
 async def issue_cert(form_id: str):
     """
-    Enable SSL for a custom domain using Caddy on-demand TLS.
-    With Caddy in front of Nginx, certificates are automatically issued
-    the first time the domain is accessed over HTTPS.
+    Issue and enable SSL for a verified custom domain.
 
-    Steps:
-      1) Verify the form exists.
-      2) Check that a custom domain is configured and verified via DNS (CNAME).
-      3) Mark SSL as "ready" in the form record.
-      4) Return success – TLS will be provisioned automatically by Caddy.
+    Two modes are supported:
+    - Certbot mode (preferred when CERTBOT_BIN is configured)
+      * HTTP-01 with --webroot or DNS-01 with Cloudflare if CERTBOT_DNS_PROVIDER=cloudflare
+      * Optionally writes an Nginx TLS server block and reloads Nginx when available
+    - Caddy on‑demand TLS mode (fallback): mark SSL ready and let Caddy provision on first HTTPS hit
     """
     path = _form_path(form_id)
     if not os.path.exists(path):
@@ -1558,18 +1556,83 @@ async def issue_cert(form_id: str):
     if not data.get("customDomainVerified"):
         raise HTTPException(status_code=400, detail="Domain not verified yet")
 
-    # No more Certbot / Nginx config required
-    data["sslVerified"] = True   # means "ready for auto TLS by Caddy"
+    # Try Certbot first if configured
+    certbot = CERTBOT_BIN
+    logs: list[str] = []
+    try:
+        if certbot and shutil.which(certbot):
+            # Build certbot command
+            use_dns = bool(CERTBOT_DNS_PROVIDER)
+            if use_dns and str(CERTBOT_DNS_PROVIDER).strip().lower() == "cloudflare" and CERTBOT_DNS_CREDENTIALS:
+                # DNS-01 with Cloudflare plugin
+                cmd = (
+                    f"{certbot} certonly --agree-tos --no-eff-email -n "
+                    f"--email {EMAIL_FOR_LE} "
+                    f"--dns-cloudflare --dns-cloudflare-credentials {CERTBOT_DNS_CREDENTIALS} "
+                    f"--dns-cloudflare-propagation-seconds 60 "
+                    f"-d {domain_val}"
+                )
+            else:
+                # HTTP-01 with webroot
+                os.makedirs(ACME_WEBROOT, exist_ok=True)
+                cmd = (
+                    f"{certbot} certonly --webroot -w {ACME_WEBROOT} "
+                    f"--agree-tos --no-eff-email -n --email {EMAIL_FOR_LE} "
+                    f"-d {domain_val}"
+                )
+            res = _shell(cmd)
+            logs.append(res.stdout or "")
+            if res.returncode != 0:
+                raise HTTPException(status_code=502, detail=f"certbot failed: {(res.stdout or '')[-4000:]}")
+
+            # Optionally configure Nginx if paths/binaries are present
+            try:
+                if shutil.which(NGINX_BIN) and os.path.isdir(NGINX_SITES_AVAILABLE) and os.path.isdir(NGINX_SITES_ENABLED):
+                    site_path = os.path.join(NGINX_SITES_AVAILABLE, f"{domain_val}.conf")
+                    _write_text(site_path, _nginx_conf_tls(domain_val))
+                    # symlink to enabled
+                    link_path = os.path.join(NGINX_SITES_ENABLED, f"{domain_val}.conf")
+                    _ensure_symlink(site_path, link_path)
+                    # test & reload
+                    r = _nginx_test_and_reload()
+                    logs.append(r)
+            except Exception as e:
+                logs.append(f"nginx configure/reload skipped or failed: {e}")
+
+            # Try a quick HTTPS check
+            ssl_ok = False
+            try:
+                req = urllib.request.Request(url=f"https://{domain_val}", method="HEAD")
+                with urllib.request.urlopen(req, timeout=6) as resp:  # type: ignore
+                    ssl_ok = 200 <= getattr(resp, 'status', 200) < 400
+            except Exception:
+                try:
+                    with urllib.request.urlopen(f"https://{domain_val}", timeout=8) as resp:  # type: ignore
+                        ssl_ok = 200 <= getattr(resp, 'status', 200) < 400
+                except Exception:
+                    ssl_ok = False
+
+            data["sslVerified"] = bool(ssl_ok)
+            data["updatedAt"] = datetime.utcnow().isoformat()
+            _write_json(path, data)
+            return {"success": True, "domain": domain_val, "sslVerified": bool(ssl_ok), "mode": "certbot", "logs": ("\n".join(logs))[-8000:]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logs.append(f"certbot error: {e}")
+        # Fall through to Caddy mode
+
+    # Fallback: Caddy on-demand TLS (mark ready)
+    data["sslVerified"] = True  # means "ready for auto TLS by Caddy"
     data["updatedAt"] = datetime.utcnow().isoformat()
     _write_json(path, data)
-
     return {
         "success": True,
         "domain": domain_val,
-        "message": (
-            "Custom domain enabled. TLS will be issued automatically by Caddy "
-            "on the first HTTPS request to this domain."
-        )
+        "sslVerified": True,
+        "mode": "caddy",
+        "message": "TLS will be issued automatically by Caddy on the first HTTPS request.",
+        "logs": ("\n".join(logs))[-8000:]
     }
 
 @router.get("/forms/{form_id}/responses")

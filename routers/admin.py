@@ -286,13 +286,17 @@ async def list_users(
             if uid not in items_map:
                 items_map[uid] = data
 
-        # 3) Build list and apply fuzzy search + boost
+        # 3) Build list and pre-augment with Auth so email is available for scoring
         items = list(items_map.values())
 
         # In-memory plan filter for robustness (case-insensitive)
         if plan_norm:
             items = [it for it in items if str(it.get("plan") or "").lower() == plan_norm]
 
+        # Augment with Auth BEFORE scoring so semantic search matches auth email/metadata
+        _augment_with_auth(items)
+
+        # Apply fuzzy search + boost
         if q_norm:
             for it in items:
                 base = int(it.get("_score", 0))
@@ -301,9 +305,6 @@ async def list_users(
             items.sort(key=lambda x: x.get("_score", 0), reverse=True)
             thr = 15 if len(q_norm) <= 3 else (25 if len(q_norm) <= 5 else 40)
             items = [it for it in items if it.get("_score", 0) >= thr]
-
-        # 4) Augment with Auth details (emailVerified/disabled/lastLoginAt)
-        _augment_with_auth(items)
 
         # 5) Apply post-auth filters
         if email_verified is not None:

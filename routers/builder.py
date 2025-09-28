@@ -82,6 +82,11 @@ os.makedirs(BACKING_DIR, exist_ok=True)
 RESPONSES_BASE_DIR = os.path.join(os.getcwd(), "data", "responses")
 os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
 
+# Geo data local cache directory and file
+WORLD_GEO_DIR = os.path.join(os.getcwd(), "data", "geo")
+os.makedirs(WORLD_GEO_DIR, exist_ok=True)
+_WORLD_COUNTRIES_FILE = os.path.join(WORLD_GEO_DIR, "world-countries.geo.json")
+
 
 def _form_path(form_id: str) -> str:
     return os.path.join(BACKING_DIR, f"{form_id}.json")
@@ -527,21 +532,37 @@ async def get_world_countries():
     except Exception:
         pass
     sources = [
-        "https://cdn.jsdelivr.net/npm/world-countries@4.0.0/countries.geo.json",
-        "https://unpkg.com/world-countries@4.0.0/countries.geo.json",
+        "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson",
+        "https://datahub.io/core/geo-countries/r/0.geojson",
     ]
     last_err = None
     for url in sources:
         try:
-            with urllib.request.urlopen(url, timeout=10) as resp:  # type: ignore
+            req = urllib.request.Request(url, headers={"User-Agent": "CleanEnroll/1.0 (+https://cleanenroll.com)"})
+            with urllib.request.urlopen(req, timeout=10) as resp:  # type: ignore
                 raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
+                # Persist successful fetch to disk cache for offline fallback
+                try:
+                    _write_text(_WORLD_COUNTRIES_FILE, raw)
+                except Exception:
+                    pass
                 _WORLD_COUNTRIES_CACHE["data"] = data
                 _WORLD_COUNTRIES_CACHE["ts"] = now
                 return JSONResponse(content=data)
         except Exception as e:
             last_err = e
             continue
+    # Local fallback: serve from disk cache if available
+    try:
+        if os.path.exists(_WORLD_COUNTRIES_FILE):
+            with open(_WORLD_COUNTRIES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _WORLD_COUNTRIES_CACHE["data"] = data
+            _WORLD_COUNTRIES_CACHE["ts"] = now
+            return JSONResponse(content=data)
+    except Exception:
+        pass
     raise HTTPException(status_code=500, detail=f"Failed to load world countries: {last_err}") 
 
 # Use the shared limiter instance configured in utils.limiter

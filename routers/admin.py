@@ -115,6 +115,8 @@ class AdminUserUpdate(BaseModel):
     # Arbitrary additional fields to merge into users doc
     extra: Optional[Dict[str, Any]] = None
 
+# Ensure forward refs are resolved with Pydantic v2 when using postponed annotations
+AdminUserUpdate.model_rebuild()
 
 # --- Utilities
 

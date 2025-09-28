@@ -349,6 +349,14 @@ ACME_CHALLENGE_DIR = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
 os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
 CERTBOT_BIN = os.getenv("CERTBOT_BIN") or "certbot"
 EMAIL_FOR_LE = os.getenv("LETSENCRYPT_EMAIL") or os.getenv("LE_EMAIL") or "admin@cleanenroll.com"
+# Certbot writable directories (override defaults to avoid permission issues)
+CERTBOT_CONFIG_DIR = os.getenv("CERTBOT_CONFIG_DIR") or os.path.join(os.getcwd(), "data", "letsencrypt", "config")
+CERTBOT_WORK_DIR   = os.getenv("CERTBOT_WORK_DIR")   or os.path.join(os.getcwd(), "data", "letsencrypt", "work")
+CERTBOT_LOGS_DIR   = os.getenv("CERTBOT_LOGS_DIR")   or os.path.join(os.getcwd(), "data", "letsencrypt", "logs")
+# Ensure directories exist
+os.makedirs(CERTBOT_CONFIG_DIR, exist_ok=True)
+os.makedirs(CERTBOT_WORK_DIR, exist_ok=True)
+os.makedirs(CERTBOT_LOGS_DIR, exist_ok=True)
 
 # --- Nginx helper templates & functions ---
 
@@ -1563,6 +1571,11 @@ async def issue_cert(form_id: str):
         if certbot and shutil.which(certbot):
             # Build certbot command
             use_dns = bool(CERTBOT_DNS_PROVIDER)
+            dir_flags = (
+                f" --config-dir {CERTBOT_CONFIG_DIR}"
+                f" --work-dir {CERTBOT_WORK_DIR}"
+                f" --logs-dir {CERTBOT_LOGS_DIR}"
+            )
             if use_dns and str(CERTBOT_DNS_PROVIDER).strip().lower() == "cloudflare" and CERTBOT_DNS_CREDENTIALS:
                 # DNS-01 with Cloudflare plugin
                 cmd = (
@@ -1570,7 +1583,7 @@ async def issue_cert(form_id: str):
                     f"--email {EMAIL_FOR_LE} "
                     f"--dns-cloudflare --dns-cloudflare-credentials {CERTBOT_DNS_CREDENTIALS} "
                     f"--dns-cloudflare-propagation-seconds 60 "
-                    f"-d {domain_val}"
+                    f"-d {domain_val}" + dir_flags
                 )
             else:
                 # HTTP-01 with webroot
@@ -1578,7 +1591,7 @@ async def issue_cert(form_id: str):
                 cmd = (
                     f"{certbot} certonly --webroot -w {ACME_WEBROOT} "
                     f"--agree-tos --no-eff-email -n --email {EMAIL_FOR_LE} "
-                    f"-d {domain_val}"
+                    f"-d {domain_val}" + dir_flags
                 )
             res = _shell(cmd)
             logs.append(res.stdout or "")

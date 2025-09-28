@@ -292,14 +292,6 @@ def export_members(
     """
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
-    formId: str = Query(...),
-    listId: str = Query(...),
-    status: str = Query("subscribed"),  # or "pending" for double opt-in
-):
-    """
-    Export subscribers collected for a form to a Mailchimp audience.
-    Reads stored responses for that form and submits members to /lists/{list_id}/members
-    """
     if status not in ("subscribed", "pending"):
         raise HTTPException(status_code=400, detail="Invalid status")
 

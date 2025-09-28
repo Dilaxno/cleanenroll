@@ -711,7 +711,7 @@ except Exception:
 
 @router.get("/geo/search")
 @limiter.limit("30/minute")
-async def geo_search(q: str, limit: int = 8, lang: str = "en"):
+async def geo_search(request: Request, q: str, limit: int = 8, lang: str = "en"):
     """Proxy Nominatim search with proper headers to avoid 403 and comply with usage policy.
     Returns {items: [{label, lat, lon, importance, class, type}]}.
     """

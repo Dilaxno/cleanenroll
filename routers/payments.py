@@ -183,6 +183,125 @@ async def create_dodo_checkout(request: Request, payload: Dict):
         raise HTTPException(status_code=502, detail="Checkout provider error")
 
 
+@router.post("/dodo/create-session")
+async def create_dodo_dynamic_session(request: Request, payload: Dict):
+    """Create a dynamic Dodo Payments checkout session for a specific submission.
+
+    Expected body example:
+    {
+      "form_id": "form_123",
+      "submission_id": "resp_abc",
+      "amount_cents": 1234,           # required (>0)
+      "currency": "USD",             # optional, default USD
+      "description": "Payment for X",# optional
+      "return_url": "https://...",   # optional
+      "cancel_url": "https://..."    # optional
+    }
+    The server will attach metadata with form_id and submission_id.
+    If Authorization Bearer Firebase ID token is provided, we also include user_uid in metadata when available.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    dodo_url = os.getenv("DODO_DYNAMIC_CHECKOUT_URL") or os.getenv("DODO_CHECKOUT_CREATE_URL")
+    dodo_api_key = os.getenv("DODO_API_KEY") or os.getenv("DODO_PAYMENTS_API_KEY")
+    if not dodo_url or not dodo_api_key:
+        logger.error("Dodo API not configured: missing DODO_DYNAMIC_CHECKOUT_URL/DODO_CHECKOUT_CREATE_URL or DODO_API_KEY/DODO_PAYMENTS_API_KEY")
+        raise HTTPException(status_code=500, detail="Payments not configured on server")
+
+    # Validate amount
+    try:
+        amount_cents = int(payload.get("amount_cents"))
+    except Exception:
+        amount_cents = 0
+    if amount_cents <= 0:
+        raise HTTPException(status_code=400, detail="Invalid amount_cents")
+
+    currency = str(payload.get("currency") or "USD").upper()
+    description = (payload.get("description") or "").strip() or None
+    form_id = (payload.get("form_id") or payload.get("formId") or "").strip()
+    submission_id = (payload.get("submission_id") or payload.get("submissionId") or "").strip()
+    if not form_id or not submission_id:
+        raise HTTPException(status_code=400, detail="Missing form_id or submission_id")
+
+    # Derive user UID from Firebase token when available (best-effort)
+    uid = _verify_id_token_from_header(request)
+
+    # Determine the return/cancel URLs
+    default_return = os.getenv("RETURN_URL") or os.getenv("CHECKOUT_REDIRECT_URL") or ""
+    return_url = (payload.get("return_url") or default_return or "").strip()
+    cancel_url = (payload.get("cancel_url") or default_return or "").strip()
+
+    # Build product cart with a single dynamic item
+    product_cart = [{
+        "name": description or f"Payment for form {form_id}",
+        "unit_amount_cents": amount_cents,
+        "quantity": 1,
+    }]
+
+    body = {
+        "product_cart": product_cart,
+        "currency": currency,
+        "metadata": {
+            "form_id": form_id,
+            "submission_id": submission_id,
+            **({"user_uid": uid} if uid else {}),
+        },
+        # Most providers use these for post-payment navigation
+        "return_url": return_url,
+        "cancel_url": cancel_url,
+    }
+
+    # Make request to Dodo API
+    try:
+        # Prepare auth headers
+        auth_header = os.getenv("DODO_AUTH_HEADER", "Authorization")
+        auth_scheme = os.getenv("DODO_AUTH_SCHEME", "Bearer")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": os.getenv("OUTBOUND_USER_AGENT", "CleanEnroll/1.0 payments (+https://cleanenroll.com)"),
+        }
+        if auth_header.lower() == "authorization":
+            headers["Authorization"] = f"{auth_scheme} {dodo_api_key}".strip()
+        else:
+            headers[auth_header] = dodo_api_key
+
+        logger.debug("[dodo-session] POST %s auth_header=%s scheme=%s", dodo_url, auth_header, auth_scheme)
+
+        req = urllib.request.Request(
+            url=dodo_url,
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:  # type: ignore
+            resp_body = resp.read().decode("utf-8", errors="replace")
+            try:
+                data = json.loads(resp_body)
+            except Exception:
+                data = {"raw": resp_body}
+            if resp.status not in (200, 201):
+                logger.warning("[dodo-session] API status=%s body=%s", resp.status, resp_body[:500])
+                raise HTTPException(status_code=502, detail="Failed to create checkout session")
+            logger.info("[dodo-session] created session for form=%s submission=%s uid=%s amount=%s %s", form_id, submission_id, uid or "", amount_cents, currency)
+            return data
+    except HTTPException:
+        raise
+    except urllib.error.HTTPError as he:  # type: ignore[attr-defined]
+        try:
+            err_body = he.read().decode("utf-8", errors="replace")  # type: ignore[call-arg]
+        except Exception:
+            err_body = ""
+        logger.warning("[dodo-session] HTTPError status=%s body=%s", getattr(he, 'code', 'n/a'), err_body[:500])
+        raise HTTPException(status_code=502, detail=f"Checkout provider error ({getattr(he, 'code', 'n/a')})")
+    except urllib.error.URLError as ue:  # type: ignore[attr-defined]
+        logger.warning("[dodo-session] URLError reason=%s", getattr(ue, 'reason', ue))
+        raise HTTPException(status_code=502, detail="Checkout provider unreachable")
+    except Exception:
+        logger.exception("[dodo-session] request failed")
+        raise HTTPException(status_code=502, detail="Checkout provider error")
+
 @router.post('/dodo/cancel')
 async def dodo_cancel_or_resume(request: Request, payload: Dict):
     """Request cancel at period end, resume, or cancel now subscription with Dodo.

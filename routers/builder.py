@@ -19,6 +19,14 @@ except Exception:
     dns = None  # type: ignore
     _DNS_AVAILABLE = False
 
+# WHOIS for domain reputation/age checks
+try:
+    import whois as _whois  # type: ignore
+    _WHOIS_AVAILABLE = True
+except Exception:
+    _whois = None  # type: ignore
+    _WHOIS_AVAILABLE = False
+
 # Email sender (Resend preferred)
 try:
     from ..utils.email import render_email, send_email_html  # type: ignore
@@ -235,6 +243,9 @@ class FormConfig(BaseModel):
     redirect: RedirectConfig = RedirectConfig()
     emailValidationEnabled: bool = False
     professionalEmailsOnly: bool = False
+    # Advanced email reputation checks (Pro)
+    emailRejectBadReputation: bool = False
+    minDomainAgeDays: int = 30
     recaptchaEnabled: bool = False
     gdprComplianceEnabled: bool = False
     passwordProtectionEnabled: bool = False
@@ -465,6 +476,119 @@ def _normalize_domain(s: Optional[str]) -> Optional[str]:
         d = d.split("/")[0]
         d = d.strip('.')
         return d or None
+    except Exception:
+        return None
+
+# -----------------------------
+# Email reputation helpers
+# -----------------------------
+
+def _spamhaus_listed(domain: str) -> Optional[bool]:
+    """Check domain reputation using Spamhaus (best-effort).
+    Returns True if listed (bad), False if not listed (good), None on error.
+    Note: For domains, DBL is recommended; here we follow a simplified query.
+    """
+    if not _DNS_AVAILABLE or not domain:
+        return None
+    try:
+        q = ".".join(reversed(domain.split("."))) + ".zen.spamhaus.org"
+        dns.resolver.resolve(q, "A")  # type: ignore[attr-defined]
+        return True
+    except Exception as e:
+        try:
+            # NXDOMAIN -> not listed
+            if isinstance(e, getattr(dns.resolver, 'NXDOMAIN', Exception)):
+                return False
+        except Exception:
+            pass
+        # Try DBL as an alternative for domains
+        try:
+            dbl_q = f"{domain}.dbl.spamhaus.org"
+            dns.resolver.resolve(dbl_q, "A")  # type: ignore[attr-defined]
+            return True
+        except Exception:
+            return None
+
+
+def _domain_age_days(domain: str) -> Optional[int]:
+    """Return domain age in days using WHOIS; None if unknown/error."""
+    if not _WHOIS_AVAILABLE or not domain:
+        return None
+    try:
+        data = _whois.whois(domain)  # type: ignore[attr-defined]
+        created = getattr(data, 'creation_date', None)
+        if isinstance(created, list):
+            created = created[0] if created else None
+        if not created:
+            return None
+        from datetime import datetime, timezone
+        if getattr(created, 'tzinfo', None) is None:
+            created = created.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = now - created
+        days = int(delta.total_seconds() // 86400)
+        return max(0, days)
+    except Exception:
+        return None
+
+
+def _has_spf(domain: str) -> Optional[bool]:
+    """Check if domain publishes an SPF record (TXT containing v=spf1)."""
+    if not _DNS_AVAILABLE or not domain:
+        return None
+    try:
+        records = dns.resolver.resolve(domain, "TXT")  # type: ignore[attr-defined]
+        for r in records:
+            try:
+                txt = "".join([p.decode('utf-8', 'ignore') if isinstance(p, (bytes, bytearray)) else str(p) for p in getattr(r, 'strings', [])])
+            except Exception:
+                txt = str(r)
+            if "v=spf1" in txt.lower():
+                return True
+        return False
+    except Exception:
+        return None
+
+
+def _has_dmarc(domain: str) -> Optional[bool]:
+    """Check if domain publishes a DMARC record (TXT at _dmarc.domain)."""
+    if not _DNS_AVAILABLE or not domain:
+        return None
+    try:
+        name = f"_dmarc.{domain}"
+        records = dns.resolver.resolve(name, "TXT")  # type: ignore[attr-defined]
+        for r in records:
+            try:
+                txt = "".join([p.decode('utf-8', 'ignore') if isinstance(p, (bytes, bytearray)) else str(p) for p in getattr(r, 'strings', [])])
+            except Exception:
+                txt = str(r)
+            if "v=dmarc1" in txt.lower():
+                return True
+        return False
+    except Exception:
+        return None
+
+
+def _has_any_dkim(domain: str) -> Optional[bool]:
+    """Attempt to detect DKIM by checking common selectors (best-effort)."""
+    if not _DNS_AVAILABLE or not domain:
+        return None
+    selectors = ["default", "selector1", "selector2", "google", "mail", "smtp"]
+    try:
+        for sel in selectors:
+            name = f"{sel}._domainkey.{domain}"
+            try:
+                records = dns.resolver.resolve(name, "TXT")  # type: ignore[attr-defined]
+                for r in records:
+                    try:
+                        txt = "".join([p.decode('utf-8', 'ignore') if isinstance(p, (bytes, bytearray)) else str(p) for p in getattr(r, 'strings', [])])
+                    except Exception:
+                        txt = str(r)
+                    if "v=dkim1" in txt.lower():
+                        return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return None
 
@@ -1011,6 +1135,33 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     # Reject if domain is free provider or disposable provider
                     if domain in _FREE_EMAIL_PROVIDERS or domain in _DISPOSABLE_SET:
                         raise HTTPException(status_code=400, detail=f"Please use your professional work email address for '{lab}'. Personal or disposable email domains are not accepted.")
+
+                # Reputation checks (optional)
+                if bool(form_data.get("emailRejectBadReputation")):
+                    try:
+                        domain = (addr.split('@', 1)[1] or '').strip().lower()
+                    except Exception:
+                        domain = ''
+                    if domain:
+                        # Spamhaus listing -> reject
+                        listed = _spamhaus_listed(domain)
+                        if listed is True:
+                            raise HTTPException(status_code=400, detail=f"The email domain for '{lab}' appears on a well-known blocklist. Please use a different email.")
+                        # WHOIS domain age -> reject when very new
+                        try:
+                            min_days = int(form_data.get('minDomainAgeDays') or 30)
+                        except Exception:
+                            min_days = 30
+                        age_days = _domain_age_days(domain)
+                        if age_days is not None and age_days < max(1, min_days):
+                            raise HTTPException(status_code=400, detail=f"The email domain for '{lab}' is very new ({age_days} days old). Please use a more established email domain.")
+                        # SPF/DMARC/DKIM (reject when SPF and DMARC are both missing)
+                        spf_ok = _has_spf(domain)
+                        dmarc_ok = _has_dmarc(domain)
+                        dkim_ok = _has_any_dkim(domain)
+                        if (spf_ok is False and dmarc_ok is False):
+                            raise HTTPException(status_code=400, detail=f"The email domain for '{lab}' lacks common anti-spoofing records (SPF/DMARC). Please use a more reputable email domain.")
+                    # If no domain part, earlier validation will trigger errors
             except _EmailNotValidError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid email for field '{lab}': {str(e)}")
 

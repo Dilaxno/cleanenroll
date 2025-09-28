@@ -36,6 +36,18 @@ except Exception:
     _dns_resolver = None  # type: ignore
     _DNSPY_AVAILABLE = False
 
+# Import reputation helper functions from builder router (Spamhaus/WHOIS/SPF/DMARC/DKIM)
+try:
+    from .builder import _spamhaus_listed, _domain_age_days, _has_spf, _has_dmarc, _has_any_dkim  # type: ignore
+    _REPUTATION_HELPERS_AVAILABLE = True
+except Exception:
+    _spamhaus_listed = None  # type: ignore
+    _domain_age_days = None  # type: ignore
+    _has_spf = None  # type: ignore
+    _has_dmarc = None  # type: ignore
+    _has_any_dkim = None  # type: ignore
+    _REPUTATION_HELPERS_AVAILABLE = False
+
 # Fuzzy matching for email domain typo suggestions
 try:
     from rapidfuzz.distance import Levenshtein as _lev  # type: ignore
@@ -656,7 +668,12 @@ async def sync_disposable_domains(strict: bool = True):
 @router.get("/api/validate-email")
 @router.get("/api/validate-email/")
 @limiter.limit("30/minute")
-async def validate_email_deliverability(email: str, request: Request):
+async def validate_email_deliverability(
+    email: str,
+    request: Request,
+    reputation: bool | int | str = 0,
+    min_domain_age: int | None = None,
+):
     """Validate email syntax and MX deliverability in real time.
     Returns a JSON payload with syntax_valid, has_mx, deliverable, mx_hosts, and typo suggestion when applicable.
     """
@@ -746,6 +763,72 @@ async def validate_email_deliverability(email: str, request: Request):
         pass
     if not result["deliverable"] and not result["reason"]:
         result["reason"] = "No MX records found for domain"
+
+    # Optional reputation checks (Spamhaus/WHOIS/SPF/DMARC/DKIM)
+    try:
+        rep_flag = False
+        if isinstance(reputation, bool):
+            rep_flag = reputation
+        elif isinstance(reputation, (int, float)):
+            rep_flag = bool(reputation)
+        elif isinstance(reputation, str):
+            rep_flag = reputation.strip().lower() in ("1","true","yes","on")
+    except Exception:
+        rep_flag = False
+
+    result["reputation_checked"] = False
+    if rep_flag and _REPUTATION_HELPERS_AVAILABLE and domain:
+        result["reputation_checked"] = True
+        try:
+            listed = _spamhaus_listed(domain) if _spamhaus_listed else None
+        except Exception:
+            listed = None
+        try:
+            age_days = _domain_age_days(domain) if _domain_age_days else None
+        except Exception:
+            age_days = None
+        try:
+            spf_ok = _has_spf(domain) if _has_spf else None
+        except Exception:
+            spf_ok = None
+        try:
+            dmarc_ok = _has_dmarc(domain) if _has_dmarc else None
+        except Exception:
+            dmarc_ok = None
+        try:
+            dkim_ok = _has_any_dkim(domain) if _has_any_dkim else None
+        except Exception:
+            dkim_ok = None
+
+        result.update({
+            "spamhaus_listed": listed,
+            "domain_age_days": age_days,
+            "spf_ok": spf_ok,
+            "dmarc_ok": dmarc_ok,
+            "dkim_detected": dkim_ok,
+        })
+
+        rep_bad = False
+        reasons = []
+        try:
+            md = int(min_domain_age) if min_domain_age is not None else None
+        except Exception:
+            md = None
+        if listed is True:
+            rep_bad = True
+            reasons.append("Domain appears on a blocklist")
+        if (age_days is not None) and (md is not None) and (age_days < max(1, md)):
+            rep_bad = True
+            reasons.append(f"Domain is very new ({age_days} days old; minimum {md})")
+        if spf_ok is False and dmarc_ok is False:
+            rep_bad = True
+            reasons.append("Domain lacks SPF and DMARC records")
+
+        result["reputation_bad"] = rep_bad
+        if rep_bad:
+            result["deliverable"] = False
+            if not result.get("reason"):
+                result["reason"] = "; ".join(reasons) if reasons else "Email domain has a poor reputation"
 
     # Smart domain typo detection against common providers using edit distance
     try:

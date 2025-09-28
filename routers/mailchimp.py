@@ -30,6 +30,16 @@ db = firestore.client()
 
 router = APIRouter(prefix="/api/integrations/mailchimp", tags=["mailchimp"]) 
 
+
+def _is_pro_plan(user_id: str) -> bool:
+    try:
+        snap = db.collection("users").document(user_id).get()
+        data = snap.to_dict() or {}
+        plan = str(data.get("plan") or "").lower()
+        return plan in ("pro", "business", "enterprise")
+    except Exception:
+        return False 
+
 # OAuth config (set via env)
 MAILCHIMP_CLIENT_ID = os.getenv("MAILCHIMP_CLIENT_ID", "")
 MAILCHIMP_CLIENT_SECRET = os.getenv("MAILCHIMP_CLIENT_SECRET", "")
@@ -141,6 +151,8 @@ def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
     Step 1: Redirect URL for Mailchimp OAuth. Frontend should redirect the user-agent here.
     We return the URL so the client can navigate to it.
     """
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
     if not MAILCHIMP_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Mailchimp not configured")
 
@@ -174,6 +186,8 @@ def callback(code: str = Query(None), state: str = Query("{}")):
     user_id = parsed_state.get("userId")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing userId in state")
+    if not _is_pro_plan(str(user_id)):
+        raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
 
     token_url = "https://login.mailchimp.com/oauth2/token"
     data = {
@@ -248,6 +262,8 @@ def _get_mailchimp_auth(user_id: str) -> Dict[str, str]:
 @router.get("/audiences")
 def list_audiences(userId: str = Query(...)):
     """List audiences (lists) for the connected Mailchimp account."""
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
     auth = _get_mailchimp_auth(userId)
     url = f"{auth['api_base']}/lists"
     resp = requests.get(url, headers={"Authorization": f"OAuth {auth['token']}"}, timeout=20)
@@ -266,6 +282,16 @@ def list_audiences(userId: str = Query(...)):
 @router.post("/export")
 def export_members(
     userId: str = Query(...),
+    formId: str = Query(...),
+    listId: str = Query(...),
+    status: str = Query("subscribed"),  # or "pending" for double opt-in
+):
+    """
+    Export subscribers collected for a form to a Mailchimp audience.
+    Reads stored responses for that form and submits members to /lists/{list_id}/members
+    """
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
     formId: str = Query(...),
     listId: str = Query(...),
     status: str = Query("subscribed"),  # or "pending" for double opt-in

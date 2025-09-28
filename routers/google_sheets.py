@@ -29,6 +29,16 @@ db = firestore.client()
 
 router = APIRouter(prefix="/api/integrations/google-sheets", tags=["google-sheets"])
 
+
+def _is_pro_plan(user_id: str) -> bool:
+    try:
+        snap = db.collection("users").document(user_id).get()
+        data = snap.to_dict() or {}
+        plan = str(data.get("plan") or "").lower()
+        return plan in ("pro", "business", "enterprise")
+    except Exception:
+        return False
+
 # OAuth config
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
@@ -165,6 +175,8 @@ def _get_valid_access_token(user_id: str) -> str:
 
 @router.get("/authorize")
 def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
     state_data = {"userId": userId}
@@ -197,6 +209,8 @@ def callback(code: str = Query(None), state: str = Query("{}")):
     user_id = parsed_state.get("userId")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing userId in state")
+    if not _is_pro_plan(str(user_id)):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
 
     data = {
         "code": code,
@@ -223,6 +237,8 @@ def callback(code: str = Query(None), state: str = Query("{}")):
 
 @router.get("/status")
 def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     # Simple connectivity status + mapping for a form if provided
     try:
         access, _, _ = _get_tokens(userId)
@@ -240,6 +256,8 @@ def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
 
 @router.post("/create")
 def create_sheet(userId: str = Query(...), formId: str = Query(...), payload: Dict[str, Any] = None):
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     if not isinstance(payload, dict):
         payload = {}
     title = (payload.get("title") or "Form Submissions").strip() or "Form Submissions"
@@ -319,6 +337,8 @@ def create_sheet(userId: str = Query(...), formId: str = Query(...), payload: Di
 
 @router.post("/sync")
 def toggle_sync(userId: str = Query(...), formId: str = Query(...), payload: Dict[str, Any] = None):
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     if not isinstance(payload, dict):
         payload = {}
     desired = bool(payload.get("sync"))
@@ -337,6 +357,8 @@ def toggle_sync(userId: str = Query(...), formId: str = Query(...), payload: Dic
 @router.get("/mappings")
 def list_mappings(userId: str = Query(...)):
     """Return all Google Sheets mappings created by this user (formId -> mapping)."""
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     snap = _get_user_doc(userId).get()
     data = snap.to_dict() or {}
     gs_map = ((data.get("integrations") or {}).get("googleSheetsMappings") or {})
@@ -360,6 +382,8 @@ def list_mappings(userId: str = Query(...)):
 
 def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str, Any]):
     try:
+        if not _is_pro_plan(user_id):
+            return
         # load mapping
         snap = _get_user_doc(user_id).get()
         data = snap.to_dict() or {}

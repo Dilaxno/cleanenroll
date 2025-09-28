@@ -183,6 +183,12 @@ class ThemeSchema(BaseModel):
     # Thank-you screen colors
     thankYouBgColor: str = "#ecfdf5"
     thankYouTextColor: str = "#065f46"
+    # Font settings (persist custom or Google font)
+    fontFamily: Optional[str] = "Inter"
+    fontUrl: Optional[str] = None
+    customFontUrl: Optional[str] = None
+    customFontName: Optional[str] = None
+    customFontFormat: Optional[str] = None
 
 
 class RedirectConfig(BaseModel):

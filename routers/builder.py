@@ -59,6 +59,13 @@ except Exception:
 
 # Logger
 logger = logging.getLogger("backend.builder")
+# Log geo lookup availability at import time
+try:
+    logger.info("geo: DbIpCity available=%s", _GEO_LOOKUP_AVAILABLE)
+    if not _GEO_LOOKUP_AVAILABLE:
+        logger.warning("geo: ip2geotools DbIpCity not importable; country/lat/lon enrichment disabled")
+except Exception:
+    pass
 
 # Firestore plan check (to gate Pro features on server)
 try:
@@ -606,18 +613,22 @@ def _client_ip(request: Request) -> str:
 
 def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
     if not _GEO_LOOKUP_AVAILABLE or not ip:
+        logger.debug("geo: _country_from_ip skipped available=%s ip=%s", _GEO_LOOKUP_AVAILABLE, ip)
         return False, None
     try:
         result = DbIpCity.get(ip, api_key="free")  # type: ignore
         code = (getattr(result, "country", None) or "").upper()
+        logger.debug("geo: _country_from_ip ip=%s country=%s", ip, code or None)
         return True, code or None
-    except Exception:
+    except Exception as e:
+        logger.warning("geo: _country_from_ip failed ip=%s err=%s", ip, e)
         return False, None
 
 
 def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[float]]:
     """Return (countryISO2, lat, lon) best-effort."""
     if not _GEO_LOOKUP_AVAILABLE or not ip:
+        logger.debug("geo: _geo_from_ip skipped available=%s ip=%s", _GEO_LOOKUP_AVAILABLE, ip)
         return None, None, None
     try:
         res = DbIpCity.get(ip, api_key="free")  # type: ignore
@@ -627,10 +638,13 @@ def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[floa
         try:
             lat = float(getattr(res, "latitude", None)) if getattr(res, "latitude", None) is not None else None
             lon = float(getattr(res, "longitude", None)) if getattr(res, "longitude", None) is not None else None
-        except Exception:
+        except Exception as e:
+            logger.debug("geo: _geo_from_ip parse lat/lon failed ip=%s err=%s", ip, e)
             lat, lon = None, None
+        logger.debug("geo: _geo_from_ip result ip=%s country=%s lat=%s lon=%s", ip, country, lat, lon)
         return country, lat, lon
-    except Exception:
+    except Exception as e:
+        logger.warning("geo: _geo_from_ip failed ip=%s err=%s", ip, e)
         return None, None, None
 
 
@@ -874,7 +888,7 @@ async def geo_check(form_id: str, request: Request):
 
     ip = _client_ip(request)
     _, country = _country_from_ip(ip)
-    print(f"[DEBUG] ip={ip}, country={country}, allowed={allowed}, restricted={restricted}")
+    logger.debug("geo_check ip=%s country=%s allowed=%s restricted=%s available=%s", ip, country, allowed, restricted, _GEO_LOOKUP_AVAILABLE)
 
     # Require valid country
     if not country:
@@ -1249,6 +1263,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 answers[fid] = val
         # Geo enrich from client IP
         country_code, lat, lon = _geo_from_ip(ip)
+        logger.info("geo_enrich submit form_id=%s ip=%s country=%s lat=%s lon=%s", form_id, ip, country_code, lat, lon)
         record = {
             "responseId": response_id,
             "formId": form_id,

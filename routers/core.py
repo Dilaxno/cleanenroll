@@ -445,6 +445,25 @@ async def password_reset_confirm(req: PasswordResetConfirmRequest):
         user = admin_auth.get_user_by_email(email)
         admin_auth.update_user(user.uid, password=req.password)
         logger.info("Password updated for %s", _mask_email(email))
+        # Send confirmation email (best-effort)
+        try:
+            when = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.gmtime())
+            subject = "Your CleanEnroll password was changed"
+            html = render_email("base.html", {
+                "subject": subject,
+                "preheader": "This is a confirmation that your password was changed.",
+                "title": "Password changed",
+                "intro": "This is a confirmation that your CleanEnroll password was changed.",
+                "content_html": (
+                    f"<div><p style='margin:0 0 12px;color:#d1d5db'>If you did not request this change, please contact our support immediately.</p>"
+                    f"<p style='margin:0;color:#c7c7c7'>Time (UTC): <strong>{when}</strong></p></div>"
+                ),
+                "cta_label": "Sign in",
+                "cta_url": os.getenv("FRONTEND_URL", "https://cleanenroll.com").rstrip("/") + "/auth",
+            })
+            send_email_html(email, subject, html)
+        except Exception:
+            logger.exception("Failed to send password changed confirmation email to %s", _mask_email(email))
     except Exception as ex:
         logger.warning("Password update failed for %s: %s", _mask_email(email), ex)
         # Do not leak details

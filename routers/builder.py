@@ -141,6 +141,33 @@ def _public_url_for_key(key: str) -> str:
         return f"{base}/{R2_BUCKET}/{key}"
     return f"{base}/{key}"
 
+# Normalize any presigned Cloudflare R2 URL to a permanent public URL
+# If the input is already public or a non-R2 URL, returns it unchanged (without query string)
+from urllib.parse import urlparse, urlunparse
+
+def _normalize_bg_public_url(u: Optional[str]) -> Optional[str]:
+    if not u:
+        return u
+    try:
+        s = str(u).strip()
+        pr = urlparse(s)
+        # strip query/fragment always
+        pr = pr._replace(query='', fragment='')
+        host = (pr.netloc or '').lower()
+        if '.r2.cloudflarestorage.com' in host:
+            # Path format: /<bucket>/<key>
+            parts = (pr.path or '/').split('/', 2)
+            if len(parts) >= 3:
+                # bucket = parts[1]
+                key = parts[2]
+                return _public_url_for_key(key)
+            # Fallback: keep URL without query
+            return urlunparse(pr)
+        # Already public or other host: return without query
+        return urlunparse(pr)
+    except Exception:
+        return u
+
 def _analytics_countries_path(form_id: str) -> str:
     return os.path.join(ANALYTICS_BASE_DIR, form_id, "countries.json")
 
@@ -258,6 +285,12 @@ class ThemeSchema(BaseModel):
     primaryColor: str = "#4f46e5"
     backgroundColor: str = "#ffffff"
     pageBackgroundColor: str = "#ffffff"
+    # Background image settings for the page (behind the form)
+    pageBackgroundImage: Optional[str] = None
+    pageBackgroundImageSize: Optional[Literal["cover", "contain"]] = "cover"
+    pageBackgroundImagePosition: Optional[str] = "center"
+    pageBackgroundImageRepeat: Optional[Literal["no-repeat", "repeat", "repeat-x", "repeat-y"]] = "no-repeat"
+    pageBackgroundDim: int = Field(default=0, ge=0, le=80)
     textColor: str = "#111827"
     titleColor: str = "#000000"
     # Field label customization
@@ -1040,6 +1073,15 @@ async def create_form(cfg: FormConfig):
     # Custom domain normalization
     data["customDomain"] = _normalize_domain(data.get("customDomain"))
     data["customDomainVerified"] = bool(data.get("customDomainVerified")) and bool(data.get("customDomain"))
+    # Normalize background image URL to permanent public URL if needed
+    try:
+        theme = data.get("theme") or {}
+        raw_bg = theme.get("pageBackgroundImage")
+        if raw_bg:
+            theme["pageBackgroundImage"] = _normalize_bg_public_url(raw_bg)
+        data["theme"] = theme
+    except Exception:
+        pass
     _write_json(_form_path(form_id), data)
 
     embed_url = f"/embed/{form_id}"
@@ -1091,6 +1133,16 @@ async def update_form(form_id: str, cfg: FormConfig):
     data["isPublished"] = existing_published if incoming_published is None else bool(incoming_published)
     data["createdAt"] = prev.get("createdAt")  # preserve original
     data["updatedAt"] = datetime.utcnow().isoformat()
+
+    # Normalize background image URL to permanent public URL if needed
+    try:
+        theme = data.get("theme") or {}
+        raw_bg = theme.get("pageBackgroundImage")
+        if raw_bg:
+            theme["pageBackgroundImage"] = _normalize_bg_public_url(raw_bg)
+        data["theme"] = theme
+    except Exception:
+        pass
 
     _write_json(path, data)
 

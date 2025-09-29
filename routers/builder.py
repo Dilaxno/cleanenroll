@@ -260,25 +260,12 @@ class SubmitButton(BaseModel):
     textColor: str = "#ffffff"
 
 
-class VisualImage(BaseModel):
-    id: str
-    url: str
-    # Position and size as percentages relative to the form preview container
-    left: float = 0.0   # 0-100
-    top: float = 0.0    # 0-100
-    width: float = 20.0 # 0-100 (percentage of container width)
-    # Optional explicit height percentage (when omitted, height is auto based on image's intrinsic ratio)
-    height: Optional[float] = None  # 0-100
-    zIndex: Optional[int] = 1
-    rotation: Optional[float] = 0.0
 
 
 class Branding(BaseModel):
     logo: Optional[str] = None  # data URL or external URL
     logoPosition: Literal["top", "bottom"] = "top"
     logoSize: Literal["small", "medium", "large"] = "medium"
-    # Draggable visuals overlayed on the form
-    visuals: Optional[List[VisualImage]] = []
 
 
 class ThemeSchema(BaseModel):

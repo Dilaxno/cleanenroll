@@ -102,6 +102,62 @@ os.makedirs(BACKING_DIR, exist_ok=True)
 RESPONSES_BASE_DIR = os.path.join(os.getcwd(), "data", "responses")
 os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
 
+# Analytics storage (file-based aggregation)
+ANALYTICS_BASE_DIR = os.path.join(os.getcwd(), "data", "analytics")
+os.makedirs(ANALYTICS_BASE_DIR, exist_ok=True)
+
+def _analytics_countries_path(form_id: str) -> str:
+    return os.path.join(ANALYTICS_BASE_DIR, form_id, "countries.json")
+
+def _load_analytics_countries(form_id: str) -> Dict:
+    path = _analytics_countries_path(form_id)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"total": {}, "daily": {}}
+    return {"total": {}, "daily": {}}
+
+def _save_analytics_countries(form_id: str, data: Dict) -> None:
+    path = _analytics_countries_path(form_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.exception("analytics countries save failed form_id=%s err=%s", form_id, e)
+
+
+def _analytics_increment_country(form_id: str, country_iso2: Optional[str], submitted_at_iso: str) -> None:
+    if not country_iso2:
+        return
+    try:
+        iso = str(country_iso2 or "").strip().upper()
+        if not iso:
+            return
+        day_key = (submitted_at_iso or "").strip()
+        try:
+            if day_key.endswith("Z"):
+                day_key = day_key[:-1] + "+00:00"
+            dt = datetime.fromisoformat(day_key)
+            day_key = dt.date().isoformat()
+        except Exception:
+            day_key = (submitted_at_iso or "")[:10]
+        data = _load_analytics_countries(form_id)
+        total = data.get("total") or {}
+        daily = data.get("daily") or {}
+        total[iso] = int(total.get(iso, 0)) + 1
+        day_bucket = daily.get(day_key) or {}
+        day_bucket[iso] = int(day_bucket.get(iso, 0)) + 1
+        daily[day_key] = day_bucket
+        data["total"] = total
+        data["daily"] = daily
+        data["updatedAt"] = datetime.utcnow().isoformat()
+        _save_analytics_countries(form_id, data)
+    except Exception:
+        logger.exception("analytics countries increment error form_id=%s", form_id)
+
 # Geo data local cache directory and file
 WORLD_GEO_DIR = os.path.join(os.getcwd(), "data", "geo")
 os.makedirs(WORLD_GEO_DIR, exist_ok=True)
@@ -1423,6 +1479,12 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             "answers": answers,
         }
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)
+        # Update country analytics aggregation (file-based)
+        try:
+            if country_code:
+                _analytics_increment_country(form_id, country_code, submitted_at)
+        except Exception:
+            logger.exception("analytics: country increment failed form_id=%s", form_id)
         # Attempt Google Sheets append if syncing is enabled for this form
         try:
             # try import via package-aware path first
@@ -1757,6 +1819,57 @@ async def list_responses(
     # Pagination
     sliced = items[offset: offset + max(0, int(limit))]
     return {"count": len(items), "responses": sliced}
+
+@router.get("/forms/{form_id}/analytics/countries")
+async def get_countries_analytics(form_id: str, from_ts: Optional[str] = Query(default=None, alias="from"), to_ts: Optional[str] = Query(default=None, alias="to")):
+    """
+    Return aggregated submission counts by country for a form.
+    Optional query params:
+      - from (ISO datetime): include days >= this date
+      - to (ISO datetime): include days <= this date
+    When no range is provided, returns the all-time totals.
+    """
+    data = _load_analytics_countries(form_id)
+    if not from_ts and not to_ts:
+        return {"countries": data.get("total") or {}}
+
+    def _to_date(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        try:
+            x = str(s).strip()
+            if x.endswith("Z"):
+                x = x[:-1] + "+00:00"
+            dt = datetime.fromisoformat(x)
+            return dt
+        except Exception:
+            try:
+                return datetime.fromisoformat(str(s)[:10] + "T00:00:00+00:00")
+            except Exception:
+                return None
+
+    start = _to_date(from_ts)
+    end = _to_date(to_ts)
+    if start is None and end is None:
+        return {"countries": data.get("total") or {}}
+
+    daily = data.get("daily") or {}
+    agg: Dict[str, int] = {}
+    for day, bucket in daily.items():
+        try:
+            day_dt = datetime.fromisoformat(day + "T00:00:00+00:00")
+        except Exception:
+            continue
+        if start and day_dt < start.replace(hour=0, minute=0, second=0, microsecond=0):
+            continue
+        if end and day_dt > end.replace(hour=0, minute=0, second=0, microsecond=0):
+            continue
+        for iso, cnt in (bucket or {}).items():
+            try:
+                agg[iso] = int(agg.get(iso, 0)) + int(cnt or 0)
+            except Exception:
+                continue
+    return {"countries": agg}
 
 # -----------------------------
 # DNS Provider: Cloudflare (API token based)

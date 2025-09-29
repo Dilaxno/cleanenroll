@@ -269,23 +269,56 @@ async def create_dodo_dynamic_session(request: Request, payload: Dict):
 
         logger.debug("[dodo-session] POST %s auth_header=%s scheme=%s", dodo_url, auth_header, auth_scheme)
 
-        req = urllib.request.Request(
-            url=dodo_url,
-            data=json.dumps(body).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:  # type: ignore
-            resp_body = resp.read().decode("utf-8", errors="replace")
-            try:
-                data = json.loads(resp_body)
-            except Exception:
-                data = {"raw": resp_body}
-            if resp.status not in (200, 201):
-                logger.warning("[dodo-session] API status=%s body=%s", resp.status, resp_body[:500])
-                raise HTTPException(status_code=502, detail="Failed to create checkout session")
-            logger.info("[dodo-session] created session for form=%s submission=%s uid=%s amount=%s %s", form_id, submission_id, uid or "", amount_cents, currency)
+        def _post(url: str, payload: Dict) -> Dict:
+            req = urllib.request.Request(
+                url=url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:  # type: ignore
+                resp_body = resp.read().decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(resp_body)
+                except Exception:
+                    data = {"raw": resp_body}
+                if resp.status not in (200, 201):
+                    logger.warning("[dodo-session] API status=%s body=%s", resp.status, resp_body[:500])
+                    raise HTTPException(status_code=502, detail="Failed to create checkout session")
+                return data
+
+        # Attempt dynamic session first
+        try:
+            data = _post(dodo_url, body)
+            logger.info("[dodo-session] created dynamic session form=%s submission=%s uid=%s amount=%s %s", form_id, submission_id, uid or "", amount_cents, currency)
             return data
+        except urllib.error.HTTPError as he1:  # type: ignore[attr-defined]
+            # Read error body to detect provider requiring product_id
+            try:
+                err_txt = he1.read().decode("utf-8", errors="replace")  # type: ignore[call-arg]
+            except Exception:
+                err_txt = ""
+            code = getattr(he1, 'code', None)
+            needs_product = (code == 422) and ("missing field `product_id`" in (err_txt or ""))
+            fallback_pid = os.getenv("DODO_FALLBACK_PRODUCT_ID") or os.getenv("DODO_PRODUCT_ID")
+            if needs_product and fallback_pid:
+                logger.info("[dodo-session] provider requires product_id, retrying with fallback product_id=%s", fallback_pid)
+                fallback_body = {
+                    "product_cart": [{"product_id": fallback_pid, "quantity": 1}],
+                    "metadata": {"form_id": form_id, "submission_id": submission_id, **({"user_uid": uid} if uid else {}), "desired_amount_cents": amount_cents, "desired_currency": currency},
+                    "return_url": return_url,
+                    "cancel_url": cancel_url,
+                }
+                data = _post(dodo_url, fallback_body)
+                logger.info("[dodo-session] created product-based session form=%s submission=%s uid=%s product_id=%s", form_id, submission_id, uid or "", fallback_pid)
+                return data
+            if needs_product and not fallback_pid:
+                logger.error("[dodo-session] dynamic checkout endpoint requires product_id but no fallback configured")
+                raise HTTPException(status_code=400, detail=(
+                    "Payments provider endpoint requires a product_id. Configure DODO_DYNAMIC_CHECKOUT_URL to the dynamic endpoint that accepts unit_amount_cents, or set DODO_FALLBACK_PRODUCT_ID to use a fixed product checkout."
+                ))
+            # Unknown error -> rethrow
+            raise he1
     except HTTPException:
         raise
     except urllib.error.HTTPError as he:  # type: ignore[attr-defined]

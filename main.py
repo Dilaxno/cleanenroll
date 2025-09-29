@@ -54,6 +54,7 @@ try:
     from .routers.payments import router as payments_router  # type: ignore
     from .routers.mailchimp import router as mailchimp_router  # type: ignore
     from .routers.google_sheets import router as google_sheets_router  # type: ignore
+    from .routers.slack import router as slack_router  # type: ignore
     from .routers.admin import router as admin_router  # type: ignore
 except Exception:
     # When running from a flat repo root: e.g. `uvicorn main:app`
@@ -62,6 +63,7 @@ except Exception:
     from routers.payments import router as payments_router  # type: ignore
     from routers.mailchimp import router as mailchimp_router  # type: ignore
     from routers.google_sheets import router as google_sheets_router  # type: ignore
+    from routers.slack import router as slack_router  # type: ignore
     from routers.admin import router as admin_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
@@ -181,6 +183,7 @@ app.include_router(builder_router)
 app.include_router(payments_router)
 app.include_router(mailchimp_router)
 app.include_router(google_sheets_router)
+app.include_router(slack_router)
 app.include_router(admin_router)
 
 

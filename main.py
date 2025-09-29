@@ -170,7 +170,7 @@ app.add_middleware(SlowAPIMiddleware)
 # CORS (embedding and local development)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://cleanenroll.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

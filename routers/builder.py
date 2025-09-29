@@ -911,6 +911,128 @@ async def presign_form_bg(request: Request, payload: Dict = None):
         logger.exception("R2 presign failed uid=%s", uid)
         raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}") 
 
+@router.post("/uploads/media/presign")
+async def presign_field_media(request: Request, payload: Dict = None):
+    """
+    Generate a presigned PUT URL for uploading media for image/video/audio fields directly to Cloudflare R2.
+    Requires Firebase Authorization bearer token.
+    Body: { filename: string, contentType?: string, kind?: "image"|"video"|"audio", formId?: string, fieldId?: string }
+    Returns: { uploadUrl, publicUrl, key, headers }
+    """
+    uid = _verify_firebase_uid(request)
+    if not isinstance(payload, dict):
+        payload = {}
+    raw_name = str(payload.get("filename") or "media").strip() or "media"
+    kind = str(payload.get("kind") or payload.get("type") or "image").strip().lower()
+    if kind not in ("image", "video", "audio"):
+        raise HTTPException(status_code=400, detail="kind must be one of image|video|audio")
+    content_type = str(payload.get("contentType") or "").strip()
+    if not content_type:
+        content_type = {"image": "image/jpeg", "video": "video/mp4", "audio": "audio/mpeg"}[kind]
+    if not content_type.lower().startswith(kind + "/"):
+        raise HTTPException(status_code=400, detail=f"Content-Type must start with {kind}/")
+    # Sanitize filename
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or f"{kind}"
+    form_id = str(payload.get("formId") or "").strip()
+    field_id = str(payload.get("fieldId") or "").strip()
+    # Build key: form-media/<uid>/<kind>/<formId?>/<timestamp>_<filename>
+    prefix = f"form-media/{uid}/{kind}/"
+    if form_id:
+        prefix += f"{form_id}/"
+    key = f"{prefix}{int(datetime.utcnow().timestamp()*1000)}_{safe_name}"
+    try:
+        s3 = _r2_client()
+        params = {
+            "Bucket": R2_BUCKET,
+            "Key": key,
+            "ContentType": content_type,
+        }
+        url = s3.generate_presigned_url(
+            ClientMethod="put_object",
+            Params=params,
+            ExpiresIn=900,  # 15 minutes
+        )
+        public_url = _public_url_for_key(key)
+        return {
+            "uploadUrl": url,
+            "publicUrl": public_url,
+            "key": key,
+            "headers": {"Content-Type": content_type},
+            "kind": kind,
+            "formId": form_id or None,
+            "fieldId": field_id or None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("R2 media presign failed uid=%s", uid)
+        raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
+
+@router.post("/forms/{form_id}/fields/{field_id}/media")
+async def set_field_media(form_id: str, field_id: str, payload: Dict = None):
+    """
+    Set media URL (and optional poster) for an image/video/audio field on a form.
+    Body: {
+      key?: string,                 # R2 object key to derive public URL from
+      url?: string | mediaUrl?: string,  # direct URL (will be normalized)
+      posterKey?: string,           # optional R2 key for video poster
+      posterUrl?: string | poster?: string,
+    }
+    Returns: { success: true, fieldId, mediaUrl, poster? }
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    fields = data.get("fields") or []
+    idx = None
+    for i, f in enumerate(fields):
+        try:
+            if str(f.get("id")) == str(field_id) or (str(f.get("label") or "").strip() == str(field_id)):
+                idx = i
+                break
+        except Exception:
+            continue
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Field not found")
+    fobj = fields[idx] or {}
+    ftype = str(fobj.get("type") or "").strip().lower()
+    if ftype not in ("image", "video", "audio"):
+        raise HTTPException(status_code=400, detail="Field is not a media display type")
+
+    # Resolve media URL
+    key = str(payload.get("key") or payload.get("mediaKey") or "").strip()
+    url = payload.get("mediaUrl") or payload.get("url")
+    media_url: Optional[str] = None
+    if key:
+        media_url = _public_url_for_key(key)
+    elif url:
+        media_url = _normalize_bg_public_url(str(url))
+    else:
+        raise HTTPException(status_code=400, detail="Provide either key or mediaUrl/url")
+
+    # Optional poster (for video primarily)
+    poster_key = str(payload.get("posterKey") or "").strip()
+    poster_url_in = payload.get("posterUrl") or payload.get("poster")
+    poster_url: Optional[str] = None
+    if poster_key:
+        poster_url = _public_url_for_key(poster_key)
+    elif poster_url_in:
+        poster_url = _normalize_bg_public_url(str(poster_url_in))
+
+    # Update field
+    fobj["mediaUrl"] = media_url
+    if poster_url is not None:
+        fobj["poster"] = poster_url
+    fields[idx] = fobj
+    data["fields"] = fields
+    data["updatedAt"] = datetime.utcnow().isoformat()
+    _write_json(path, data)
+
+    return {"success": True, "fieldId": field_id, "mediaUrl": media_url, **({"poster": poster_url} if poster_url is not None else {})}
+
 # In-memory cache for world countries GeoJSON to reduce outbound fetches
 _WORLD_COUNTRIES_CACHE: Dict[str, Any] = {"data": None, "ts": 0}
 
@@ -1069,6 +1191,30 @@ async def create_form(cfg: FormConfig):
         data["theme"] = theme
     except Exception:
         pass
+
+    # Normalize media field URLs to permanent public URLs (R2)
+    try:
+        fields = data.get("fields") or []
+        for f in fields:
+            try:
+                ftype = str(f.get("type") or "").strip().lower()
+            except Exception:
+                ftype = ""
+            if ftype in ("image", "video", "audio"):
+                try:
+                    if f.get("mediaUrl"):
+                        f["mediaUrl"] = _normalize_bg_public_url(f.get("mediaUrl"))
+                except Exception:
+                    pass
+                try:
+                    if f.get("poster"):
+                        f["poster"] = _normalize_bg_public_url(f.get("poster"))
+                except Exception:
+                    pass
+        data["fields"] = fields
+    except Exception:
+        pass
+
     _write_json(_form_path(form_id), data)
 
     embed_url = f"/embed/{form_id}"
@@ -1128,6 +1274,29 @@ async def update_form(form_id: str, cfg: FormConfig):
         if raw_bg:
             theme["pageBackgroundImage"] = _normalize_bg_public_url(raw_bg)
         data["theme"] = theme
+    except Exception:
+        pass
+
+    # Normalize media field URLs to permanent public URLs (R2)
+    try:
+        fields = data.get("fields") or []
+        for f in fields:
+            try:
+                ftype = str(f.get("type") or "").strip().lower()
+            except Exception:
+                ftype = ""
+            if ftype in ("image", "video", "audio"):
+                try:
+                    if f.get("mediaUrl"):
+                        f["mediaUrl"] = _normalize_bg_public_url(f.get("mediaUrl"))
+                except Exception:
+                    pass
+                try:
+                    if f.get("poster"):
+                        f["poster"] = _normalize_bg_public_url(f.get("poster"))
+                except Exception:
+                    pass
+        data["fields"] = fields
     except Exception:
         pass
 

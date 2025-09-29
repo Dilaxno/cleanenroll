@@ -13,6 +13,8 @@ import re
 import shutil
 import subprocess
 import requests
+import boto3
+from botocore.client import Config as BotoConfig
 try:
     import dns.resolver  # type: ignore
     _DNS_AVAILABLE = True
@@ -105,6 +107,27 @@ os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
 # Analytics storage (file-based aggregation)
 ANALYTICS_BASE_DIR = os.path.join(os.getcwd(), "data", "analytics")
 os.makedirs(ANALYTICS_BASE_DIR, exist_ok=True)
+
+# Cloudflare R2 configuration (S3-compatible)
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID") or os.getenv("CLOUDFLARE_R2_ACCOUNT_ID") or ""
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("CLOUDFLARE_R2_ACCESS_KEY_ID") or ""
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("CLOUDFLARE_R2_SECRET_ACCESS_KEY") or ""
+R2_BUCKET = os.getenv("R2_BUCKET") or "formbg"
+R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN") or "background.cleanenroll.com"
+
+
+def _r2_client():
+    if not (R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY):
+        raise HTTPException(status_code=500, detail="R2 is not configured on server")
+    endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=BotoConfig(signature_version="s3v4"),
+        region_name="auto",
+    )
 
 def _analytics_countries_path(form_id: str) -> str:
     return os.path.join(ANALYTICS_BASE_DIR, form_id, "countries.json")
@@ -809,6 +832,50 @@ def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[floa
 # -----------------------------
 
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
+
+
+@router.post("/uploads/form-bg/presign")
+async def presign_form_bg(request: Request, payload: Dict = None):
+    """
+    Generate a presigned PUT URL for uploading a form background image directly to Cloudflare R2.
+    Requires Firebase Authorization bearer token.
+    Body: { filename: string, contentType?: string }
+    Returns: { uploadUrl, publicUrl, key, headers }
+    """
+    uid = _verify_firebase_uid(request)
+    if not isinstance(payload, dict):
+        payload = {}
+    raw_name = str(payload.get("filename") or "background").strip() or "background"
+    content_type = str(payload.get("contentType") or "image/jpeg").strip() or "image/jpeg"
+    if not content_type.lower().startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are allowed")
+    # Sanitize filename
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or "background.jpg"
+    key = f"form-backgrounds/{uid}/{int(datetime.utcnow().timestamp()*1000)}_{safe_name}"
+    try:
+        s3 = _r2_client()
+        params = {
+            "Bucket": R2_BUCKET,
+            "Key": key,
+            "ContentType": content_type,
+        }
+        url = s3.generate_presigned_url(
+            ClientMethod="put_object",
+            Params=params,
+            ExpiresIn=900,  # 15 minutes
+        )
+        public_url = f"https://{R2_PUBLIC_DOMAIN}/{key}"
+        return {
+            "uploadUrl": url,
+            "publicUrl": public_url,
+            "key": key,
+            "headers": {"Content-Type": content_type},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("R2 presign failed uid=%s", uid)
+        raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}") 
 
 # In-memory cache for world countries GeoJSON to reduce outbound fetches
 _WORLD_COUNTRIES_CACHE: Dict[str, Any] = {"data": None, "ts": 0}

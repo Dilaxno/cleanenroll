@@ -113,7 +113,7 @@ R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID") or os.getenv("CLOUDFLARE_R2_ACCOUNT_I
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("CLOUDFLARE_R2_ACCESS_KEY_ID") or ""
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("CLOUDFLARE_R2_SECRET_ACCESS_KEY") or ""
 R2_BUCKET = os.getenv("R2_BUCKET") or "formbg"
-R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN") or "background.cleanenroll.com"
+R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE") or os.getenv("R2_PUBLIC_DOMAIN") or "https://pub-ca9cfc8edec44ab892c0d6ce89498015.r2.dev"
 
 
 def _r2_client():
@@ -128,6 +128,18 @@ def _r2_client():
         config=BotoConfig(signature_version="s3v4"),
         region_name="auto",
     )
+
+
+def _public_url_for_key(key: str) -> str:
+    base = (R2_PUBLIC_BASE or "").strip().rstrip("/")
+    if not base:
+        return key
+    if not base.startswith("http"):
+        base = "https://" + base
+    # If using R2 public domain, bucket name must be part of the path
+    if ".r2.dev" in base:
+        return f"{base}/{R2_BUCKET}/{key}"
+    return f"{base}/{key}"
 
 def _analytics_countries_path(form_id: str) -> str:
     return os.path.join(ANALYTICS_BASE_DIR, form_id, "countries.json")
@@ -336,6 +348,8 @@ class FormConfig(BaseModel):
     userId: Optional[str] = None
     title: str = "Untitled Form"
     subtitle: str = ""
+    # UI language for this form (ISO code like 'en', 'es', 'fr', ...)
+    language: Optional[str] = "en"
     thankYouMessage: str = "Thank you for your submission! We'll get back to you soon."
     redirect: RedirectConfig = RedirectConfig()
     emailValidationEnabled: bool = False
@@ -864,7 +878,7 @@ async def presign_form_bg(request: Request, payload: Dict = None):
             Params=params,
             ExpiresIn=900,  # 15 minutes
         )
-        public_url = f"https://{R2_PUBLIC_DOMAIN}/{key}"
+        public_url = _public_url_for_key(key)
         return {
             "uploadUrl": url,
             "publicUrl": public_url,

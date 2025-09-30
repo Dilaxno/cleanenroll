@@ -947,6 +947,12 @@ def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[floa
 # Routes
 # -----------------------------
 
+# Use the shared limiter instance configured in utils.limiter (supports both package and flat runs)
+try:
+    from ..utils.limiter import limiter  # type: ignore
+except Exception:
+    from utils.limiter import limiter  # type: ignore
+
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
 
 
@@ -1209,12 +1215,6 @@ async def get_world_countries():
     except Exception:
         pass
     raise HTTPException(status_code=500, detail=f"Failed to load world countries: {last_err}") 
-
-# Use the shared limiter instance configured in utils.limiter
-try:
-    from ..utils.limiter import limiter  # type: ignore
-except Exception:
-    from utils.limiter import limiter  # type: ignore
 
 @router.get("/geo/search")
 @limiter.limit("30/minute")

@@ -168,9 +168,39 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 # CORS (embedding and local development)
+# CORS allowed origins: env override (CORS_ALLOWED_ORIGINS comma-separated), else defaults
+_env_origins_list = []
+try:
+    _raw = os.getenv("CORS_ALLOWED_ORIGINS") or ""
+    if _raw:
+        _env_origins_list = [o.strip() for o in _raw.split(",") if o.strip()]
+except Exception:
+    _env_origins_list = []
+_default_origins = [
+    "https://cleanenroll.com",
+    "https://www.cleanenroll.com",
+    "https://api.cleanenroll.com",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+# Optionally include FRONTEND_URL values
+_extra = []
+for k in ("FRONTEND_URL", "FRONTEND_URL2", "CORS_ORIGIN", "CORS_ORIGINS"):
+    try:
+        v = (os.getenv(k) or "").strip()
+        if v:
+            # support comma-separated in CORS_ORIGINS
+            if "," in v:
+                _extra.extend([x.strip() for x in v.split(",") if x.strip()])
+            else:
+                _extra.append(v)
+    except Exception:
+        continue
+_allow_origins = _env_origins_list or list(dict.fromkeys(_default_origins + _extra))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://cleanenroll.com"],
+    allow_origins=_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

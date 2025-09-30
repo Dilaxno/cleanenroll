@@ -85,7 +85,24 @@ except Exception:
 from typing import Optional as _Optional
 
 def _is_pro_plan(user_id: _Optional[str]) -> bool:
-    if not _FS_AVAILABLE or not user_id:
+    if not user_id:
+        return False
+    # Prefer Supabase when configured
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+        try:
+            # Try by id column
+            rows = _sb_get("users", {"select": "plan", "id": f"eq.{user_id}", "limit": "1"})
+            if not rows:
+                # Fallback to uid column naming
+                rows = _sb_get("users", {"select": "plan", "uid": f"eq.{user_id}", "limit": "1"})
+            if rows:
+                plan = str((rows[0] or {}).get("plan") or "").lower()
+                return plan in ("pro", "business", "enterprise")
+        except Exception:
+            return False
+        return False
+    # Fallback: Firestore when Supabase is not configured
+    if not _FS_AVAILABLE:
         return False
     try:
         doc = _fs.client().collection("users").document(user_id).get()
@@ -114,6 +131,61 @@ R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("CLOUDFLARE_R2_ACC
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("CLOUDFLARE_R2_SECRET_ACCESS_KEY") or ""
 R2_BUCKET = os.getenv("R2_BUCKET") or "formbg"
 R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE") or os.getenv("R2_PUBLIC_DOMAIN") or "https://pub-ca9cfc8edec44ab892c0d6ce89498015.r2.dev"
+
+# Supabase configuration (REST via service role key)
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or ""
+
+
+def _sb_headers() -> Dict[str, str]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase is not configured on server")
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Prefer": "return=representation"
+    }
+
+
+def _sb_get(table: str, params: Dict[str, str]) -> List[Dict[str, Any]]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    try:
+        resp = requests.get(url, headers=_sb_headers(), params=params, timeout=15)
+        if resp.status_code == 406:
+            return []
+        if not resp.ok:
+            raise HTTPException(status_code=502, detail=f"Supabase select failed: {resp.text}")
+        return resp.json() if resp.text else []
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supabase error: {e}")
+
+
+def _sb_upsert(table: str, row: Dict[str, Any], on_conflict: Optional[str] = None) -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    if on_conflict:
+        url += f"?on_conflict={on_conflict}"
+    headers = _sb_headers().copy()
+    headers["Prefer"] = headers.get("Prefer", "") + ",resolution=merge-duplicates"
+    try:
+        resp = requests.post(url, headers=headers, json=row, timeout=15)
+        if not resp.ok:
+            raise HTTPException(status_code=502, detail=f"Supabase upsert failed: {resp.text}")
+        data = resp.json() if resp.text else []
+        if isinstance(data, list) and data:
+            return data[0]
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supabase error: {e}")
 
 
 def _r2_client():
@@ -2199,6 +2271,21 @@ def _cf_api_headers(token: str) -> Dict[str, str]:
 
 
 def _store_cloudflare_token(uid: str, token: str) -> None:
+    # Prefer Supabase storage
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+        try:
+            row = {
+                "uid": uid,
+                "cloudflare_token": token,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            _sb_upsert("dns_integrations", row, on_conflict="uid")
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to store DNS credentials (Supabase)")
+    # Fallback to Firestore
     try:
         doc = _fs.client().collection("dns_integrations").document(uid)
         doc.set({
@@ -2212,6 +2299,22 @@ def _store_cloudflare_token(uid: str, token: str) -> None:
 
 
 def _get_cloudflare_token(uid: str) -> str:
+    # Prefer Supabase
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+        try:
+            rows = _sb_get("dns_integrations", {"select": "cloudflare_token,cloudflare", "uid": f"eq.{uid}", "limit": "1"})
+            if rows:
+                row = rows[0] or {}
+                # Prefer flat column `cloudflare_token`, fallback to json column `cloudflare` {token}
+                token = str((row.get("cloudflare_token") or (row.get("cloudflare") or {}).get("token") or "")).strip()
+                if token:
+                    return token
+            raise HTTPException(status_code=400, detail="Cloudflare not connected for this account")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to load DNS credentials (Supabase)")
+    # Fallback Firestore
     try:
         doc = _fs.client().collection("dns_integrations").document(uid).get()
         data = doc.to_dict() or {}

@@ -2244,6 +2244,283 @@ async def get_countries_analytics(form_id: str, from_ts: Optional[str] = Query(d
     return {"countries": agg}
 
 # -----------------------------
+# Supabase-backed: Analytics events, Notifications, Abandons
+# -----------------------------
+
+# Supabase configuration (REST/PostgREST)
+SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_REST_URL") or ""
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or ""
+
+
+def _sb_headers() -> Dict[str, str]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured on server")
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _sb_get(table: str, params: Dict[str, str]) -> List[Dict[str, Any]]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured on server")
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    try:
+        resp = requests.get(url, headers=_sb_headers(), params=params, timeout=20)
+        if resp.status_code == 404:
+            # Table/view not found -> treat as empty
+            return []
+        if not resp.ok:
+            raise HTTPException(status_code=502, detail=f"Supabase GET failed: {resp.text}")
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supabase error: {e}")
+
+
+def _sb_upsert(table: str, row: Dict[str, Any], on_conflict: Optional[str] = None) -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured on server")
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    params = {}
+    if on_conflict:
+        params["on_conflict"] = on_conflict
+    headers = _sb_headers()
+    headers["Prefer"] = "resolution=merge-duplicates,return=representation"
+    try:
+        resp = requests.post(url, headers=headers, params=params, json=[row], timeout=20)
+        if resp.status_code == 404:
+            # Table not found
+            raise HTTPException(status_code=404, detail=f"Supabase table '{table}' not found")
+        if not resp.ok:
+            raise HTTPException(status_code=502, detail=f"Supabase UPSERT failed: {resp.text}")
+        try:
+            arr = resp.json()
+            return arr[0] if isinstance(arr, list) and arr else {}
+        except Exception:
+            return {}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supabase error: {e}")
+
+
+def _sb_update(table: str, match: Dict[str, str], row: Dict[str, Any]) -> int:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured on server")
+    # Build filters like id=eq.123&user_id=eq.abc
+    qp = "&".join([f"{k}=eq.{v}" for k, v in (match or {}).items()])
+    url = f"{SUPABASE_URL}/rest/v1/{table}{('?'+qp) if qp else ''}"
+    headers = _sb_headers()
+    headers["Prefer"] = "return=representation"
+    try:
+        resp = requests.patch(url, headers=headers, json=row, timeout=20)
+        if resp.status_code == 404:
+            return 0
+        if not resp.ok:
+            raise HTTPException(status_code=502, detail=f"Supabase UPDATE failed: {resp.text}")
+        try:
+            arr = resp.json()
+            return len(arr) if isinstance(arr, list) else 0
+        except Exception:
+            return 0
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supabase error: {e}")
+
+
+@router.post("/analytics/events")
+async def ingest_analytics_event(payload: Dict = None, request: Request = None):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    # If Supabase not configured, accept no-op to avoid client errors
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"success": True}
+    ev = payload.copy()
+    now_iso = datetime.utcnow().isoformat()
+    # Normalize fields
+    ev_row = {
+        "id": ev.get("id") or uuid.uuid4().hex,
+        "form_id": ev.get("formId") or ev.get("form_id") or "",
+        "user_id": ev.get("userId") or ev.get("user_id") or None,
+        "type": (ev.get("type") or "").strip(),
+        "ts": ev.get("ts") or now_iso,
+        "device_type": ((ev.get("deviceInfo") or {}).get("deviceType") or ev.get("device_type") or None),
+        "browser": ((ev.get("deviceInfo") or {}).get("browser") or ev.get("browser") or None),
+        "os": ((ev.get("deviceInfo") or {}).get("os") or ev.get("os") or None),
+        "session_id": ev.get("sessionId") or ev.get("session_id") or None,
+        "visitor_id": ev.get("visitorId") or ev.get("visitor_id") or None,
+        "field_id": ev.get("fieldId") or ev.get("field_id") or None,
+        "field_label": ev.get("fieldLabel") or ev.get("field_label") or None,
+        "duration_ms": ev.get("durationMs") or ev.get("duration_ms") or None,
+        "fields_filled_count": ev.get("fieldsFilledCount") or ev.get("fields_filled_count") or None,
+        "first_interaction_field_label": ev.get("firstInteractionFieldLabel") or ev.get("first_interaction_field_label") or None,
+        "ip": None,
+    }
+    try:
+        if request:
+            ev_row["ip"] = _client_ip(request)
+    except Exception:
+        pass
+    if not ev_row["form_id"] or not ev_row["type"]:
+        raise HTTPException(status_code=400, detail="Missing formId or type")
+    _sb_upsert("analytics_events", ev_row)
+    return {"success": True, "id": ev_row["id"]}
+
+
+@router.get("/analytics/forms/{form_id}/summary")
+async def analytics_summary(form_id: str, from_ts: Optional[str] = Query(default=None, alias="from"), to_ts: Optional[str] = Query(default=None, alias="to")):
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        # Minimal empty summary when Supabase not configured
+        return {
+            "totals": {"views": 0, "starts": 0, "submissions": 0, "focus": 0, "filled": 0, "errors": 0},
+            "conversionRate": 0,
+            "devices": {"mobile": 0, "desktop": 0, "unknown": 0},
+            "browsers": {},
+            "os": {},
+            "fields": {"focus": {}, "errors": {}, "filled": {}},
+            "daily": {},
+        }
+    # Fetch events (bounded range) and aggregate
+    params: Dict[str, str] = {"select": "type,ts,device_type,browser,os,field_id,field_label,session_id,visitor_id", "form_id": f"eq.{form_id}", "order": "ts.asc"}
+    if from_ts:
+        params["ts"] = f"gte.{from_ts}"
+    events = _sb_get("analytics_events", params)
+    # Apply upper bound filter in Python
+    if to_ts:
+        try:
+            to_dt = datetime.fromisoformat(to_ts.replace("Z","+00:00"))
+            def _le(e):
+                try:
+                    s = str(e.get("ts") or "")
+                    if s.endswith("Z"): s = s[:-1]+"+00:00"
+                    dt = datetime.fromisoformat(s)
+                    return dt <= to_dt
+                except Exception:
+                    return True
+            events = [e for e in events if _le(e)]
+        except Exception:
+            pass
+    totals = {"views": 0, "starts": 0, "submissions": 0, "focus": 0, "filled": 0, "errors": 0}
+    devices = {"mobile": 0, "desktop": 0, "unknown": 0}
+    browsers: Dict[str, int] = {}
+    osb: Dict[str, int] = {}
+    fields = {"focus": {}, "errors": {}, "filled": {}}
+    daily: Dict[str, Dict[str, int]] = {}
+    for e in events:
+        t = (e.get("type") or "").lower()
+        if t == "view": totals["views"] += 1
+        elif t == "start": totals["starts"] += 1
+        elif t == "submit": totals["submissions"] += 1
+        elif t == "field_focus": totals["focus"] += 1
+        elif t == "field_filled": totals["filled"] += 1
+        elif t == "field_error": totals["errors"] += 1
+        # day bucket
+        try:
+            s = str(e.get("ts") or "").strip()
+            if s.endswith("Z"): s = s[:-1] + "+00:00"
+            day = datetime.fromisoformat(s).date().isoformat()
+            d = daily.get(day) or {"views":0,"starts":0,"submissions":0}
+            if t == "view": d["views"] += 1
+            if t == "start": d["starts"] += 1
+            if t == "submit": d["submissions"] += 1
+            daily[day] = d
+        except Exception:
+            pass
+        # device
+        dtp = (e.get("device_type") or "unknown").lower()
+        devices[dtp] = devices.get(dtp, 0) + 1
+        b = e.get("browser") or "Other"
+        browsers[b] = browsers.get(b, 0) + 1
+        o = e.get("os") or "Other"
+        osb[o] = osb.get(o, 0) + 1
+        # fields
+        fid = e.get("field_id") or "unknown"
+        flab = e.get("field_label") or fid
+        if t == "field_focus":
+            fields["focus"][flab] = fields["focus"].get(flab, 0) + 1
+        if t == "field_filled":
+            fields["filled"][flab] = fields["filled"].get(flab, 0) + 1
+        if t == "field_error":
+            fields["errors"][flab] = fields["errors"].get(flab, 0) + 1
+    conv = round(((totals["submissions"] / totals["views"]) * 1000)) / 10 if totals["views"] else 0
+    return {
+        "totals": totals,
+        "conversionRate": conv,
+        "devices": devices,
+        "browsers": browsers,
+        "os": osb,
+        "fields": fields,
+        "daily": daily,
+    }
+
+
+@router.post("/abandons/upsert")
+async def abandons_upsert(payload: Dict = None):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"success": True}
+    required = ["formId", "sessionId"]
+    for k in required:
+        if not payload.get(k):
+            raise HTTPException(status_code=400, detail=f"Missing {k}")
+    row = {
+        "id": payload.get("sessionId"),
+        "form_id": payload.get("formId"),
+        "user_id": payload.get("userId") or None,
+        "values": payload.get("values") or {},
+        "filled_count": int(payload.get("filledCount") or 0),
+        "total_fields": int(payload.get("totalFields") or 0),
+        "progress": payload.get("progress") or None,
+        "updated_at": datetime.utcnow().isoformat(),
+        "last_activity_at": datetime.utcnow().isoformat(),
+        "submitted": bool(payload.get("submitted")) if payload.get("submitted") is not None else False,
+        "abandoned": bool(payload.get("abandoned")) if payload.get("abandoned") is not None else False,
+        "submitted_at": payload.get("submittedAt") or None,
+        "abandoned_at": payload.get("abandonedAt") or None,
+        "step": int(payload.get("step") or 0) or None,
+        "total_steps": int(payload.get("totalSteps") or 0) or None,
+    }
+    _sb_upsert("abandons", row, on_conflict="id")
+    return {"success": True}
+
+
+@router.get("/abandons/list")
+async def abandons_list(formId: str, from_ts: Optional[str] = Query(default=None, alias="from"), to_ts: Optional[str] = Query(default=None, alias="to")):
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"items": []}
+    rows = _sb_get("abandons", {"select": "id,form_id,values,filled_count,total_fields,progress,updated_at,last_activity_at,submitted,abandoned,submitted_at,abandoned_at,step,total_steps", "form_id": f"eq.{formId}", "order": "updated_at.desc"})
+    # Optionally filter by from/to client-side
+    return {"items": rows or []}
+
+
+@router.get("/notifications")
+async def notifications_list(userId: str):
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"items": []}
+    rows = _sb_get("notifications", {"select": "id,form_id,form_title,preview,submitted_at,read,read_at", "user_id": f"eq.{userId}", "order": "submitted_at.desc"})
+    return {"items": rows or []}
+
+
+@router.post("/notifications/mark")
+async def notifications_mark(payload: Dict = None):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return {"updated": 0}
+    nid = (payload.get("id") or "").strip()
+    read = bool(payload.get("read", True))
+    if not nid:
+        raise HTTPException(status_code=400, detail="Missing id")
+    cnt = _sb_update("notifications", {"id": nid}, {"read": read, "read_at": datetime.utcnow().isoformat()})
+    return {"updated": cnt}
+
+# -----------------------------
 # DNS Provider: Cloudflare (API token based)
 # -----------------------------
 

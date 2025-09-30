@@ -395,6 +395,12 @@ class FieldSchema(BaseModel):
         "address",
         "url",
         "file",
+        # Extended input types (supported server-side)
+        "price",
+        "phone",
+        "full-name",
+        "password",
+        # Media display (non-interactive)
         "image",
         "video",
         "audio",

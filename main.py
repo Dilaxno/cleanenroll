@@ -164,7 +164,14 @@ try:
 except Exception:
     from utils.limiter import forwarded_for_ip, limiter  # type: ignore
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded"}
+    )
+
 app.add_middleware(SlowAPIMiddleware)
 
 # CORS (embedding and local development)

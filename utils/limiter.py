@@ -1,5 +1,6 @@
 from fastapi import Request
 from slowapi import Limiter
+from slowapi.util import get_remote_address
 from datetime import datetime, timedelta
 import os
 import json
@@ -23,7 +24,7 @@ def forwarded_for_ip(request: Request) -> str:
 
 
 # Global limiter instance to be shared across the app and routers
-limiter = Limiter(key_func=forwarded_for_ip)
+limiter = Limiter(key_func=get_remote_address)
 
 # Persistent store for signup attempts by IP (24h gap)
 _SIGNUP_STORE_PATH = os.path.join(os.getcwd(), 'data', 'signup_attempts.json')

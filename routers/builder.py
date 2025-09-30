@@ -13,6 +13,8 @@ import re
 import shutil
 import subprocess
 import requests
+import zipfile
+import io
 import boto3
 from botocore.client import Config as BotoConfig
 try:
@@ -391,6 +393,7 @@ class FieldSchema(BaseModel):
         "dropdown",
         "multiple",
         "date",
+        "age",
         "location",
         "address",
         "url",
@@ -495,6 +498,7 @@ EXTENDED_ALLOWED_TYPES = {
     "dropdown",
     "multiple",
     "date",
+    "age",
     "location",
     "address",
     "url",
@@ -1861,6 +1865,63 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     answers[fid] = _file_to_url(val)
             elif val is not None:
                 answers[fid] = val
+        # Build a downloadable ZIP archive of uploaded files (best-effort)
+        files_zip_meta = None
+        try:
+            file_entries = []  # list of tuples (fid, label, url)
+            for f in fields_def:
+                try:
+                    if str((f.get("type") or "")).strip().lower() != "file":
+                        continue
+                    fid = str(f.get("id"))
+                    label = str(f.get("label") or "")
+                except Exception:
+                    continue
+                av = answers.get(fid)
+                if isinstance(av, list):
+                    for u in av:
+                        if isinstance(u, str) and (u.startswith("http://") or u.startswith("https://")):
+                            file_entries.append((fid, label, u))
+                elif isinstance(av, str) and (av.startswith("http://") or av.startswith("https://")):
+                    file_entries.append((fid, label, av))
+            if file_entries:
+                max_total_bytes = 200 * 1024 * 1024  # 200MB safety cap
+                total = 0
+                added = 0
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for idx, (fid, label, url) in enumerate(file_entries):
+                        try:
+                            r = requests.get(url, timeout=15)
+                            if not r.ok:
+                                continue
+                            content = r.content or b""
+                            total += len(content)
+                            if total > max_total_bytes:
+                                break
+                            # Derive a sensible filename
+                            try:
+                                from urllib.parse import urlparse
+                                bn = os.path.basename(urlparse(url).path) or f"file_{idx}"
+                            except Exception:
+                                bn = f"file_{idx}"
+                            base_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", (label or "").strip())[:60] or fid[:12]
+                            arcname = f"{base_label}/{bn}"
+                            zf.writestr(arcname, content)
+                            added += 1
+                        except Exception:
+                            continue
+                if added > 0:
+                    data_bytes = buf.getvalue()
+                    key = f"submissions/{form_id}/{response_id}_files.zip"
+                    try:
+                        s3 = _r2_client()
+                        s3.put_object(Bucket=R2_BUCKET, Key=key, Body=data_bytes, ContentType="application/zip")
+                        files_zip_meta = {"url": _public_url_for_key(key), "key": key, "count": added, "bytes": len(data_bytes)}
+                    except Exception:
+                        files_zip_meta = None
+        except Exception:
+            logger.exception("zip bundle failed form_id=%s", form_id)
         # Geo enrich from client IP
         country_code, lat, lon = _geo_from_ip(ip)
         logger.info("geo_enrich submit form_id=%s ip=%s country=%s lat=%s lon=%s", form_id, ip, country_code, lat, lon)
@@ -1874,6 +1935,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             "lon": lon,
             "answers": answers,
         }
+        if files_zip_meta:
+            record["filesZip"] = files_zip_meta
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)
         # Update country analytics aggregation (file-based)
         try:

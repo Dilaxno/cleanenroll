@@ -918,7 +918,7 @@ def _load_form(form_id: str) -> Dict:
 @router.post("/api/forms")
 async def create_form(cfg: FormConfig):
     # Basic type guard for field.type
-    allowed_types = {"text", "textarea", "number", "checkbox", "dropdown", "date", "location", "url"}
+    allowed_types = {"text", "textarea", "number", "checkbox", "dropdown", "date", "age", "location", "url"}
     for fld in cfg.fields:
         if fld.type not in allowed_types:
             raise HTTPException(status_code=400, detail=f"Unsupported field type: {fld.type}")

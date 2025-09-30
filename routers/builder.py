@@ -1938,6 +1938,56 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         if files_zip_meta:
             record["filesZip"] = files_zip_meta
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)
+        # Firestore counters: increment submissions and update lastSubmissionAt
+        try:
+            if _FS_AVAILABLE:
+                try:
+                    # Initialize Firebase Admin if needed
+                    from firebase_admin import credentials as _fb_credentials  # type: ignore
+                    if not getattr(firebase_admin, "_apps", None):
+                        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or ""
+                        try:
+                            if cred_path and os.path.exists(cred_path):
+                                cred = _fb_credentials.Certificate(cred_path)
+                            else:
+                                cred = _fb_credentials.ApplicationDefault()  # type: ignore
+                            firebase_admin.initialize_app(cred)
+                        except Exception:
+                            # Best-effort; continue even if init fails
+                            pass
+                except Exception:
+                    pass
+                try:
+                    fs = _fs.client()
+                    ref = fs.collection("forms").document(form_id)
+                    # Prefer atomic increment when available
+                    try:
+                        from google.cloud.firestore_v1 import Increment as _FSIncrement  # type: ignore
+                        update_doc = {
+                            "submissionsCount": _FSIncrement(1),
+                            "submissions": _FSIncrement(1),
+                            "lastSubmissionAt": _fs.SERVER_TIMESTAMP,
+                        }
+                        ref.set(update_doc, merge=True)
+                    except Exception:
+                        # Fallback: read-modify-write
+                        snap = ref.get()
+                        data_prev = snap.to_dict() or {}
+                        prev = data_prev.get("submissionsCount")
+                        if not isinstance(prev, int):
+                            prev = data_prev.get("submissions") if isinstance(data_prev.get("submissions"), int) else 0
+                        new_count = int(prev or 0) + 1
+                        ref.set({
+                            "submissionsCount": new_count,
+                            "submissions": new_count,
+                            "lastSubmissionAt": _fs.SERVER_TIMESTAMP,
+                        }, merge=True)
+                except Exception:
+                    # Non-fatal if Firestore unavailable or misconfigured
+                    pass
+        except Exception:
+            # Never fail the submission on analytics/counters failure
+            pass
         # Update country analytics aggregation (file-based)
         try:
             if country_code:

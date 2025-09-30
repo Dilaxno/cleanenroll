@@ -1752,7 +1752,36 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             val = payload.get(fid)
             if val is None and label:
                 val = payload.get(label)
-            if val is not None:
+            # Normalize file inputs to public download URLs when possible
+            try:
+                ftype = str((f.get("type") or "")).strip().lower()
+            except Exception:
+                ftype = ""
+            if ftype == "file" and val is not None:
+                def _file_to_url(v):
+                    try:
+                        if isinstance(v, dict):
+                            u = v.get("url") or v.get("publicUrl") or v.get("downloadUrl")
+                            if u:
+                                return _normalize_bg_public_url(str(u))
+                            k = str(v.get("key") or v.get("r2Key") or "").strip()
+                            if k:
+                                return _public_url_for_key(k)
+                            # Fallback to provided name/filename or stringified dict
+                            return v.get("name") or v.get("filename") or str(v)
+                        if isinstance(v, str):
+                            s = v.strip()
+                            if s.startswith("http://") or s.startswith("https://"):
+                                return _normalize_bg_public_url(s)
+                            return s
+                        return str(v)
+                    except Exception:
+                        return str(v)
+                if isinstance(val, list):
+                    answers[fid] = [_file_to_url(x) for x in val]
+                else:
+                    answers[fid] = _file_to_url(val)
+            elif val is not None:
                 answers[fid] = val
         # Geo enrich from client IP
         country_code, lat, lon = _geo_from_ip(ip)

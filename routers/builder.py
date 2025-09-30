@@ -1059,7 +1059,7 @@ async def presign_field_media(request: Request, payload: Dict = None):
 # Public presign for submission file uploads (no auth; rate-limited)
 @router.post("/uploads/submissions/presign")
 @limiter.limit("60/minute")
-async def presign_submission_file(payload: Dict = None):
+async def presign_submission_file(request: Request, payload: Dict = None):
     """
     Generate a presigned PUT URL for uploading a submission file to Cloudflare R2.
     Public endpoint (no auth) intended for end-users submitting forms.

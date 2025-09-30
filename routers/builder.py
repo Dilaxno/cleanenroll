@@ -1050,6 +1050,52 @@ async def presign_field_media(request: Request, payload: Dict = None):
         logger.exception("R2 media presign failed uid=%s", uid)
         raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
 
+# Public presign for submission file uploads (no auth; rate-limited)
+@router.post("/uploads/submissions/presign")
+@limiter.limit("60/minute")
+async def presign_submission_file(payload: Dict = None):
+    """
+    Generate a presigned PUT URL for uploading a submission file to Cloudflare R2.
+    Public endpoint (no auth) intended for end-users submitting forms.
+    Body: { filename: string, contentType?: string, formId?: string }
+    Returns: { uploadUrl, publicUrl, key, headers }
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    raw_name = str(payload.get("filename") or "file").strip() or "file"
+    content_type = str(payload.get("contentType") or "application/octet-stream").strip() or "application/octet-stream"
+    form_id = str(payload.get("formId") or "").strip()
+    # Sanitize filename
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or "file.bin"
+    prefix = "submissions/uploads/"
+    if form_id:
+        prefix += f"{form_id}/"
+    key = f"{prefix}{int(datetime.utcnow().timestamp()*1000)}_{safe_name}"
+    try:
+        s3 = _r2_client()
+        params = {
+            "Bucket": R2_BUCKET,
+            "Key": key,
+            "ContentType": content_type,
+        }
+        url = s3.generate_presigned_url(
+            ClientMethod="put_object",
+            Params=params,
+            ExpiresIn=900,  # 15 minutes
+        )
+        public_url = _public_url_for_key(key)
+        return {
+            "uploadUrl": url,
+            "publicUrl": public_url,
+            "key": key,
+            "headers": {"Content-Type": content_type},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("R2 presign (submission) failed")
+        raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
+
 @router.post("/forms/{form_id}/fields/{field_id}/media")
 async def set_field_media(form_id: str, field_id: str, payload: Dict = None):
     """

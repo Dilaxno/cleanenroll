@@ -955,6 +955,171 @@ except Exception:
 
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
 
+# Groq API key for AI Copilot (server-side only)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_TOKEN") or ""
+
+@router.post("/ai/copilot")
+@limiter.limit("20/minute")
+async def ai_copilot(request: Request, payload: Dict = None):
+    """
+    AI Form Copilot: generate form field suggestions, placeholders, and microcopy
+    from a one-line prompt. Requires Firebase Authorization bearer token.
+
+    Body: {
+      prompt: string,
+      language?: string (ISO),
+      title?: string,
+      industry?: string,
+      currentFields?: [{ label, type, required?, placeholder? }],
+      tone?: string (e.g., "professional", "friendly")
+    }
+
+    Returns: {
+      success: true,
+      suggestions: {
+        title?: string,
+        subtitle?: string,
+        thankYouMessage?: string,
+        fields: [ { id, label, type, required, placeholder?, maxLength? } ],
+        notes?: string[]
+      }
+    }
+    """
+    uid = _verify_firebase_uid(request)
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="AI is not configured on server")
+
+    user_prompt = (payload.get("prompt") or "").strip()
+    if not user_prompt:
+        raise HTTPException(status_code=400, detail="Missing prompt")
+
+    language = (payload.get("language") or "en").strip()[:8]
+    title = (payload.get("title") or "").strip()
+    industry = (payload.get("industry") or "").strip()
+    tone = (payload.get("tone") or "professional").strip()
+
+    current_fields = []
+    try:
+        cf = payload.get("currentFields") or []
+        if isinstance(cf, list):
+            for f in cf:
+                try:
+                    current_fields.append({
+                        "label": str((f or {}).get("label") or ""),
+                        "type": str((f or {}).get("type") or ""),
+                        "required": bool((f or {}).get("required", False)),
+                        "placeholder": (str((f or {}).get("placeholder") or "").strip() or None),
+                    })
+                except Exception:
+                    continue
+    except Exception:
+        current_fields = []
+
+    # Constrain allowed types to server-supported set
+    allowed_types = sorted(list(EXTENDED_ALLOWED_TYPES))
+
+    system_prompt = (
+        "You are an expert conversion-focused form builder assistant. "
+        "Given a short prompt and optional context, produce a JSON object with: \n"
+        "{\n  \"title\"?: string,\n  \"subtitle\"?: string,\n  \"thankYouMessage\"?: string,\n  \"fields\": [\n    { \"label\": string, \"type\": one of allowed types, \"required\": boolean, \"placeholder\"?: string, \"maxLength\"?: number }\n  ],\n  \"notes\"?: string[]\n}\n"
+        "Rules: Use only these field types: " + ", ".join(allowed_types) + ". "
+        "Prefer concise labels and helpful placeholders. Avoid personal/sensitive data. "
+        "Limit to at most 10 fields. Make microcopy in language code: " + language + ". "
+        "Tone should be: " + tone + ". "
+    )
+
+    # Compose user content
+    user_content = {
+        "prompt": user_prompt,
+        "language": language,
+        "title": title,
+        "industry": industry,
+        "currentFields": current_fields,
+    }
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "CleanEnroll-Backend/1.0"
+    }
+    body = {
+        "model": "llama-3.1-8b-instant",
+        "temperature": 0.3,
+        "max_tokens": 1200,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)}
+        ]
+    }
+
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=30)
+        if not r.ok:
+            raise HTTPException(status_code=502, detail=f"AI provider error: {r.status_code} {r.text[:200]}")
+        data = r.json()
+        content = ""
+        try:
+            content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        except Exception:
+            content = ""
+        if not content:
+            raise HTTPException(status_code=502, detail="AI provider returned empty response")
+        # Attempt to parse JSON; strip fences if present
+        raw = content.strip()
+        if raw.startswith("```"):
+            m = re.search(r"```(?:json)?\n([\s\S]*?)\n```", raw)
+            raw = (m.group(1) if m else raw)
+        try:
+            obj = json.loads(raw)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Failed to parse AI output: {e}")
+
+        # Normalize and validate suggestions
+        suggestions = {
+            "title": (obj.get("title") or title or None),
+            "subtitle": (obj.get("subtitle") or None),
+            "thankYouMessage": (obj.get("thankYouMessage") or None),
+            "fields": [],
+            "notes": obj.get("notes") or [],
+        }
+        out_fields = []
+        for f in (obj.get("fields") or [])[:10]:
+            try:
+                lab = str((f or {}).get("label") or "").strip()
+                ftype = str((f or {}).get("type") or "").strip().lower()
+                req = bool((f or {}).get("required", False))
+                ph = (str((f or {}).get("placeholder") or "").strip() or None)
+                maxlen = f.get("maxLength")
+                if not lab:
+                    continue
+                if ftype not in EXTENDED_ALLOWED_TYPES:
+                    ftype = "text"
+                item = {"id": _create_id(), "label": lab, "type": ftype, "required": req}
+                if ph:
+                    item["placeholder"] = ph
+                if isinstance(maxlen, int) and maxlen > 0:
+                    item["maxLength"] = maxlen
+                out_fields.append(item)
+            except Exception:
+                continue
+        if not out_fields:
+            # minimal fallback
+            out_fields = [{"id": _create_id(), "label": "Your message", "type": "textarea", "required": True, "placeholder": "Tell us more..."}]
+        suggestions["fields"] = out_fields
+
+        return {"success": True, "suggestions": suggestions}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("ai_copilot failed uid=%s err=%s", uid, e)
+        raise HTTPException(status_code=500, detail="AI suggestion failed") 
+
 
 @router.post("/uploads/form-bg/presign")
 async def presign_form_bg(request: Request, payload: Dict = None):

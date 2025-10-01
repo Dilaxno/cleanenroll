@@ -136,7 +136,7 @@ R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID") or os.getenv("CLOUDFLARE_R2_ACCOUNT_I
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("CLOUDFLARE_R2_ACCESS_KEY_ID") or ""
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("CLOUDFLARE_R2_SECRET_ACCESS_KEY") or ""
 R2_BUCKET = os.getenv("R2_BUCKET") or "formbg"
-R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE") or os.getenv("R2_PUBLIC_DOMAIN") or "https://pub-ca9cfc8edec44ab892c0d6ce89498015.r2.dev"
+R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE") or os.getenv("R2_PUBLIC_DOMAIN") or "https://pub-e30045e3902945f4ada02414d0573c3b.r2.dev"
 
 # Supabase configuration (REST via service role key)
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")

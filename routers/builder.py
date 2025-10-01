@@ -209,15 +209,21 @@ def _r2_client():
 
 
 def _public_url_for_key(key: str) -> str:
-    base = (R2_PUBLIC_BASE or "").strip().rstrip("/")
+    base = (R2_PUBLIC_BASE or "").strip()
     if not base:
         return key
     if not base.startswith("http"):
         base = "https://" + base
-    # If using R2 public domain, bucket name must be part of the path
-    if ".r2.dev" in base:
-        return f"{base}/{R2_BUCKET}/{key}"
-    return f"{base}/{key}"
+    try:
+        pr = urlparse(base)
+        origin = f"{pr.scheme}://{pr.netloc}".rstrip("/")
+    except Exception:
+        origin = base.rstrip("/")
+    # For r2.dev public domains, the bucket is already bound; do not include bucket or any extra path
+    if ".r2.dev" in origin:
+        return f"{origin}/{key}"
+    # Default: append key to base origin
+    return f"{origin}/{key}"
 
 # Normalize any presigned Cloudflare R2 URL to a permanent public URL
 # If the input is already public or a non-R2 URL, returns it unchanged (without query string)

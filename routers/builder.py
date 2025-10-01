@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Literal, Any
 import logging
@@ -1358,6 +1358,62 @@ async def presign_submission_file(request: Request, payload: Dict = None):
     except Exception as e:
         logger.exception("R2 presign (submission) failed")
         raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
+
+@router.get("/uploads/attachment")
+@limiter.limit("120/minute")
+async def download_r2_attachment(key: Optional[str] = None, url: Optional[str] = None, filename: Optional[str] = None):
+    """
+    Stream a file from Cloudflare R2 as an attachment.
+    Provide either:
+      - key: the R2 object key
+      - url: a public R2 URL (we will extract the key from the path)
+    Returns the file bytes with Content-Disposition: attachment.
+    """
+    try:
+        resolved_key = (key or "").strip()
+        if not resolved_key:
+            u = (url or "").strip()
+            if not u:
+                raise HTTPException(status_code=400, detail="Provide 'key' or 'url'")
+            try:
+                pr = urlparse(u)
+                # Example paths:
+                #  - r2.dev: /<bucket>/<key>
+                #  - r2.cloudflarestorage.com: /<bucket>/<key>
+                path = (pr.path or "/").lstrip("/")
+                parts = path.split("/", 1)
+                if len(parts) >= 2:
+                    # parts[0] is bucket, parts[1] is key
+                    resolved_key = parts[1]
+                else:
+                    raise HTTPException(status_code=400, detail="Could not extract R2 key from url")
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid url")
+        if not resolved_key:
+            raise HTTPException(status_code=400, detail="Missing key")
+        s3 = _r2_client()
+        obj = s3.get_object(Bucket=R2_BUCKET, Key=resolved_key)
+        body = obj.get("Body")
+        if body is None:
+            raise HTTPException(status_code=404, detail="File not found")
+        content_type = obj.get("ContentType") or "application/octet-stream"
+        # Derive filename
+        fname = (filename or os.path.basename(resolved_key) or "file").strip()
+        headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
+        try:
+            clen = obj.get("ContentLength")
+            if clen is not None:
+                headers["Content-Length"] = str(int(clen))
+        except Exception:
+            pass
+        return StreamingResponse(body, media_type=content_type, headers=headers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("attachment download failed key=%s", key or url)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch file: {e}")
 
 @router.post("/forms/{form_id}/fields/{field_id}/media")
 async def set_field_media(form_id: str, field_id: str, payload: Dict = None):

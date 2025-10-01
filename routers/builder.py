@@ -1361,7 +1361,7 @@ async def presign_submission_file(request: Request, payload: Dict = None):
 
 @router.get("/uploads/attachment")
 @limiter.limit("120/minute")
-async def download_r2_attachment(key: Optional[str] = None, url: Optional[str] = None, filename: Optional[str] = None):
+async def download_r2_attachment(request: Request, key: Optional[str] = None, url: Optional[str] = None, filename: Optional[str] = None):
     """
     Stream a file from Cloudflare R2 as an attachment.
     Provide either:

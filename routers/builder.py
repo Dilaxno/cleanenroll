@@ -127,6 +127,10 @@ os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
 ANALYTICS_BASE_DIR = os.path.join(os.getcwd(), "data", "analytics")
 os.makedirs(ANALYTICS_BASE_DIR, exist_ok=True)
 
+# Plan-based upload limits
+FREE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024      # 50MB for Free plan
+PRO_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024     # 1GB for Pro/paid plans
+
 # Cloudflare R2 configuration (S3-compatible)
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID") or os.getenv("CLOUDFLARE_R2_ACCOUNT_ID") or ""
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("CLOUDFLARE_R2_ACCESS_KEY_ID") or ""
@@ -397,6 +401,7 @@ class FieldSchema(BaseModel):
         "location",
         "address",
         "url",
+        "email",
         "file",
         # Extended input types (supported server-side)
         "price",
@@ -502,6 +507,7 @@ EXTENDED_ALLOWED_TYPES = {
     "location",
     "address",
     "url",
+    "email",
     "file",
     # Sensitive/validated input types
     "full-name",
@@ -1182,6 +1188,17 @@ async def presign_form_bg(request: Request, payload: Dict = None):
     content_type = str(payload.get("contentType") or "image/jpeg").strip() or "image/jpeg"
     if not content_type.lower().startswith("image/"):
         raise HTTPException(status_code=400, detail="Only image uploads are allowed")
+
+    # Plan-based size validation (optional size provided by client)
+    is_pro = _is_pro_plan(uid)
+    try:
+        size = int(payload.get("size") or 0)
+    except Exception:
+        size = 0
+    limit = PRO_MAX_UPLOAD_BYTES if is_pro else FREE_MAX_UPLOAD_BYTES
+    if size and size > limit:
+        mb = int(limit // (1024 * 1024))
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum allowed is {mb}MB on your plan.")
     # Sanitize filename
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or "background.jpg"
     key = f"form-backgrounds/{uid}/{int(datetime.utcnow().timestamp()*1000)}_{safe_name}"
@@ -1230,6 +1247,17 @@ async def presign_field_media(request: Request, payload: Dict = None):
         content_type = {"image": "image/jpeg", "video": "video/mp4", "audio": "audio/mpeg"}[kind]
     if not content_type.lower().startswith(kind + "/"):
         raise HTTPException(status_code=400, detail=f"Content-Type must start with {kind}/")
+
+    # Plan-based size validation (optional size provided by client)
+    is_pro = _is_pro_plan(uid)
+    try:
+        size = int(payload.get("size") or 0)
+    except Exception:
+        size = 0
+    limit = PRO_MAX_UPLOAD_BYTES if is_pro else FREE_MAX_UPLOAD_BYTES
+    if size and size > limit:
+        mb = int(limit // (1024 * 1024))
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum allowed is {mb}MB on your plan.")
     # Sanitize filename
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or f"{kind}"
     form_id = str(payload.get("formId") or "").strip()
@@ -1274,7 +1302,7 @@ async def presign_submission_file(request: Request, payload: Dict = None):
     """
     Generate a presigned PUT URL for uploading a submission file to Cloudflare R2.
     Public endpoint (no auth) intended for end-users submitting forms.
-    Body: { filename: string, contentType?: string, formId?: string }
+    Body: { filename: string, contentType?: string, formId: string, size?: number }
     Returns: { uploadUrl, publicUrl, key, headers }
     """
     if not isinstance(payload, dict):
@@ -1282,6 +1310,24 @@ async def presign_submission_file(request: Request, payload: Dict = None):
     raw_name = str(payload.get("filename") or "file").strip() or "file"
     content_type = str(payload.get("contentType") or "application/octet-stream").strip() or "application/octet-stream"
     form_id = str(payload.get("formId") or "").strip()
+    if not form_id:
+        raise HTTPException(status_code=400, detail="formId is required")
+
+    # Determine plan from form owner and enforce size limit (when size provided)
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    form_data = _read_json(path)
+    owner_id = str(form_data.get("userId") or "").strip() or None
+    is_pro = _is_pro_plan(owner_id)
+    limit = PRO_MAX_UPLOAD_BYTES if is_pro else FREE_MAX_UPLOAD_BYTES
+    try:
+        size = int(payload.get("size") or 0)
+    except Exception:
+        size = 0
+    if size and size > limit:
+        mb = int(limit // (1024 * 1024))
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum allowed is {mb}MB on this form's plan.")
     # Sanitize filename
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or "file.bin"
     prefix = "submissions/uploads/"
@@ -1958,7 +2004,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 ftype = f.get("type")
             except Exception:
                 continue
-            if ftype in ("text", "textarea") and "email" in label.lower():
+            if (ftype == "email") or (ftype in ("text", "textarea") and "email" in label.lower()):
                 val = payload.get(f.get("id")) or payload.get(label)
                 if val:
                     if isinstance(val, list):

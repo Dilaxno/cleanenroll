@@ -705,30 +705,33 @@ def _normalize_domain(s: Optional[str]) -> Optional[str]:
 # -----------------------------
 
 def _spamhaus_listed(domain: str) -> Optional[bool]:
-    """Check domain reputation using Spamhaus (best-effort).
-    Returns True if listed (bad), False if not listed (good), None on error.
-    Note: For domains, DBL is recommended; here we follow a simplified query.
+    """Check domain reputation using Spamhaus DBL (domains).
+    Returns True if listed (bad), False if not listed (good), None on error/timeouts.
     """
     if not _DNS_AVAILABLE or not domain:
         return None
     try:
-        q = ".".join(reversed(domain.split("."))) + ".zen.spamhaus.org"
+        # Query Spamhaus DBL for the domain
+        q = f"{domain}.dbl.spamhaus.org"
         dns.resolver.resolve(q, "A")  # type: ignore[attr-defined]
         return True
     except Exception as e:
         try:
-            # NXDOMAIN -> not listed
-            if isinstance(e, getattr(dns.resolver, 'NXDOMAIN', Exception)):
+            NXDOMAIN = getattr(dns.resolver, 'NXDOMAIN', None)
+            NoAnswer = getattr(dns.resolver, 'NoAnswer', None)
+            Timeout = getattr(dns.resolver, 'Timeout', None)
+            NoNameservers = getattr(dns.resolver, 'NoNameservers', None)
+            if NXDOMAIN and isinstance(e, NXDOMAIN):
                 return False
+            if NoAnswer and isinstance(e, NoAnswer):
+                return False
+            if NoNameservers and isinstance(e, NoNameservers):
+                return None
+            if Timeout and isinstance(e, Timeout):
+                return None
         except Exception:
             pass
-        # Try DBL as an alternative for domains
-        try:
-            dbl_q = f"{domain}.dbl.spamhaus.org"
-            dns.resolver.resolve(dbl_q, "A")  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            return None
+        return None
 
 
 def _domain_age_days(domain: str) -> Optional[int]:
@@ -737,16 +740,35 @@ def _domain_age_days(domain: str) -> Optional[int]:
         return None
     try:
         data = _whois.whois(domain)  # type: ignore[attr-defined]
-        created = getattr(data, 'creation_date', None)
-        if isinstance(created, list):
-            created = created[0] if created else None
-        if not created:
-            return None
+        created = getattr(data, 'creation_date', None) or getattr(data, 'created', None)
         from datetime import datetime, timezone
-        if getattr(created, 'tzinfo', None) is None:
-            created = created.replace(tzinfo=timezone.utc)
+        def _parse_date(x):
+            if isinstance(x, datetime):
+                return x if x.tzinfo is not None else x.replace(tzinfo=timezone.utc)
+            if isinstance(x, str):
+                s = x.strip()
+                try:
+                    # Handle ISO and trailing Z
+                    return datetime.fromisoformat(s.replace('Z', '+00:00'))
+                except Exception:
+                    pass
+                for fmt in ("%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%b-%Y"):
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        continue
+            return None
+        # Some registries return a list; pick the earliest reasonable date
+        if isinstance(created, list):
+            dates = [d for d in ([_parse_date(c) for c in created] if created else []) if d is not None]
+            created_dt = min(dates) if dates else None
+        else:
+            created_dt = _parse_date(created)
+        if not created_dt:
+            return None
         now = datetime.now(timezone.utc)
-        delta = now - created
+        delta = now - created_dt
         days = int(delta.total_seconds() // 86400)
         return max(0, days)
     except Exception:
@@ -767,7 +789,19 @@ def _has_spf(domain: str) -> Optional[bool]:
             if "v=spf1" in txt.lower():
                 return True
         return False
-    except Exception:
+    except Exception as e:
+        try:
+            NXDOMAIN = getattr(dns.resolver, 'NXDOMAIN', None)
+            NoAnswer = getattr(dns.resolver, 'NoAnswer', None)
+            Timeout = getattr(dns.resolver, 'Timeout', None)
+            if NXDOMAIN and isinstance(e, NXDOMAIN):
+                return False
+            if NoAnswer and isinstance(e, NoAnswer):
+                return False
+            if Timeout and isinstance(e, Timeout):
+                return None
+        except Exception:
+            pass
         return None
 
 
@@ -786,7 +820,19 @@ def _has_dmarc(domain: str) -> Optional[bool]:
             if "v=dmarc1" in txt.lower():
                 return True
         return False
-    except Exception:
+    except Exception as e:
+        try:
+            NXDOMAIN = getattr(dns.resolver, 'NXDOMAIN', None)
+            NoAnswer = getattr(dns.resolver, 'NoAnswer', None)
+            Timeout = getattr(dns.resolver, 'Timeout', None)
+            if NXDOMAIN and isinstance(e, NXDOMAIN):
+                return False
+            if NoAnswer and isinstance(e, NoAnswer):
+                return False
+            if Timeout and isinstance(e, Timeout):
+                return None
+        except Exception:
+            pass
         return None
 
 

@@ -1331,6 +1331,92 @@ async def presign_field_media(request: Request, payload: Dict = None):
         logger.exception("R2 media presign failed uid=%s", uid)
         raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
 
+@router.post("/uploads/font/presign")
+async def presign_font(request: Request, payload: Dict = None):
+    """
+    Generate a presigned PUT URL for uploading a custom font to Cloudflare R2.
+    Supports TTF/OTF/WOFF/WOFF2. Requires Firebase Authorization bearer token.
+    Body: { filename: string, contentType?: string, size?: number }
+    Returns: { uploadUrl, publicUrl, key, headers, format }
+    """
+    uid = _verify_firebase_uid(request)
+    if not isinstance(payload, dict):
+        payload = {}
+    raw_name = str(payload.get("filename") or "font").strip() or "font"
+
+    # Detect content type and CSS format from file extension
+    ext = os.path.splitext(raw_name)[1].lower()
+    ext_map = {
+        ".ttf": ("font/ttf", "truetype"),
+        ".otf": ("font/otf", "opentype"),
+        ".woff": ("font/woff", "woff"),
+        ".woff2": ("font/woff2", "woff2"),
+    }
+    default_ct, fmt = ext_map.get(ext, ("application/octet-stream", None))
+    content_type = str(payload.get("contentType") or default_ct).strip() or default_ct
+
+    # Validate allowed content types
+    allowed_cts = {
+        "font/ttf", "font/otf", "font/woff", "font/woff2",
+        "application/font-sfnt", "application/font-woff", "application/font-woff2",
+        "application/octet-stream",
+    }
+    if (ext not in ext_map) and (content_type not in allowed_cts):
+        raise HTTPException(status_code=400, detail="Unsupported font type. Allowed: TTF, OTF, WOFF, WOFF2")
+
+    # Plan-based size validation (optional size provided by client)
+    is_pro = _is_pro_plan(uid)
+    try:
+        size = int(payload.get("size") or 0)
+    except Exception:
+        size = 0
+    limit = PRO_MAX_UPLOAD_BYTES if is_pro else FREE_MAX_UPLOAD_BYTES
+    if size and size > limit:
+        mb = int(limit // (1024 * 1024))
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum allowed is {mb}MB on your plan.")
+
+    # Sanitize filename
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or ("font" + (ext if ext in ext_map else ".ttf"))
+    key = f"fonts/{uid}/{int(datetime.utcnow().timestamp()*1000)}_{safe_name}"
+    try:
+        s3 = _r2_client()
+        params = {
+            "Bucket": R2_BUCKET,
+            "Key": key,
+            "ContentType": content_type,
+        }
+        url = s3.generate_presigned_url(
+            ClientMethod="put_object",
+            Params=params,
+            ExpiresIn=900,  # 15 minutes
+        )
+        public_url = _public_url_for_key(key)
+        # Determine CSS font format if not from extension
+        if not fmt:
+            cl = content_type.lower()
+            if "woff2" in cl:
+                fmt = "woff2"
+            elif "woff" in cl:
+                fmt = "woff"
+            elif "otf" in cl or "opentype" in cl:
+                fmt = "opentype"
+            elif "ttf" in cl or "truetype" in cl:
+                fmt = "truetype"
+            else:
+                fmt = "woff2"
+        return {
+            "uploadUrl": url,
+            "publicUrl": public_url,
+            "key": key,
+            "headers": {"Content-Type": content_type},
+            "format": fmt,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("R2 font presign failed uid=%s", uid)
+        raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
+
 # Public presign for submission file uploads (no auth; rate-limited)
 @router.post("/uploads/submissions/presign")
 @limiter.limit("60/minute")
@@ -1659,12 +1745,18 @@ async def create_form(cfg: FormConfig):
     # Custom domain normalization
     data["customDomain"] = _normalize_domain(data.get("customDomain"))
     data["customDomainVerified"] = bool(data.get("customDomainVerified")) and bool(data.get("customDomain"))
-    # Normalize background image URL to permanent public URL if needed
+    # Normalize background image URL and custom font to permanent public URLs if needed
     try:
         theme = data.get("theme") or {}
         raw_bg = theme.get("pageBackgroundImage")
         if raw_bg:
             theme["pageBackgroundImage"] = _normalize_bg_public_url(raw_bg)
+        try:
+            raw_font = theme.get("customFontUrl")
+            if raw_font:
+                theme["customFontUrl"] = _normalize_bg_public_url(raw_font)
+        except Exception:
+            pass
         data["theme"] = theme
     except Exception:
         pass
@@ -1744,12 +1836,18 @@ async def update_form(form_id: str, cfg: FormConfig):
     data["createdAt"] = prev.get("createdAt")  # preserve original
     data["updatedAt"] = datetime.utcnow().isoformat()
 
-    # Normalize background image URL to permanent public URL if needed
+    # Normalize background image URL and custom font to permanent public URLs if needed
     try:
         theme = data.get("theme") or {}
         raw_bg = theme.get("pageBackgroundImage")
         if raw_bg:
             theme["pageBackgroundImage"] = _normalize_bg_public_url(raw_bg)
+        try:
+            raw_font = theme.get("customFontUrl")
+            if raw_font:
+                theme["customFontUrl"] = _normalize_bg_public_url(raw_font)
+        except Exception:
+            pass
         data["theme"] = theme
     except Exception:
         pass

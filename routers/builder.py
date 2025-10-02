@@ -466,6 +466,8 @@ class FormConfig(BaseModel):
     redirect: RedirectConfig = RedirectConfig()
     emailValidationEnabled: bool = False
     professionalEmailsOnly: bool = False
+    # Block role-based generic inboxes (admin@, support@, info@, etc.)
+    blockRoleEmails: bool = False
     # Advanced email reputation checks (Pro)
     emailRejectBadReputation: bool = False
     minDomainAgeDays: int = 30
@@ -715,6 +717,34 @@ def _normalize_domain(s: Optional[str]) -> Optional[str]:
 # -----------------------------
 # Email reputation helpers
 # -----------------------------
+
+# Common role-based local-part prefixes
+_ROLE_BASED_PREFIXES = {
+    'admin','administrator','hostmaster','webmaster','postmaster','root','support','info','sales','contact','help','noreply','no-reply','abuse','billing','security','office','hr'
+}
+
+def _is_role_based_email(email: str) -> bool:
+    try:
+        s = str(email or '').strip().lower()
+        if '@' not in s:
+            return False
+        local = s.split('@', 1)[0]
+        if not local:
+            return False
+        import re as _re
+        base = _re.split(r"[+._]", local)[0]  # support+team, info.news
+        if base in _ROLE_BASED_PREFIXES or local in _ROLE_BASED_PREFIXES:
+            return True
+        for p in _ROLE_BASED_PREFIXES:
+            if local == p:
+                return True
+            if local.startswith(p):
+                nxt = local[len(p):len(p)+1]
+                if nxt == '' or _re.match(r"[\d+._-]", nxt):
+                    return True
+        return False
+    except Exception:
+        return False
 
 def _spamhaus_listed(domain: str) -> Optional[bool]:
     """Check domain reputation using Spamhaus DBL (domains).
@@ -2000,6 +2030,38 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         _, country = _country_from_ip(ip)
         if country and country in restricted:
             raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+
+    # Enforce role-based email block (server-side) even if client validation is bypassed
+    try:
+        if is_pro and bool(form_data.get("blockRoleEmails")) and isinstance(payload, dict):
+            fields_def = form_data.get("fields") or []
+            bad_labels: List[str] = []  # type: ignore[name-defined]
+            for f in fields_def:
+                try:
+                    ftype = str((f or {}).get("type") or "").strip().lower()
+                    label = str((f or {}).get("label") or "Email").strip() or "Email"
+                    fid = (f or {}).get("id")
+                    # Heuristic: only check proper email fields or labels containing 'email'
+                    is_email_field = (ftype == "email") or ("email" in label.lower())
+                    if not is_email_field or not fid:
+                        continue
+                    v = payload.get(fid)
+                    if not isinstance(v, str):
+                        continue
+                    val = v.strip()
+                    if not val or "@" not in val:
+                        continue
+                    if _is_role_based_email(val):
+                        bad_labels.append(label)
+                except Exception:
+                    continue
+            if bad_labels:
+                raise HTTPException(status_code=400, detail=f"Use a personal business email instead of a generic one for: {', '.join(sorted(set(bad_labels)))}")
+    except HTTPException:
+        raise
+    except Exception:
+        # Do not fail submission on unexpected server error here
+        pass
 
     # Duplicate submission check by IP within a time window
     if is_pro and bool(form_data.get("preventDuplicateByIP")):

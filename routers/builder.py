@@ -1792,17 +1792,13 @@ async def delete_form(form_id: str):
         raise HTTPException(status_code=404, detail="Form not found")
     try:
         os.remove(path)
-        # Also remove stored responses for this form (best-effort)
-        try:
-            resp_dir = os.path.join(RESPONSES_BASE_DIR, form_id)
-            if os.path.exists(resp_dir):
-                shutil.rmtree(resp_dir)
-        except Exception:
-            logger.exception("failed to delete responses for form %s", form_id)
+        # Preserve stored responses directory by default to avoid accidental data loss.
+        # Historical submissions remain available via /forms/{form_id}/responses even after form deletion.
+        # If permanent purge is ever needed, do it via a dedicated admin operation.
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
-    logger.info("form deleted id=%s", form_id)
-    return {"success": True}
+    logger.info("form deleted id=%s (responses preserved)", form_id)
+    return {"success": True, "responsesPreserved": True}
 
 
 @router.get("/forms/{form_id}/embed")

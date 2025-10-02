@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import logging
+import json
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Body
@@ -469,3 +472,161 @@ async def set_custom_claims(request: Request, uid: str, claims: Dict[str, Any] =
     except Exception as e:
         logger.exception("[admin] set_custom_claims failed")
         raise HTTPException(status_code=500, detail=str(e))
+        
+        
+        # --- Migration: Firestore submissions -> backend file store used by /responses
+RESPONSES_BASE_DIR = os.path.join(os.getcwd(), "data", "responses")
+os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
+
+
+def _to_iso(ts) -> str:
+    try:
+        if isinstance(ts, datetime):
+            dt = ts
+        else:
+            # Fallback: Firestore Timestamp can already be a datetime with tz
+            dt = ts  # type: ignore
+        if dt is None:
+            return datetime.now(timezone.utc).isoformat()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except Exception:
+        try:
+            # Last resort
+            return datetime.now(timezone.utc).isoformat()
+        except Exception:
+            return ""
+
+
+def _responses_dir(form_id: str) -> str:
+    d = os.path.join(RESPONSES_BASE_DIR, form_id)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def _load_existing_response_ids(form_id: str) -> set:
+    ids = set()
+    try:
+        d = _responses_dir(form_id)
+        if not os.path.exists(d):
+            return ids
+        for name in os.listdir(d):
+            if not name.endswith('.json'):
+                continue
+            try:
+                with open(os.path.join(d, name), 'r', encoding='utf-8') as f:
+                    rec = json.load(f)
+                    rid = str((rec or {}).get('responseId') or '').strip()
+                    if rid:
+                        ids.add(rid)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ids
+
+
+@router.post("/migrate/firestore-submissions")
+@limiter.limit("5/minute")
+async def migrate_firestore_submissions(
+    request: Request,
+    formId: Optional[str] = Query(default=None, description="Limit migration to a specific formId"),
+    limit: int = Query(default=0, ge=0, le=500000, description="Max docs to process (0 = no explicit limit)"),
+    dryRun: bool = Query(default=False, description="If true, do not write files; only count operations"),
+):
+    """
+    One-time migration: copy legacy Firestore submissions (collection 'submissions')
+    into backend file storage at data/responses/{formId}/*.json used by
+    GET /api/builder/forms/{formId}/responses.
+
+    Security: requires admin access (shared secret or admin Firebase claims).
+    """
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+
+    fs = admin_firestore.client()
+
+    # Build query for global submissions collection
+    coll = fs.collection("submissions")
+    try:
+        q = coll
+        if formId:
+            q = q.where("formId", "==", formId)
+        # We don't rely on submittedAt range; migrate all for the target scope
+        docs_iter = q.limit(limit).stream() if (limit and limit > 0) else q.stream()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query Firestore submissions: {e}")
+
+    processed = 0
+    migrated = 0
+    skipped_existing = 0
+    errors: List[str] = []
+
+    # Preload existing response IDs per form to avoid re-parsing files repeatedly
+    existing_ids_cache: Dict[str, set] = {}
+
+    try:
+        for d in docs_iter:
+            processed += 1
+            try:
+                data = d.to_dict() or {}
+                fid = str(data.get("formId") or "").strip()
+                if not fid:
+                    continue
+                if formId and fid != formId:
+                    continue
+                # Load existing ids for this form once
+                if fid not in existing_ids_cache:
+                    existing_ids_cache[fid] = _load_existing_response_ids(fid)
+                existing_ids = existing_ids_cache[fid]
+
+                rid = str(data.get("responseId") or d.id or uuid.uuid4().hex)
+                if rid in existing_ids:
+                    skipped_existing += 1
+                    continue
+
+                submitted_ts = data.get("submittedAt")
+                submitted_iso = _to_iso(submitted_ts)
+                # File path naming mirrors builder._new_response_path (safe timestamp)
+                safe_ts = submitted_iso.replace(":", "-") if submitted_iso else str(int(datetime.now(timezone.utc).timestamp()))
+                out_dir = _responses_dir(fid)
+                out_path = os.path.join(out_dir, f"{safe_ts}_{rid}.json")
+
+                record = {
+                    "formId": fid,
+                    "responseId": rid,
+                    "submittedAt": submitted_iso,
+                    "clientIp": data.get("clientIp") or data.get("ip") or None,
+                    "country": (str(data.get("country") or "").strip().upper() or None),
+                    "lat": (data.get("lat") if isinstance(data.get("lat"), (int, float)) else None),
+                    "lon": (data.get("lng") if isinstance(data.get("lng"), (int, float)) else (data.get("lon") if isinstance(data.get("lon"), (int, float)) else None)),
+                    "answers": data.get("values") or data.get("answers") or {},
+                }
+
+                if not dryRun:
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        json.dump(record, f, ensure_ascii=False, indent=2)
+                migrated += 1
+                existing_ids.add(rid)
+            except Exception as e:
+                errors.append(str(e))
+                continue
+    except Exception as e:
+        errors.append(str(e))
+
+    return {
+        "processed": processed,
+        "migrated": migrated,
+        "skippedExisting": skipped_existing,
+        "errors": errors[:10],
+        "errorCount": len(errors),
+        "scope": (formId or "all"),
+        "dryRun": bool(dryRun),
+    }

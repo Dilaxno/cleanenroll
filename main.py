@@ -57,6 +57,7 @@ try:
     from .routers.slack import router as slack_router  # type: ignore
     from .routers.admin import router as admin_router  # type: ignore
     from .routers.translate import router as translate_router  # type: ignore
+    from .routers.airtable import router as airtable_router  # type: ignore
 except Exception:
     # When running from a flat repo root: e.g. `uvicorn main:app`
     from routers.core import router as core_router  # type: ignore
@@ -67,6 +68,7 @@ except Exception:
     from routers.slack import router as slack_router  # type: ignore
     from routers.admin import router as admin_router  # type: ignore
     from routers.translate import router as translate_router  # type: ignore
+    from routers.airtable import router as airtable_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -225,6 +227,7 @@ app.include_router(google_sheets_router)
 app.include_router(slack_router)
 app.include_router(admin_router)
 app.include_router(translate_router)
+app.include_router(airtable_router)
 
 
 if __name__ == "__main__":

@@ -2527,6 +2527,17 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 try_append_submission_for_form(owner_id, form_id, record)
         except Exception:
             logger.exception("google_sheets sync append failed form_id=%s", form_id)
+        # Attempt Airtable append if syncing is enabled for this form
+        try:
+            try:
+                from .airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+            except Exception:
+                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+            owner_id = str(form_data.get("userId") or "").strip() or None
+            if owner_id:
+                _airtable_append(owner_id, form_id, record)
+        except Exception:
+            logger.exception("airtable sync append failed form_id=%s", form_id)
         # Attempt Slack notification if configured
         try:
             try:
@@ -2538,6 +2549,17 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 try_notify_slack_for_form(owner_id, form_id, record)
         except Exception:
             logger.exception("slack notify failed form_id=%s", form_id)
+        # Attempt Airtable append if syncing is enabled for this form
+        try:
+            try:
+                from .airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+            except Exception:
+                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+            owner_id = str(form_data.get("userId") or "").strip() or None
+            if owner_id:
+                _airtable_append(owner_id, form_id, record)
+        except Exception:
+            logger.exception("airtable sync append failed form_id=%s", form_id)
         # Optionally return responseId to the client
         resp["responseId"] = response_id  # type: ignore
     except Exception:

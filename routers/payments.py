@@ -441,6 +441,14 @@ async def dodo_webhook(payload: Dict, request: Request):
         elif event_type in ('subscription.renewed', 'subscription.created', 'invoice.paid'):
             if uid:
                 _set_user_plan(uid, 'pro')
+                # Best-effort payment identifier extraction (depends on provider payload)
+                payment_id = (
+                    data.get('payment_id')
+                    or data.get('invoice_id')
+                    or data.get('id')
+                    or (data.get('payment') or {}).get('id')
+                    or (data.get('invoice') or {}).get('id')
+                )
                 _update_user_billing(uid, {
                     'nextBillingAt': normalize_ts(next_billing),
                     'cancelAtPeriodEnd': False,
@@ -448,6 +456,7 @@ async def dodo_webhook(payload: Dict, request: Request):
                     'price': price_amount if isinstance(price_amount, (int, float)) else None,
                     'status': 'active',
                     'paymentMethod': payment_method if isinstance(payment_method, dict) else None,
+                    **({'lastPaymentId': payment_id} if payment_id else {}),
                 })
         else:
             logger.info('[dodo-webhook] unhandled event type=%s', event_type)

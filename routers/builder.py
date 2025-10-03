@@ -127,6 +127,54 @@ os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
 ANALYTICS_BASE_DIR = os.path.join(os.getcwd(), "data", "analytics")
 os.makedirs(ANALYTICS_BASE_DIR, exist_ok=True)
 
+# Monthly submissions usage (file-based per user per month)
+USAGE_BASE_DIR = os.path.join(os.getcwd(), "data", "usage", "submissions")
+os.makedirs(USAGE_BASE_DIR, exist_ok=True)
+
+FREE_MONTHLY_SUBMISSION_LIMIT = 50
+
+def _month_key(dt: Optional[datetime] = None) -> str:
+    try:
+        d = dt or datetime.utcnow()
+        return f"{d.year:04d}{d.month:02d}"
+    except Exception:
+        # Fallback simplistic key
+        return datetime.utcnow().strftime("%Y%m")
+
+def _usage_file(user_id: str, month_key: str) -> str:
+    safe_uid = re.sub(r"[^a-zA-Z0-9._-]", "_", str(user_id or "").strip()) or "unknown"
+    return os.path.join(USAGE_BASE_DIR, safe_uid, f"{month_key}.json")
+
+def _load_month_count(user_id: str, month_key: str) -> int:
+    path = _usage_file(user_id, month_key)
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                c = int((data or {}).get("count", 0))
+                return max(0, c)
+    except Exception:
+        pass
+    return 0
+
+def _save_month_count(user_id: str, month_key: str, count: int) -> None:
+    path = _usage_file(user_id, month_key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"count": max(0, int(count or 0)), "updatedAt": datetime.utcnow().isoformat()}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def _inc_month_count(user_id: str, month_key: str, delta: int = 1) -> int:
+    try:
+        cur = _load_month_count(user_id, month_key)
+        new = max(0, int(cur) + int(delta or 0))
+        _save_month_count(user_id, month_key, new)
+        return new
+    except Exception:
+        return _load_month_count(user_id, month_key)
+
 # Plan-based upload limits
 FREE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024      # 50MB for Free plan
 PRO_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024     # 1GB for Pro/paid plans
@@ -1043,6 +1091,26 @@ except Exception:
     from utils.limiter import limiter  # type: ignore
 
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
+
+@router.get("/usage/submissions-month")
+async def get_monthly_usage(userId: str = Query(...)):
+    """Return this month's submissions count for a user and plan-aware limit.
+    Response: { count, limit, remaining, month, isPro }
+    """
+    try:
+        uid = (userId or "").strip()
+        if not uid:
+            raise HTTPException(status_code=400, detail="Missing userId")
+        mk = _month_key()
+        count = _load_month_count(uid, mk)
+        is_pro = _is_pro_plan(uid)
+        limit = 0 if is_pro else FREE_MONTHLY_SUBMISSION_LIMIT
+        remaining = None if is_pro else max(0, int(limit) - int(count))
+        return {"count": int(count), "limit": int(limit), "remaining": remaining, "month": mk, "isPro": bool(is_pro)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch usage: {e}") 
 
 # Groq API key for AI Copilot (server-side only)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_TOKEN") or ""
@@ -2372,6 +2440,20 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     try:
         limit_raw = form_data.get("submissionLimit")
         limit = int(limit_raw) if limit_raw is not None else 0
+
+        # Monthly per-user submissions limit for Free plans
+        try:
+            owner_id = str(form_data.get("userId") or "").strip() or None
+            if owner_id and not _is_pro_plan(owner_id):
+                mk = _month_key()
+                month_count = _load_month_count(owner_id, mk)
+                if month_count >= FREE_MONTHLY_SUBMISSION_LIMIT:
+                    raise HTTPException(status_code=429, detail=f"Monthly submission limit reached ({FREE_MONTHLY_SUBMISSION_LIMIT}). Please try again next month or upgrade your plan.")
+        except HTTPException:
+            raise
+        except Exception:
+            # Do not fail submission on unexpected error here
+            pass
         if limit and limit > 0:
             dir_path = _responses_dir(form_id)
             current = 0
@@ -2868,6 +2950,17 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     except Exception:
         # Swallow persistence errors to not break client submission flow
         logger.exception("submit_form persistence error id=%s", form_id)
+
+    # Increment monthly usage for Free plans
+    try:
+        path = _form_path(form_id)
+        if os.path.exists(path):
+            _fd = _read_json(path)
+            _owner = str(_fd.get("userId") or "").strip() or None
+            if _owner and not _is_pro_plan(_owner):
+                _inc_month_count(_owner, _month_key(), 1)
+    except Exception:
+        pass
 
     logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp

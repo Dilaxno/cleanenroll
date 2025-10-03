@@ -1049,7 +1049,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_TOKEN") or ""
 
 @router.get("/brand/colors")
 @limiter.limit("20/minute")
-async def get_brand_colors(url: str):
+async def get_brand_colors(request: Request, url: str):
     """
     Fetch a website and heuristically extract brand colors from HTML <meta theme-color>,
     inline styles, and linked stylesheets. Returns a palette and suggested theme mapping.

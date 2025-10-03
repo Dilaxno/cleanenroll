@@ -473,6 +473,7 @@ class FormConfig(BaseModel):
     minDomainAgeDays: int = 30
     recaptchaEnabled: bool = False
     gdprComplianceEnabled: bool = False
+    showPoweredBy: bool = True
     passwordProtectionEnabled: bool = False
     passwordHash: Optional[str] = None
     preventDuplicateByUID: bool = False

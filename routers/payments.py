@@ -112,7 +112,17 @@ async def create_dodo_checkout(request: Request, payload: Dict):
     except Exception:
         quantity = 1
     plan = str(payload.get("plan") or "pro").strip() or "pro"
-
+    
+    # Checkout page customization: theme can be 'dark' | 'light' | 'system'
+    _theme = (os.getenv("DODO_CHECKOUT_THEME") or "dark").strip().lower()
+    if _theme not in ("dark", "light", "system"):
+        _theme = "dark"
+    _customization = {
+        "theme": _theme,
+        "show_order_details": True,
+        "show_on_demand_tag": False,
+    }
+    
     # Determine the return URL for post-payment redirection
     return_url = (
         str(payload.get("return_url") or "").strip()
@@ -128,6 +138,7 @@ async def create_dodo_checkout(request: Request, payload: Dict):
             "user_uid": uid,
             "plan": plan,
         },
+        "customization": _customization,
         # provider requires 'return_url' for redirect after checkout completion
         "return_url": return_url,
     }
@@ -231,7 +242,17 @@ async def create_dodo_dynamic_session(request: Request, payload: Dict):
     default_return = os.getenv("RETURN_URL") or os.getenv("CHECKOUT_REDIRECT_URL") or ""
     return_url = (payload.get("return_url") or default_return or "").strip()
     cancel_url = (payload.get("cancel_url") or default_return or "").strip()
-
+    
+    # Checkout page customization: theme can be 'dark' | 'light' | 'system'
+    _theme = (os.getenv("DODO_CHECKOUT_THEME") or "dark").strip().lower()
+    if _theme not in ("dark", "light", "system"):
+        _theme = "dark"
+    _customization = {
+        "theme": _theme,
+        "show_order_details": True,
+        "show_on_demand_tag": False,
+    }
+    
     # Build product cart with a single dynamic item
     product_cart = [{
         "name": description or f"Payment for form {form_id}",
@@ -247,6 +268,7 @@ async def create_dodo_dynamic_session(request: Request, payload: Dict):
             "submission_id": submission_id,
             **({"user_uid": uid} if uid else {}),
         },
+        "customization": _customization,
         # Most providers use these for post-payment navigation
         "return_url": return_url,
         "cancel_url": cancel_url,

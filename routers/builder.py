@@ -433,6 +433,13 @@ class ThemeSchema(BaseModel):
     customFontUrl: Optional[str] = None
     customFontName: Optional[str] = None
     customFontFormat: Optional[str] = None
+    # Form container shape and split-view options
+    formShape: Literal["rectangle", "rounded", "pill", "circle", "heart", "blob", "hexagon"] = "rectangle"
+    splitImageUrl: Optional[str] = None
+    splitImagePosition: Literal["left", "right"] = "right"
+    splitImageFit: Literal["cover", "contain"] = "cover"
+    splitImageWidthPercent: int = Field(default=50, ge=20, le=80)
+    splitImageBgColor: Optional[str] = None
 
 
 class RedirectConfig(BaseModel):
@@ -528,6 +535,8 @@ class FormConfig(BaseModel):
     isPublished: bool = False
     submitButton: SubmitButton = SubmitButton()
     formType: Literal["simple", "multi-step"] = "simple"
+    # Layout variant controls overall page composition
+    layoutVariant: Literal["card", "split"] = "card"
     theme: ThemeSchema = ThemeSchema()
     branding: Branding = Branding()
     fields: List[FieldSchema] = []

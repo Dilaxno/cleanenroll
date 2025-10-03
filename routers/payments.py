@@ -5,6 +5,12 @@ from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
+# Email utils for notifications
+try:
+    from ..utils.email import render_email, send_email_html  # type: ignore
+except Exception:
+    from utils.email import render_email, send_email_html  # type: ignore
+
 logger = logging.getLogger("backend.payments")
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])  # /api/payments/*
@@ -71,6 +77,39 @@ def _set_user_plan(uid: str, plan: str):
         ref.update({'plan': plan})
     except Exception:
         logger.exception('[payments] failed to set user plan uid=%s', uid)
+
+
+def _get_user_email(uid: str) -> Optional[str]:
+    """Fetch user's email from Firestore by uid, if available."""
+    if not _FS_AVAILABLE or not uid:
+        return None
+    try:
+        ref = _fs.client().collection('users').document(uid)
+        snap = ref.get()
+        data = snap.to_dict() or {}
+        email = data.get('email')
+        if isinstance(email, str) and '@' in email:
+            return email.strip()
+    except Exception:
+        logger.warning('[payments] failed to get user email for uid=%s', uid)
+    return None
+
+
+def _send_billing_email(to_email: str, subject: str, intro: str, content_html: Optional[str] = None, cta_label: Optional[str] = None, cta_url: Optional[str] = None):
+    """Render and send a branded billing email from billing@cleanenroll.com."""
+    try:
+        html = render_email('base.html', {
+            'subject': subject,
+            'preheader': intro,
+            'title': subject,
+            'intro': intro,
+            'content_html': content_html or '',
+            'cta_label': cta_label,
+            'cta_url': cta_url,
+        })
+        send_email_html(to_email, subject, html, from_addr='billing@cleanenroll.com')
+    except Exception:
+        logger.exception('[payments] failed to send billing email to %s', to_email)
 
 
 @router.post("/dodo/checkout")
@@ -460,6 +499,16 @@ async def dodo_webhook(payload: Dict, request: Request):
                     'cancelAtPeriodEnd': False,
                     'status': 'cancelled',
                 })
+                # Notify user about cancellation (best-effort)
+                try:
+                    email = _get_user_email(uid)
+                    if email:
+                        portal = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL') or (os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/billing/portal')
+                        subject = 'Your CleanEnroll subscription was canceled'
+                        intro = 'Your subscription has been canceled. You will no longer be charged.'
+                        _send_billing_email(email, subject, intro, cta_label='Manage Billing', cta_url=portal)
+                except Exception:
+                    logger.exception('[payments] failed to send cancellation email for uid=%s', uid)
         elif event_type in ('subscription.renewed', 'subscription.created', 'invoice.paid'):
             if uid:
                 _set_user_plan(uid, 'pro')
@@ -480,6 +529,23 @@ async def dodo_webhook(payload: Dict, request: Request):
                     'paymentMethod': payment_method if isinstance(payment_method, dict) else None,
                     **({'lastPaymentId': payment_id} if payment_id else {}),
                 })
+                # Notify user about successful upgrade/renewal (best-effort)
+                try:
+                    email = _get_user_email(uid)
+                    if email:
+                        portal = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL') or (os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/billing/portal')
+                        subject = 'Your CleanEnroll subscription is active'
+                        intro = 'Your plan has been upgraded/renewed successfully.'
+                        extra = ''
+                        if isinstance(price_amount, (int, float)) and currency:
+                            try:
+                                amt = float(price_amount) / (100.0 if price_amount and price_amount > 50 else 1.0)
+                                extra = f"<p style='margin:0;color:#c7c7c7'>Amount: <strong>{amt:.2f} {currency}</strong></p>"
+                            except Exception:
+                                extra = ''
+                        _send_billing_email(email, subject, intro, content_html=extra, cta_label='Manage Billing', cta_url=portal)
+                except Exception:
+                    logger.exception('[payments] failed to send upgrade/renewal email for uid=%s', uid)
         else:
             logger.info('[dodo-webhook] unhandled event type=%s', event_type)
         return { 'received': True }

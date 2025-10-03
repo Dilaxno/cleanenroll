@@ -148,7 +148,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 
-def send_email_html(to_email: str, subject: str, html_body: str):
+def send_email_html(to_email: str, subject: str, html_body: str, from_addr: str | None = None):
     """
     Send email using Resend via SMTP (STARTTLS by default).
 
@@ -167,7 +167,7 @@ def send_email_html(to_email: str, subject: str, html_body: str):
     username = os.getenv("SMTP_USER", "resend")
     password = os.getenv("RESEND_API_KEY") or os.getenv("SMTP_PASSWORD", "")
 
-    from_addr = RESEND_FROM or SMTP_FROM
+    from_addr_effective = (from_addr or "").strip() or RESEND_FROM or SMTP_FROM
 
     if not password:
         logger.error("SMTP password / RESEND_API_KEY missing; cannot send email")
@@ -175,7 +175,7 @@ def send_email_html(to_email: str, subject: str, html_body: str):
 
     # Build MIME email with plain-text fallback
     msg = EmailMessage()
-    msg["From"] = from_addr
+    msg["From"] = from_addr_effective
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.set_content("This email contains HTML content. If you see this, please view in an HTML-capable client.")
@@ -196,7 +196,7 @@ def send_email_html(to_email: str, subject: str, html_body: str):
                 server.ehlo()
                 server.login(username, password)
                 server.send_message(msg)
-        _elog(f"SMTP send ok via {host}:{port} from={from_addr} to={to_email}")
+        _elog(f"SMTP send ok via {host}:{port} from={from_addr_effective} to={to_email}")
     except smtplib.SMTPResponseException as e:
         code = getattr(e, 'smtp_code', None)
         err = getattr(e, 'smtp_error', b'').decode('utf-8', 'ignore') if isinstance(getattr(e, 'smtp_error', b''), (bytes, bytearray)) else str(getattr(e, 'smtp_error', ''))

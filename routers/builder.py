@@ -1047,6 +1047,308 @@ router = APIRouter(prefix="/api/builder", tags=["builder"])
 # Groq API key for AI Copilot (server-side only)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_TOKEN") or ""
 
+@router.get("/brand/colors")
+@limiter.limit("20/minute")
+async def get_brand_colors(url: str):
+    """
+    Fetch a website and heuristically extract brand colors from HTML <meta theme-color>,
+    inline styles, and linked stylesheets. Returns a palette and suggested theme mapping.
+
+    Query: url (string) - website URL or domain (with/without scheme)
+    Response: {
+      success: true,
+      source: { url, resolvedUrl, cssCount, themeColor? },
+      colors: { primary, background, text, accent, neutral },
+      palette: ["#RRGGBB", ...],
+      suggestions: { theme: {...}, submitButton: {color, textColor} }
+    }
+    """
+    import math
+    from collections import Counter
+
+    def _normalize_url(u: str) -> str:
+        try:
+            s = (u or "").strip()
+            if not s:
+                raise ValueError("empty")
+            if not re.match(r"^https?://", s, flags=re.I):
+                s = "https://" + s
+            return s
+        except Exception:
+            return u
+
+    def _clamp(x, a=0, b=255):
+        try:
+            return int(max(a, min(b, float(x))))
+        except Exception:
+            return 0
+
+    def _rgb_to_hex(r, g, b) -> str:
+        return f"#{_clamp(r):02x}{_clamp(g):02x}{_clamp(b):02x}"
+
+    def _hsl_to_rgb(h, s, l):
+        try:
+            h = float(h) % 360.0
+            s = max(0.0, min(1.0, float(s)))
+            l = max(0.0, min(1.0, float(l)))
+            c = (1 - abs(2*l - 1)) * s
+            x = c * (1 - abs((h/60.0) % 2 - 1))
+            m = l - c/2
+            if 0 <= h < 60:
+                r, g, b = c, x, 0
+            elif 60 <= h < 120:
+                r, g, b = x, c, 0
+            elif 120 <= h < 180:
+                r, g, b = 0, c, x
+            elif 180 <= h < 240:
+                r, g, b = 0, x, c
+            elif 240 <= h < 300:
+                r, g, b = x, 0, c
+            else:
+                r, g, b = c, 0, x
+            return (_clamp((r+m)*255), _clamp((g+m)*255), _clamp((b+m)*255))
+        except Exception:
+            return (0, 0, 0)
+
+    def _parse_color_token(tok: str) -> str:
+        s = (tok or "").strip()
+        # HEX
+        m = re.match(r"#([0-9a-fA-F]{3,8})", s)
+        if m:
+            h = m.group(1)
+            if len(h) in (3, 4):
+                # #abc -> #aabbcc
+                r = h[0]*2
+                g = h[1]*2
+                b = h[2]*2
+                return f"#{r}{g}{b}".lower()
+            elif len(h) in (6, 8):
+                return f"#{h[:6]}".lower()
+        # rgb/rgba
+        m = re.match(r"rgba?\(([^)]+)\)", s, flags=re.I)
+        if m:
+            parts = [p.strip() for p in m.group(1).split(',')]
+            if len(parts) >= 3:
+                def _p(v):
+                    if v.endswith('%'):
+                        return 255 * float(v[:-1]) / 100.0
+                    return float(v)
+                try:
+                    r = _p(parts[0]); g = _p(parts[1]); b = _p(parts[2])
+                    return _rgb_to_hex(r, g, b)
+                except Exception:
+                    pass
+        # hsl/hsla
+        m = re.match(r"hsla?\(([^)]+)\)", s, flags=re.I)
+        if m:
+            parts = [p.strip() for p in m.group(1).split(',')]
+            if len(parts) >= 3:
+                try:
+                    h = float(parts[0].replace('deg',''))
+                    s = float(parts[1].rstrip('%'))/100.0
+                    l = float(parts[2].rstrip('%'))/100.0
+                    r,g,b = _hsl_to_rgb(h, s, l)
+                    return _rgb_to_hex(r, g, b)
+                except Exception:
+                    pass
+        return ""
+
+    def _brightness(hex_color: str) -> float:
+        try:
+            c = (hex_color or "").replace('#','')
+            if len(c) != 6:
+                return 0.0
+            r = int(c[0:2], 16); g = int(c[2:4], 16); b = int(c[4:6], 16)
+            return (0.299*r + 0.587*g + 0.114*b)
+        except Exception:
+            return 0.0
+
+    def _is_gray(hex_color: str, tol: int = 10) -> bool:
+        try:
+            c = (hex_color or "").replace('#','')
+            if len(c) != 6:
+                return False
+            r = int(c[0:2], 16); g = int(c[2:4], 16); b = int(c[4:6], 16)
+            return abs(r-g) <= tol and abs(r-b) <= tol and abs(g-b) <= tol
+        except Exception:
+            return False
+
+    def _contrast_text(bg_hex: str) -> str:
+        return "#000000" if _brightness(bg_hex) > 186 else "#ffffff"
+
+    target = _normalize_url(url)
+    if not target:
+        raise HTTPException(status_code=400, detail="Missing url")
+
+    headers = {
+        "User-Agent": "CleanEnroll/1.0 (+https://cleanenroll.com)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8",
+    }
+    try:
+        r = requests.get(target, headers=headers, timeout=8)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch url: {e}")
+    if not r.ok:
+        raise HTTPException(status_code=502, detail=f"Fetch failed: {r.status_code}")
+
+    html = r.text or ""
+    base = r.url
+
+    # Extract <meta name="theme-color" content="...">
+    theme_meta = None
+    try:
+        m = re.search(r"<meta[^>]+name=[\"']theme-color[\"'][^>]+content=[\"']([^\"']+)[\"']", html, flags=re.I)
+        if m:
+            tc = _parse_color_token(m.group(1).strip()) or m.group(1).strip()
+            if tc:
+                theme_meta = tc if tc.startswith('#') else _parse_color_token(tc)
+    except Exception:
+        theme_meta = None
+
+    # Gather stylesheet URLs (limit)
+    css_urls = []
+    try:
+        for m in re.finditer(r"<link[^>]+rel=[\"']stylesheet[\"'][^>]+href=[\"']([^\"']+)[\"']", html, flags=re.I):
+            href = m.group(1).strip()
+            if href:
+                full = urllib.parse.urljoin(base, href)
+                css_urls.append(full)
+        css_urls = list(dict.fromkeys(css_urls))[:8]
+    except Exception:
+        css_urls = []
+
+    # Extract inline <style> blocks too
+    inline_styles = []
+    try:
+        for m in re.finditer(r"<style[^>]*>([\s\S]*?)</style>", html, flags=re.I):
+            inline_styles.append(m.group(1))
+    except Exception:
+        pass
+
+    # Color token patterns in CSS/HTML
+    color_tokens = []
+    def _collect_colors(text: str):
+        if not text:
+            return
+        # HEX (#rgb, #rgba, #rrggbb, #rrggbbaa)
+        for m in re.finditer(r"#[0-9a-fA-F]{3,8}", text):
+            color_tokens.append(m.group(0))
+        # rgb/rgba
+        for m in re.finditer(r"rgba?\([^\)]+\)", text, flags=re.I):
+            color_tokens.append(m.group(0))
+        # hsl/hsla
+        for m in re.finditer(r"hsla?\([^\)]+\)", text, flags=re.I):
+            color_tokens.append(m.group(0))
+
+    _collect_colors(html)
+    for s in inline_styles:
+        _collect_colors(s)
+
+    # Fetch and scan CSS files
+    for cu in css_urls:
+        try:
+            cr = requests.get(cu, headers={"User-Agent": headers["User-Agent"], "Accept": "text/css,*/*;q=0.1"}, timeout=8)
+            if cr.ok:
+                txt = cr.text
+                # limit to 300KB per CSS to avoid huge files
+                if len(txt) > 300_000:
+                    txt = txt[:300_000]
+                _collect_colors(txt)
+        except Exception:
+            continue
+
+    # Normalize tokens to hex
+    hexes = []
+    for t in color_tokens:
+        hx = _parse_color_token(t)
+        if hx:
+            hexes.append(hx.lower())
+
+    # Count and rank
+    freq = Counter(hexes)
+    # Remove transparent variants that resolved to #000000 due to alpha ignored; keep anyway for counts
+    ranked = [c for c, _ in freq.most_common()]
+
+    # Helper to pick colors
+    extremes = {"#000000", "#ffffff"}
+    def _pick_primary():
+        for c in ranked:
+            if c in extremes:
+                continue
+            if _is_gray(c):
+                continue
+            return c
+        # fallback to theme-color meta
+        if theme_meta and theme_meta.startswith('#'):
+            return theme_meta.lower()
+        # fallback to first ranked or default
+        return ranked[0] if ranked else "#4f46e5"
+
+    def _pick_accent(primary: str):
+        for c in ranked:
+            if c == primary:
+                continue
+            if c in extremes:
+                continue
+            if _is_gray(c):
+                continue
+            return c
+        return primary
+
+    def _pick_background():
+        # pick most frequent very light color
+        light = [c for c in ranked if _brightness(c) >= 235]
+        if light:
+            return light[0]
+        return "#ffffff"
+
+    primary = _pick_primary()
+    accent = _pick_accent(primary)
+    background = _pick_background()
+    text = _contrast_text(background)
+    neutral = "#6b7280"  # Tailwind neutral-500 as fallback
+
+    # Palette: top 5 unique
+    palette = []
+    for c in ranked:
+        if c not in palette:
+            palette.append(c)
+        if len(palette) >= 5:
+            break
+    if primary not in palette:
+        palette = [primary] + palette
+        palette = palette[:5]
+
+    suggestions = {
+        "theme": {
+            "primaryColor": primary,
+            "backgroundColor": background,
+            "pageBackgroundColor": background,
+            "textColor": text,
+            "titleColor": text,
+            "subtitleColor": neutral,
+            "fieldLabelColor": neutral,
+            "inputBgColor": "#ffffff" if _brightness(background) > 220 else background,
+            "inputTextColor": "#111827" if _brightness(background) > 186 else "#ffffff",
+            "inputBorderColor": neutral,
+            "thankYouBgColor": accent,
+            "thankYouTextColor": _contrast_text(accent),
+        },
+        "submitButton": {
+            "color": primary,
+            "textColor": _contrast_text(primary)
+        }
+    }
+
+    return {
+        "success": True,
+        "source": {"url": url, "resolvedUrl": base, "cssCount": len(css_urls), **({"themeColor": theme_meta} if theme_meta else {})},
+        "colors": {"primary": primary, "background": background, "text": text, "accent": accent, "neutral": neutral},
+        "palette": palette,
+        "suggestions": suggestions,
+    }
+
 @router.post("/ai/copilot")
 @limiter.limit("20/minute")
 async def ai_copilot(request: Request, payload: Dict = None):

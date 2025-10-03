@@ -398,10 +398,16 @@ async def create_dodo_dynamic_session(request: Request, payload: Dict):
 
 @router.post('/dodo/cancel')
 async def dodo_cancel_or_resume(request: Request, payload: Dict):
-    """Request cancel at period end, resume, or cancel now subscription with Dodo.
-    - cancel_at_period_end: mark to cancel at end of current period
-    - resume: undo the above
-    - cancel_now: immediate cancellation; we will also emit subscription.cancelled side-effects
+    """Request cancel/resume/cancel-now for a Dodo subscription.
+
+    Actions:
+    - cancel_at_period_end: Set provider flag to cancel at next billing; update local after provider success
+    - resume: Unset cancel-at-period-end at provider; update local after provider success
+    - cancel_now: Immediately cancel at provider; then emit local cancellation side-effects
+
+    Notes:
+    - We resolve the subscription_id from Firestore (planDetails.subscription_id).
+    - We no longer proceed with local state updates if the provider call fails to avoid dashboard mismatch.
     """
     action = (payload or {}).get('action')
     if action not in ('cancel_at_period_end', 'resume', 'cancel_now'):
@@ -412,52 +418,137 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
     if not uid:
         raise HTTPException(status_code=401, detail='Unauthorized')
 
-    # Optionally call Dodo API for cancel/resume if configured
-    manage_url = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL')
-    api_key = os.getenv('DODO_API_KEY')
-    if manage_url and api_key:
+    # Resolve subscription_id from Firestore
+    subscription_id = None
+    if _FS_AVAILABLE:
         try:
-            auth_header = os.getenv('DODO_AUTH_HEADER', 'Authorization')
-            auth_scheme = os.getenv('DODO_AUTH_SCHEME', 'Bearer')
-            headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            }
-            if auth_header.lower() == 'authorization':
-                headers['Authorization'] = f"{auth_scheme} {api_key}".strip()
-            else:
-                headers[auth_header] = api_key
-            body = { 'action': action, 'user_uid': uid }
-            req = urllib.request.Request(url=manage_url, data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                _ = resp.read()
+            ref = _fs.client().collection('users').document(uid)
+            snap = ref.get()
+            data = snap.to_dict() or {}
+            # prefer core webhook's mapping
+            plan_details = data.get('planDetails') or {}
+            subscription_id = plan_details.get('subscription_id') or plan_details.get('id')
+            if not subscription_id:
+                # legacy storage fallback
+                billing = data.get('billing') or {}
+                subscription_id = billing.get('subscriptionId') or billing.get('subscription_id')
         except Exception:
-            logger.warning('[dodo-cancel] provider manage call failed; proceeding with local state update')
+            logger.exception('[dodo-cancel] failed to resolve subscription_id for uid=%s', uid)
 
-    # Update Firestore billing flags
+    if not subscription_id:
+        # Without a subscription id, we cannot update provider
+        logger.warning('[dodo-cancel] no subscription_id on record for uid=%s; refusing local-only change', uid)
+        raise HTTPException(status_code=409, detail='No active subscription found for this account')
+
+    # Prepare provider update payload based on action
+    update_payload: Dict = {}
     if action == 'cancel_at_period_end':
-        _update_user_billing(uid, { 'cancelAtPeriodEnd': True })
-        return { 'success': True }
-    if action == 'resume':
-        _update_user_billing(uid, { 'cancelAtPeriodEnd': False })
-        return { 'success': True }
+        update_payload = {'cancel_at_next_billing_date': True}
+    elif action == 'resume':
+        update_payload = {'cancel_at_next_billing_date': False}
+    elif action == 'cancel_now':
+        update_payload = {'status': 'cancelled'}
 
-    # cancel_now flow: update provider and set plan to free + clear billing
+    # Try provider API call paths
+    api_key = os.getenv('DODO_API_KEY') or os.getenv('DODO_PAYMENTS_API_KEY')
+    if not api_key:
+        raise HTTPException(status_code=500, detail='Payments provider not configured')
+
+    # Option A: Direct subscriptions update URL template (preferred)
+    tmpl = os.getenv('DODO_SUBSCRIPTION_UPDATE_URL_TEMPLATE')  # e.g. https://api.dodopayments.com/subscriptions/{subscription_id}
+    method = os.getenv('DODO_SUBSCRIPTION_UPDATE_METHOD', 'PATCH').upper()
+
+    # Option B: Backward-compat "manage" URL (internal proxy) that accepts subscription-aware payloads
+    manage_url = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL')
+
+    # Assemble headers
+    auth_header = os.getenv('DODO_AUTH_HEADER', 'Authorization')
+    auth_scheme = os.getenv('DODO_AUTH_SCHEME', 'Bearer')
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    }
+    if auth_header.lower() == 'authorization':
+        headers['Authorization'] = f"{auth_scheme} {api_key}".strip()
+    else:
+        headers[auth_header] = api_key
+
+    def _http_call(url: str, method_: str, body: Dict) -> None:
+        req = urllib.request.Request(
+            url=url,
+            data=json.dumps(body).encode('utf-8'),
+            headers=headers,
+            method=method_,
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            # ensure 2xx
+            if resp.status < 200 or resp.status >= 300:
+                raw = resp.read().decode('utf-8', errors='replace')
+                logger.warning('[dodo-cancel] provider non-2xx status=%s body=%s', resp.status, raw[:500])
+                raise HTTPException(status_code=502, detail='Provider update failed')
+
+    # Execute provider update
     try:
-        # Emit internal webhook event to unify state changes
+        if tmpl:
+            try:
+                url = tmpl.format(subscription_id=subscription_id)
+            except Exception:
+                # Support {id} as alternative placeholder
+                url = tmpl.replace('{id}', subscription_id)
+            provider_body = {**update_payload}
+            _http_call(url, method, provider_body)
+            logger.info('[dodo-cancel] provider updated via template url action=%s uid=%s sub=%s', action, uid, subscription_id)
+        elif manage_url:
+            # Send a richer body so legacy proxy endpoints can perform the correct Dodo call
+            proxy_body = {
+                'action': action,
+                'subscription_id': subscription_id,
+                'user_uid': uid,
+                'dodo_update_payload': update_payload,
+            }
+            _http_call(manage_url, 'POST', proxy_body)
+            logger.info('[dodo-cancel] provider updated via manage url action=%s uid=%s sub=%s', action, uid, subscription_id)
+        else:
+            logger.error('[dodo-cancel] no provider endpoint configured (set DODO_SUBSCRIPTION_UPDATE_URL_TEMPLATE or DODO_MANAGE_SUBSCRIPTION_URL)')
+            raise HTTPException(status_code=500, detail='Payments provider not configured')
+    except urllib.error.HTTPError as he:  # type: ignore[attr-defined]
+        try:
+            err_body = he.read().decode('utf-8', errors='replace')  # type: ignore[call-arg]
+        except Exception:
+            err_body = ''
+        logger.warning('[dodo-cancel] provider HTTPError status=%s body=%s', getattr(he, 'code', 'n/a'), err_body[:500])
+        raise HTTPException(status_code=502, detail='Provider update failed')
+    except urllib.error.URLError as ue:  # type: ignore[attr-defined]
+        logger.warning('[dodo-cancel] provider URLError reason=%s', getattr(ue, 'reason', ue))
+        raise HTTPException(status_code=502, detail='Provider unreachable')
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception('[dodo-cancel] provider call failed')
+        raise HTTPException(status_code=502, detail='Provider update failed')
+
+    # Provider succeeded -> update local state
+    if action == 'cancel_at_period_end':
+        _update_user_billing(uid, {'cancelAtPeriodEnd': True})
+        return {'success': True, 'cancelAtPeriodEnd': True}
+    if action == 'resume':
+        _update_user_billing(uid, {'cancelAtPeriodEnd': False})
+        return {'success': True, 'cancelAtPeriodEnd': False}
+
+    # cancel_now flow: emit local cancellation side-effects after provider success
+    try:
         await dodo_webhook({
             'type': 'subscription.cancelled',
-            'data': { 'metadata': { 'user_uid': uid } }
+            'data': {'metadata': {'user_uid': uid}}
         }, request)
-        # Also forward event to provider webhook so dashboard reflects cancellation
         try:
-            _forward_dodo_event('subscription.cancelled', uid)
+            _forward_dodo_event('subscription.cancelled', uid)  # optional best-effort forwarder if present
         except Exception:
             pass
-        return { 'success': True, 'cancelled': True }
+        return {'success': True, 'cancelled': True}
     except Exception:
-        logger.exception('[dodo-cancel] failed to cancel now')
-        raise HTTPException(status_code=500, detail='Failed to cancel subscription now')
+        logger.exception('[dodo-cancel] failed to finalize local cancellation after provider success')
+        raise HTTPException(status_code=500, detail='Failed to finalize cancellation')
 
 
 @router.post('/dodo/webhook')

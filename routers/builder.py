@@ -608,6 +608,56 @@ def _create_id() -> str:
     return uuid.uuid4().hex
 
 
+def _djb2_hash(s: str) -> str:
+    try:
+        h = 5381
+        for ch in s:
+            h = ((h << 5) + h) + ord(ch)
+            h &= 0xFFFFFFFF
+        return f"{h:08x}"
+    except Exception:
+        return uuid.uuid4().hex[:8]
+
+
+def _stable_top_json(obj: Dict[str, Any] | None) -> str:
+    try:
+        if not obj:
+            return "{}"
+        keys = sorted(obj.keys())
+        ordered = {k: obj.get(k) for k in keys}
+        return json.dumps(ordered, separators=(",", ":"), ensure_ascii=False)
+    except Exception:
+        try:
+            return json.dumps(obj or {}, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+
+def _deterministic_form_id(user_id: str | None, cfg: "FormConfig") -> str:
+    """Build a deterministic ID from userId and a stable signature of key attributes.
+    Falls back to random when userId is missing.
+    """
+    try:
+        uid = (user_id or "").strip()
+        basis = {
+            "title": getattr(cfg, "title", "") or "",
+            "formType": getattr(cfg, "formType", "simple") or "simple",
+            # small signature from fields
+            "fieldsSig": [
+                {
+                    "l": (getattr(f, "label", None) or ""),
+                    "t": (getattr(f, "type", None) or ""),
+                }
+                for f in (getattr(cfg, "fields", []) or [])
+            ],
+        }
+        sig = _djb2_hash(_stable_top_json(basis))
+        if uid:
+            return f"{uid}_{sig}"
+        return f"form_{sig}"
+    except Exception:
+        return _create_id()
+
 RECAPTCHA_SECRET = os.getenv("RECAPTCHA_SECRET_KEY") or os.getenv("RECAPTCHA_SECRET") or ""
 # Custom domain target for CNAME verification
 CUSTOM_DOMAIN_TARGET = (os.getenv("CUSTOM_DOMAIN_TARGET") or "api.cleanenroll.com").strip('.').lower()
@@ -2106,7 +2156,21 @@ async def list_forms(userId: Optional[str] = Query(default=None, description="Fi
 async def create_form(cfg: FormConfig):
     _validate_form(cfg)
     now = datetime.utcnow().isoformat()
-    form_id = (cfg.id or "").strip() or _create_id()
+    # Prefer provided ID, else idempotent deterministic ID, else random
+    proposed_id = (cfg.id or "").strip()
+    if not proposed_id:
+        try:
+            # If client sent an idempotencyKey, fold it into a stable ID
+            idem = getattr(cfg, "id", None) or getattr(cfg, "idempotencyKey", None)  # type: ignore[attr-defined]
+        except Exception:
+            idem = None
+        if idem and isinstance(idem, str) and idem.strip():
+            user_id = getattr(cfg, "userId", None)
+            form_id = f"{(user_id or '').strip()}_{_djb2_hash(idem.strip())}".strip("_") or _create_id()
+        else:
+            form_id = _deterministic_form_id(getattr(cfg, "userId", None), cfg)
+    else:
+        form_id = proposed_id
     data = cfg.dict()
     # Preserve provided step values; default missing/invalid to 1
     for f in data.get("fields") or []:
@@ -2164,7 +2228,16 @@ async def create_form(cfg: FormConfig):
     except Exception:
         pass
 
-    _write_json(_form_path(form_id), data)
+    # If a form with this ID already exists, treat as idempotent create and return existing
+    target_path = _form_path(form_id)
+    if os.path.exists(target_path):
+        existing = _read_json(target_path)
+        embed_url = f"/embed/{form_id}"
+        iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
+        logger.info("form create idempotent hit id=%s (exists)", form_id)
+        return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet, "existing": True}
+
+    _write_json(target_path, data)
 
     embed_url = f"/embed/{form_id}"
     iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'

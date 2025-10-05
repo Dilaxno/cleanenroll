@@ -1434,7 +1434,7 @@ async def embed_page(form_id: str):
   async function init(){
     try {
       const base = window.location.origin;
-      const res = await fetch(base + '/api/forms/' + FORM_ID);
+      const res = await fetch(base + '/api/builder/forms/' + FORM_ID);
       if (!res.ok) throw new Error('Not found');
       const cfg = await res.json();
 
@@ -1477,6 +1477,65 @@ async def embed_page(form_id: str):
       const body = document.getElementById('body');
       const fields = (cfg.fields||[]).map(renderField).join('');
       body.innerHTML = fields;
+
+      // Branding logo and Powered by CleanEnroll
+      function _normalizeR2(u){ try{ if(!u) return u; var url=new URL(u, window.location.origin); var host=url.hostname||''; var path=url.pathname||''; if(host.indexOf('.r2.cloudflarestorage.com')!==-1){ return 'https://pub-e30045e3902945f4ada02414d0573c3b.r2.dev'+path; } url.search=''; url.hash=''; return url.toString(); } catch(e){ return u; } }
+      try {
+        var formRoot = document.querySelector('.form');
+        var cardEl = document.getElementById('card');
+        var b = cfg.branding || {};
+        if (b.logo && formRoot && cardEl) {
+          var size = (b.logoSize||'medium');
+          var h = (size==='small')?32:(size==='large')?64:48;
+          var img = document.createElement('img');
+          img.src = _normalizeR2(b.logo);
+          img.alt = 'Logo';
+          img.style.height = h + 'px';
+          img.style.maxWidth = '100%';
+          var wrap = document.createElement('div');
+          wrap.style.textAlign = 'center';
+          wrap.style.margin = (b.logoPosition==='bottom') ? '8px 0 0 0' : '0 0 8px 0';
+          wrap.appendChild(img);
+          if ((b.logoPosition||'top') === 'top') {
+            formRoot.insertBefore(wrap, cardEl);
+          } else {
+            cardEl.insertAdjacentElement('afterend', wrap);
+          }
+        }
+        // Powered by CleanEnroll
+        var sp = cfg.showPoweredBy;
+        var show = !(sp === false || String(sp).toLowerCase() === 'false' || sp === 0 || String(sp) === '0');
+        if (show && formRoot) {
+          function _isDarkColor(s){ try{ var str=String(s||'').trim(); var r=255,g=255,b=255; var m=str.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i); if(m){ var h=m[1]; if(h.length===3){ r=parseInt(h[0]+h[0],16); g=parseInt(h[1]+h[1],16); b=parseInt(h[2]+h[2],16);} else { r=parseInt(h.slice(0,2),16); g=parseInt(h.slice(2,4),16); b=parseInt(h.slice(4,6),16);} } else { var m2=str.match(/^rgb\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)/i); if(m2){ r=Math.min(255,parseInt(m2[1],10)); g=Math.min(255,parseInt(m2[2],10)); b=Math.min(255,parseInt(m2[3],10)); } } var bright=(r*299+g*587+b*114)/1000; return bright<128; } catch(e){ return false; } }
+          var pageBg = (cfg.theme && (cfg.theme.pageBackgroundColor || cfg.theme.backgroundColor)) || '#ffffff';
+          var dark = _isDarkColor(pageBg);
+          var pWrap = document.createElement('div');
+          pWrap.style.textAlign = 'center';
+          pWrap.style.marginTop = '12px';
+          var a = document.createElement('a');
+          a.href = 'https://cleanenroll.com';
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.setAttribute('aria-label','Powered by CleanEnroll');
+          a.style.display = 'inline-flex';
+          a.style.alignItems = 'center';
+          a.style.gap = '6px';
+          a.style.fontSize = '12px';
+          a.style.color = '#6b7280';
+          var span = document.createElement('span');
+          span.textContent = 'Powered by';
+          var logo = document.createElement('img');
+          logo.alt = 'CleanEnroll';
+          logo.style.height = '24px';
+          logo.src = dark ? 'https://cleanenroll.com/Logo%20CleanEnroll.svg' : 'https://cleanenroll.com/Logo%20CleanEnroll%20black.svg';
+          a.appendChild(span);
+          a.appendChild(logo);
+          pWrap.appendChild(a);
+          formRoot.appendChild(pWrap);
+        }
+      } catch (_e) {}
+
+      // Submit button customization
 
       // Submit button customization
       const btnEl = document.querySelector('.actions .btn');

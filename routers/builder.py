@@ -3319,10 +3319,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 @router.post("/forms/{form_id}/custom-domain/verify")
 async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optional[str] = None):
     """
-    Verify custom domain by resolving its CNAME to our target. Also prevent duplicate domain
-    assignments across forms and attempt a simple HTTPS check to report SSL status.
-    If the form JSON does not exist yet, allow passing the domain to create a minimal stub so
-    verification can proceed.
+    Verify custom domain by resolving its CNAME to our target (api.cleanenroll.com).
+    Prevent duplicates, mark as ready for Caddy's automatic TLS.
     """
     path = _form_path(form_id)
     data: Dict = {}
@@ -3334,349 +3332,151 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
             or ((payload or {}).get("customDomain") if isinstance(payload, dict) else None)
             or ((payload or {}).get("domain") if isinstance(payload, dict) else None)
         )
-        if inbound_domain:
-            now = datetime.utcnow().isoformat()
-            data = {
-                "id": form_id,
-                "title": "Untitled Form",
-                "subtitle": "",
-                "customDomain": inbound_domain,
-                "customDomainVerified": False,
-                "sslVerified": False,
-                "createdAt": now,
-                "updatedAt": now,
-            }
-            _write_json(path, data)
-        else:
-            raise HTTPException(status_code=404, detail="Form not found")
+        if not inbound_domain:
+            raise HTTPException(status_code=400, detail="Missing custom domain")
+
+        now = datetime.utcnow().isoformat()
+        data = {
+            "id": form_id,
+            "title": "Untitled Form",
+            "customDomain": inbound_domain,
+            "customDomainVerified": False,
+            "sslVerified": False,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        _write_json(path, data)
 
     domain_val = _normalize_domain(
         data.get("customDomain")
         or domain
         or ((payload or {}).get("customDomain") if isinstance(payload, dict) else None)
-        or ((payload or {}).get("domain") if isinstance(payload, dict) else None)
     )
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
 
-    # Enforce uniqueness: domain cannot be assigned to another form
+    # ── Prevent duplicate domain use ──
+    for name in os.listdir(BACKING_DIR):
+        if not name.endswith(".json"):
+            continue
+        other = _read_json(os.path.join(BACKING_DIR, name))
+        if _normalize_domain(other.get("customDomain")) == domain_val and other.get("id") != form_id:
+            raise HTTPException(status_code=409, detail="This domain is already used by another form")
+
+    # ── DNS verification (CNAME or A record) ──
+    cname_ok, apex_ok = False, False
     try:
-        for name in os.listdir(BACKING_DIR):
-            if not name.endswith('.json'):
-                continue
-            other_path = os.path.join(BACKING_DIR, name)
-            try:
-                other = _read_json(other_path)
-            except Exception:
-                continue
-            oid = str(other.get('id') or name.replace('.json',''))
-            odomain = _normalize_domain(other.get('customDomain'))
-            if odomain and odomain == domain_val and oid != form_id:
-                raise HTTPException(status_code=409, detail=f"This domain is already connected to another form (id={oid}). Remove it there first.")
-    except HTTPException:
-        raise
+        answers = dns.resolver.resolve(domain_val + ".", "CNAME")
+        targets = [str(rdata.target).rstrip('.').lower() for rdata in answers]
+        cname_ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
     except Exception:
-        pass
-
-    if not _DNS_AVAILABLE:
-        raise HTTPException(status_code=500, detail="DNS library not available on server")
-
-    # Resolve CNAME and validate target (subdomains). If no CNAME, allow apex by A/AAAA IP match.
-    try:
         cname_ok = False
-        try:
-            answers = dns.resolver.resolve(domain_val + ".", "CNAME")  # type: ignore[attr-defined]
-            targets = [str(rdata.target).rstrip('.').lower() for rdata in answers]
-            cname_ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
-        except Exception:
-            cname_ok = False
 
-        apex_ok = False
-        if not cname_ok:
-            # Compare A/AAAA of requested domain vs target hostname's A/AAAA
-            try:
-                # resolve target hostname IPs
-                target_ips = set()
-                for rrtype in ("A", "AAAA"):
+    if not cname_ok:
+        # Compare A/AAAA IPs
+        try:
+            def ips(host):
+                found = set()
+                for rr in ("A", "AAAA"):
                     try:
-                        ans = dns.resolver.resolve(CUSTOM_DOMAIN_TARGET + ".", rrtype)  # type: ignore[attr-defined]
+                        ans = dns.resolver.resolve(host + ".", rr)
                         for r in ans:
-                            target_ips.add(str(r).split(" ")[0])
+                            found.add(str(r))
                     except Exception:
                         pass
+                return found
 
-                domain_ips = set()
-                for rrtype in ("A", "AAAA"):
-                    try:
-                        ans = dns.resolver.resolve(domain_val + ".", rrtype)  # type: ignore[attr-defined]
-                        for r in ans:
-                            domain_ips.add(str(r).split(" ")[0])
-                    except Exception:
-                        pass
-
-                apex_ok = bool(target_ips and domain_ips and (target_ips & domain_ips))
-            except Exception:
-                apex_ok = False
-
-        if not (cname_ok or apex_ok):
-            raise HTTPException(status_code=400, detail=f"Domain {domain_val} must CNAME to {CUSTOM_DOMAIN_TARGET} or have matching A/AAAA IPs")
-
-        # Simple SSL check via HTTPS HEAD/GET
-        ssl_ok = False
-        try:
-            req = urllib.request.Request(url=f"https://{domain_val}", method="HEAD")
-            with urllib.request.urlopen(req, timeout=5) as resp:  # type: ignore
-                ssl_ok = 200 <= getattr(resp, 'status', 200) < 400
+            apex_ok = bool(ips(domain_val) & ips(CUSTOM_DOMAIN_TARGET))
         except Exception:
-            try:
-                # Fallback to GET if HEAD blocked
-                with urllib.request.urlopen(f"https://{domain_val}", timeout=6) as resp:  # type: ignore
-                    ssl_ok = 200 <= getattr(resp, 'status', 200) < 400
-            except Exception:
-                ssl_ok = False
+            apex_ok = False
 
-        # Persist verification and SSL state
-        data["customDomainVerified"] = True
-        data["sslVerified"] = bool(ssl_ok)
-        data["customDomain"] = domain_val
-        data["updatedAt"] = datetime.utcnow().isoformat()
-        _write_json(path, data)
+    if not (cname_ok or apex_ok):
+        raise HTTPException(status_code=400, detail=f"Domain {domain_val} must point to {CUSTOM_DOMAIN_TARGET}")
 
-        # Auto-issue certificate right after verification (best-effort)
-        issue_result = None
-        try:
-            issue_result = await issue_cert(form_id)  # type: ignore
-        except HTTPException as e:
-            issue_result = {"success": False, "error": e.detail}
-        except Exception as e:
-            issue_result = {"success": False, "error": str(e)}
+    # ── Mark verified (Caddy will handle SSL) ──
+    data.update({
+        "customDomain": domain_val,
+        "customDomainVerified": True,
+        "sslVerified": True,  # Will be handled automatically by Caddy
+        "updatedAt": datetime.utcnow().isoformat(),
+    })
+    _write_json(path, data)
 
-        return {
-            "verified": True,
-            "domain": domain_val,
-            "target": CUSTOM_DOMAIN_TARGET,
-            "sslVerified": bool(ssl_ok),
-            "issue": issue_result,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"DNS verification failed: {e}")
+    return {
+        "verified": True,
+        "domain": domain_val,
+        "target": CUSTOM_DOMAIN_TARGET,
+        "sslVerified": True,
+        "mode": "caddy",
+        "message": "Domain verified and ready for Caddy automatic SSL."
+    }
 
+
+# ─────────────────────────────
+# ISSUE CERT (No-op for Caddy)
+# ─────────────────────────────
 @router.post("/forms/{form_id}/custom-domain/issue-cert")
-async def issue_cert(form_id: str, payload: Dict = None):
+async def issue_cert(form_id: str):
     """
-    Automatically issue and enable SSL for a verified custom domain.
-
-    Flow:
-    1. Ensure domain is verified (CNAME check passed).
-    2. Run certbot to issue certificate (HTTP-01 with webroot or DNS-01 if configured).
-    3. Write Nginx TLS server block for the domain.
-    4. Reload Nginx.
-    5. Fallback: mark domain as ready for Caddy on-demand TLS.
+    Dummy endpoint for compatibility.
+    With Caddy, certificates are issued automatically on first HTTPS request.
     """
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
     data = _read_json(path)
+    domain_val = _normalize_domain(data.get("customDomain"))
 
-    domain_val = (data.get("customDomain") or "").strip().lower()
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
     if not data.get("customDomainVerified"):
         raise HTTPException(status_code=400, detail="Domain not verified yet")
 
-    # Resolve certbot executable. Guard against CERTBOT_BIN including extra tokens like 'certbot renew'
-    _bin_tokens = str(CERTBOT_BIN or "certbot").strip().split()
-    _bin = _bin_tokens[0] if _bin_tokens else "certbot"
-    certbot = shutil.which(_bin) or _bin
-    logs: list[str] = []
-    try:
-        if certbot and shutil.which(certbot):
-            os.makedirs(ACME_WEBROOT, exist_ok=True)
-            use_dns = bool(CERTBOT_DNS_PROVIDER)
-
-            # Build SAN list: primary + additionalDomains from payload
-            addl = []
-            if isinstance(payload, dict):
-                raw = payload.get("additionalDomains") or payload.get("san") or []
-                if isinstance(raw, str):
-                    raw = [raw]
-                if isinstance(raw, list):
-                    addl = [d for d in [_normalize_domain(x) for x in raw] if d]
-            domains: List[str] = []
-            if domain_val:
-                domains.append(domain_val)
-            for d in addl:
-                if d not in domains:
-                    domains.append(d)
-
-            dir_flags = (
-                f" --config-dir {CERTBOT_CONFIG_DIR}"
-                f" --work-dir {CERTBOT_WORK_DIR}"
-                f" --logs-dir {CERTBOT_LOGS_DIR}"
-            )
-
-            # For HTTP-01, ensure Nginx serves the ACME webroot before invoking certbot
-            challenge_site_path = None
-            if not use_dns and shutil.which(NGINX_BIN) and os.path.isdir(NGINX_SITES_AVAILABLE) and os.path.isdir(NGINX_SITES_ENABLED):
-                try:
-                    challenge_site_path = os.path.join(NGINX_SITES_AVAILABLE, f"{domain_val}.conf")
-                    http_conf = _nginx_conf_http_multi(domains)
-                    _write_text(challenge_site_path, http_conf)
-                    link_path = os.path.join(NGINX_SITES_ENABLED, f"{domain_val}.conf")
-                    _ensure_symlink(challenge_site_path, link_path)
-                    reload_out = _nginx_test_and_reload()
-                    logs.append(reload_out)
-                except Exception as e:
-                    # Do not fail hard here; certbot may use standalone if configured differently
-                    logs.append(f"nginx http challenge setup error: {e}")
-
-            if use_dns and str(CERTBOT_DNS_PROVIDER).lower() == "cloudflare" and CERTBOT_DNS_CREDENTIALS:
-                # DNS-01 with Cloudflare
-                dom_flags = " ".join([f"-d {d}" for d in domains])
-                cmd = (
-                    f"{certbot} certonly --agree-tos --no-eff-email -n "
-                    f"--email {EMAIL_FOR_LE} "
-                    f"--dns-cloudflare --dns-cloudflare-credentials {CERTBOT_DNS_CREDENTIALS} "
-                    f"--dns-cloudflare-propagation-seconds 60 "
-                    f"--cert-name {domain_val} "
-                    f"{dom_flags}" + dir_flags
-                )
-            else:
-                # HTTP-01 with webroot
-                dom_flags = " ".join([f"-d {d}" for d in domains])
-                cmd = (
-                    f"{certbot} certonly --webroot -w {ACME_WEBROOT} "
-                    f"--agree-tos --no-eff-email -n "
-                    f"--email {EMAIL_FOR_LE} "
-                    f"--cert-name {domain_val} "
-                    f"{dom_flags}" + dir_flags
-                )
-
-            res = _shell(cmd)
-            logs.append(res.stdout or "")
-            if res.returncode != 0:
-                raise HTTPException(status_code=502, detail=f"certbot failed: {(res.stdout or '')[-4000:]}\nCommand: {cmd}")
-
-            # After successful issuance, write a full TLS config using helpers and reload
-            # Guard: ensure certs were actually written for the primary custom domain
-            try:
-                primary_live_dir = os.path.join("/etc/letsencrypt/live", domain_val)
-                fullchain_path = os.path.join(primary_live_dir, "fullchain.pem")
-                privkey_path = os.path.join(primary_live_dir, "privkey.pem")
-                if not (os.path.exists(fullchain_path) and os.path.exists(privkey_path)):
-                    raise HTTPException(status_code=502, detail=(
-                        "Certificate files not found for custom domain. "
-                        f"Expected: {fullchain_path}.\n"
-                        f"Domains requested: {domains}.\n"
-                        f"Certbot output (tail): {(res.stdout or '')[-1000:]}"
-                    ))
-            except HTTPException:
-                raise
-            except Exception as e:
-                raise HTTPException(status_code=502, detail=f"Post-issue check failed: {e}")
-            if shutil.which(NGINX_BIN) and os.path.isdir(NGINX_SITES_AVAILABLE) and os.path.isdir(NGINX_SITES_ENABLED):
-                site_path = os.path.join(NGINX_SITES_AVAILABLE, f"{domain_val}.conf")
-                tls_conf = _nginx_conf_tls_multi(domains)
-                _write_text(site_path, tls_conf)
-
-                # symlink into sites-enabled
-                link_path = os.path.join(NGINX_SITES_ENABLED, f"{domain_val}.conf")
-                _ensure_symlink(site_path, link_path)
-
-                # test & reload
-                reload_out = _nginx_test_and_reload()
-                logs.append(reload_out)
-
-            # Verify HTTPS works
-            ssl_ok = False
-            try:
-                req = urllib.request.Request(url=f"https://{domain_val}", method="HEAD")
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    ssl_ok = 200 <= getattr(resp, 'status', 200) < 400
-            except Exception:
-                ssl_ok = False
-
-            # Capture cert status (explicitly use the primary custom domain)
-            cert_status = _cert_status_for_domain(domain_val)
-
-            data["sslVerified"] = bool(ssl_ok)
-            data["updatedAt"] = datetime.utcnow().isoformat()
-            _write_json(path, data)
-
-            return {
-                "success": True,
-                "domain": domain_val,
-                "domains": domains,
-                "sslVerified": bool(ssl_ok),
-                "mode": "certbot+nginx",
-                "certStatus": cert_status,
-                "logs": ("\n".join(logs))[-8000:]
-            }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logs.append(f"certbot/nginx error: {e}")
-
-    # Fallback: mark as ready for Caddy
     data["sslVerified"] = True
     data["updatedAt"] = datetime.utcnow().isoformat()
     _write_json(path, data)
+
     return {
         "success": True,
         "domain": domain_val,
         "sslVerified": True,
         "mode": "caddy",
-        "message": "TLS will be issued automatically by Caddy on first HTTPS hit.",
-        "certStatus": {"exists": False, "domain": domain_val},
-        "logs": ("\n".join(logs))[-8000:]
+        "message": "SSL will be automatically provisioned by Caddy when the domain is accessed."
     }
 
 
+# ─────────────────────────────
+# CERT STATUS (Simplified)
+# ─────────────────────────────
 @router.get("/forms/{form_id}/custom-domain/cert-status")
 async def get_cert_status(form_id: str):
-    """Report certificate status (exists, SANs, expiry) for the form's custom domain."""
+    """Return custom domain verification and SSL readiness (Caddy-managed)."""
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
     data = _read_json(path)
-    primary = _normalize_domain(data.get("customDomain"))
-    if not primary:
-        raise HTTPException(status_code=400, detail="No custom domain configured")
-    status = _cert_status_for_domain(primary)
-    status["verified"] = bool(data.get("customDomainVerified"))
-    status["sslVerified"] = bool(data.get("sslVerified"))
-    return status
+    return {
+        "domain": data.get("customDomain"),
+        "verified": bool(data.get("customDomainVerified")),
+        "sslVerified": bool(data.get("sslVerified")),
+        "mode": "caddy",
+        "message": "SSL automatically managed by Caddy (on-demand)."
+    }
 
 
+# ─────────────────────────────
+# ADMIN (Optional – kept for compatibility)
+# ─────────────────────────────
 @router.post("/admin/certificates/renew-now")
 async def renew_now():
-    """Trigger a certbot renew cycle and reload Nginx if certificates changed."""
-    info = _certbot_renew_and_reload()
-    if not info.get("ok"):
-        raise HTTPException(status_code=502, detail=f"renew failed: {info}")
-    return info
+    """No-op: Caddy handles renewals automatically."""
+    return {"ok": True, "mode": "caddy", "message": "Renewal handled automatically by Caddy."}
 
 
 @router.get("/admin/certificates/renew-health")
 async def renew_health():
-    """Report last renewal run time and whether changes were applied."""
-    try:
-        if os.path.exists(_RENEW_LAST_FILE):
-            with open(_RENEW_LAST_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return {
-                "enabled": True,
-                "lastRun": data.get("ranAt"),
-                "changed": bool(data.get("changed")),
-            }
-        else:
-            return {"enabled": True, "lastRun": None, "changed": None}
-    except Exception as e:
-        return {"enabled": True, "error": str(e)}
-
+    """Simple health check for Caddy mode."""
+    return {"enabled": True, "mode": "caddy", "message": "Caddy auto-renews certificates internally."}
 
 @router.get("/forms/{form_id}/responses")
 async def list_responses(

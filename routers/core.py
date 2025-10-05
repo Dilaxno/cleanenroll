@@ -1410,7 +1410,10 @@ async def embed_page(form_id: str):
   </html>
   """
     html = html.replace("__FORM_ID__", form_id).replace("__FRONTEND__", frontend_url)
-    return HTMLResponse(content=html)
+    csp = "frame-ancestors 'self' https://api.cleanenroll.com http://localhost:5173 http://127.0.0.1:5173"
+    return HTMLResponse(content=html, headers={
+        "Content-Security-Policy": csp
+    })
 
 
 # --------------

@@ -17,6 +17,7 @@ import zipfile
 import io
 import boto3
 from botocore.client import Config as BotoConfig
+import socket
 try:
     import dns.resolver  # type: ignore
     _DNS_AVAILABLE = True
@@ -692,6 +693,65 @@ server {{
 }}
 """.strip()
 
+
+def _nginx_conf_http_multi(domains: List[str]) -> str:
+    names = " ".join(domains)
+    return f"""
+server {{
+    listen 80;
+    server_name {names};
+
+    location /.well-known/acme-challenge/ {{
+        root {ACME_WEBROOT};
+    }}
+
+    return 301 https://$host$request_uri;
+}}
+""".strip()
+
+
+def _nginx_conf_tls_multi(domains: List[str]) -> str:
+    primary = domains[0]
+    names = " ".join(domains)
+    cert_base = f"/etc/letsencrypt/live/{primary}"
+    return f"""
+server {{
+    listen 80;
+    server_name {names};
+
+    location /.well-known/acme-challenge/ {{
+        root {ACME_WEBROOT};
+    }}
+
+    return 301 https://$host$request_uri;
+}}
+
+server {{
+    listen 443 ssl http2;
+    server_name {names};
+
+    ssl_certificate     {cert_base}/fullchain.pem;
+    ssl_certificate_key {cert_base}/privkey.pem;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    location /.well-known/acme-challenge/ {{
+        root {ACME_WEBROOT};
+    }}
+
+    location / {{
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_pass {UPSTREAM_ADDR};
+        proxy_read_timeout 60s;
+    }}
+}}
+""".strip()
 
 def _nginx_conf_tls(domain: str) -> str:
     cert_base = f"/etc/letsencrypt/live/{domain}"
@@ -3151,13 +3211,45 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
     if not _DNS_AVAILABLE:
         raise HTTPException(status_code=500, detail="DNS library not available on server")
 
-    # Resolve CNAME and validate target
+    # Resolve CNAME and validate target (subdomains). If no CNAME, allow apex by A/AAAA IP match.
     try:
-        answers = dns.resolver.resolve(domain_val + ".", "CNAME")  # type: ignore[attr-defined]
-        targets = [str(rdata.target).rstrip('.').lower() for rdata in answers]
-        ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
-        if not ok:
-            raise HTTPException(status_code=400, detail=f"CNAME for {domain_val} must point to {CUSTOM_DOMAIN_TARGET}")
+        cname_ok = False
+        try:
+            answers = dns.resolver.resolve(domain_val + ".", "CNAME")  # type: ignore[attr-defined]
+            targets = [str(rdata.target).rstrip('.').lower() for rdata in answers]
+            cname_ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
+        except Exception:
+            cname_ok = False
+
+        apex_ok = False
+        if not cname_ok:
+            # Compare A/AAAA of requested domain vs target hostname's A/AAAA
+            try:
+                # resolve target hostname IPs
+                target_ips = set()
+                for rrtype in ("A", "AAAA"):
+                    try:
+                        ans = dns.resolver.resolve(CUSTOM_DOMAIN_TARGET + ".", rrtype)  # type: ignore[attr-defined]
+                        for r in ans:
+                            target_ips.add(str(r).split(" ")[0])
+                    except Exception:
+                        pass
+
+                domain_ips = set()
+                for rrtype in ("A", "AAAA"):
+                    try:
+                        ans = dns.resolver.resolve(domain_val + ".", rrtype)  # type: ignore[attr-defined]
+                        for r in ans:
+                            domain_ips.add(str(r).split(" ")[0])
+                    except Exception:
+                        pass
+
+                apex_ok = bool(target_ips and domain_ips and (target_ips & domain_ips))
+            except Exception:
+                apex_ok = False
+
+        if not (cname_ok or apex_ok):
+            raise HTTPException(status_code=400, detail=f"Domain {domain_val} must CNAME to {CUSTOM_DOMAIN_TARGET} or have matching A/AAAA IPs")
 
         # Simple SSL check via HTTPS HEAD/GET
         ssl_ok = False
@@ -3186,7 +3278,7 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
         raise HTTPException(status_code=400, detail=f"DNS verification failed: {e}")
 
 @router.post("/forms/{form_id}/custom-domain/issue-cert")
-async def issue_cert(form_id: str):
+async def issue_cert(form_id: str, payload: Dict = None):
     """
     Automatically issue and enable SSL for a verified custom domain.
 
@@ -3215,68 +3307,71 @@ async def issue_cert(form_id: str):
             os.makedirs(ACME_WEBROOT, exist_ok=True)
             use_dns = bool(CERTBOT_DNS_PROVIDER)
 
+            # Build SAN list: primary + additionalDomains from payload
+            addl = []
+            if isinstance(payload, dict):
+                raw = payload.get("additionalDomains") or payload.get("san") or []
+                if isinstance(raw, str):
+                    raw = [raw]
+                if isinstance(raw, list):
+                    addl = [d for d in [_normalize_domain(x) for x in raw] if d]
+            domains: List[str] = []
+            if domain_val:
+                domains.append(domain_val)
+            for d in addl:
+                if d not in domains:
+                    domains.append(d)
+
             dir_flags = (
                 f" --config-dir {CERTBOT_CONFIG_DIR}"
                 f" --work-dir {CERTBOT_WORK_DIR}"
                 f" --logs-dir {CERTBOT_LOGS_DIR}"
             )
 
+            # For HTTP-01, ensure Nginx serves the ACME webroot before invoking certbot
+            challenge_site_path = None
+            if not use_dns and shutil.which(NGINX_BIN) and os.path.isdir(NGINX_SITES_AVAILABLE) and os.path.isdir(NGINX_SITES_ENABLED):
+                try:
+                    challenge_site_path = os.path.join(NGINX_SITES_AVAILABLE, f"{domain_val}.conf")
+                    http_conf = _nginx_conf_http_multi(domains)
+                    _write_text(challenge_site_path, http_conf)
+                    link_path = os.path.join(NGINX_SITES_ENABLED, f"{domain_val}.conf")
+                    _ensure_symlink(challenge_site_path, link_path)
+                    reload_out = _nginx_test_and_reload()
+                    logs.append(reload_out)
+                except Exception as e:
+                    # Do not fail hard here; certbot may use standalone if configured differently
+                    logs.append(f"nginx http challenge setup error: {e}")
+
             if use_dns and str(CERTBOT_DNS_PROVIDER).lower() == "cloudflare" and CERTBOT_DNS_CREDENTIALS:
                 # DNS-01 with Cloudflare
+                dom_flags = " ".join([f"-d {d}" for d in domains])
                 cmd = (
                     f"{certbot} certonly --agree-tos --no-eff-email -n "
                     f"--email {EMAIL_FOR_LE} "
                     f"--dns-cloudflare --dns-cloudflare-credentials {CERTBOT_DNS_CREDENTIALS} "
                     f"--dns-cloudflare-propagation-seconds 60 "
-                    f"-d {domain_val}" + dir_flags
+                    f"{dom_flags}" + dir_flags
                 )
             else:
                 # HTTP-01 with webroot
+                dom_flags = " ".join([f"-d {d}" for d in domains])
                 cmd = (
                     f"{certbot} certonly --webroot -w {ACME_WEBROOT} "
                     f"--agree-tos --no-eff-email -n "
                     f"--email {EMAIL_FOR_LE} "
-                    f"-d {domain_val}" + dir_flags
+                    f"{dom_flags}" + dir_flags
                 )
 
             res = _shell(cmd)
             logs.append(res.stdout or "")
             if res.returncode != 0:
-                raise HTTPException(status_code=502, detail=f"certbot failed: {(res.stdout or '')[-4000:]}")
+                raise HTTPException(status_code=502, detail=f"certbot failed: {(res.stdout or '')[-4000:]}\nCommand: {cmd}")
 
-            # Write Nginx TLS config dynamically
+            # After successful issuance, write a full TLS config using helpers and reload
             if shutil.which(NGINX_BIN) and os.path.isdir(NGINX_SITES_AVAILABLE) and os.path.isdir(NGINX_SITES_ENABLED):
                 site_path = os.path.join(NGINX_SITES_AVAILABLE, f"{domain_val}.conf")
-                tls_conf = f"""
-server {{
-    listen 80;
-    server_name {domain_val};
-
-    location /.well-known/acme-challenge/ {{
-        root {ACME_WEBROOT};
-    }}
-
-    location / {{
-        return 301 https://$host$request_uri;
-    }}
-}}
-
-server {{
-    listen 443 ssl;
-    server_name {domain_val};
-
-    ssl_certificate /etc/letsencrypt/live/{domain_val}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{domain_val}/privkey.pem;
-
-    location / {{
-        proxy_pass http://127.0.0.1:8000;  # adjust to your backend
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }}
-}}
-"""
+                tls_conf = _nginx_conf_tls_multi(domains)
                 _write_text(site_path, tls_conf)
 
                 # symlink into sites-enabled

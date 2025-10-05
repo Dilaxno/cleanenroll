@@ -720,6 +720,14 @@ def _nginx_conf_tls_multi(domains: List[str]) -> str:
     primary = domains[0]
     names = " ".join(domains)
     cert_base = f"/etc/letsencrypt/live/{primary}"
+    form_redirect = ""
+    if FRONTEND_URL:
+        # Absolute redirect for SPA /form/* paths directly from Nginx to avoid proxy loops
+        form_redirect = f"""
+    location ^~ /form/ {{
+        return 302 {FRONTEND_URL.rstrip('/')}$request_uri;
+    }}
+"""
     return f"""
 server {{
     listen 80;
@@ -748,6 +756,8 @@ server {{
         root {ACME_WEBROOT};
     }}
 
+    {form_redirect}
+
     location / {{
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -761,6 +771,13 @@ server {{
 
 def _nginx_conf_tls(domain: str) -> str:
     cert_base = f"/etc/letsencrypt/live/{domain}"
+    form_redirect = ""
+    if FRONTEND_URL:
+        form_redirect = f"""
+    location ^~ /form/ {{
+        return 302 {FRONTEND_URL.rstrip('/')}$request_uri;
+    }}
+"""
     return f"""
 server {{
     listen 80;
@@ -847,6 +864,7 @@ NGINX_BIN            = os.getenv("NGINX_BIN")            or "nginx"
 NGINX_TEST_CMD       = os.getenv("NGINX_TEST_CMD")       or "nginx -t"
 NGINX_RELOAD_CMD     = os.getenv("NGINX_RELOAD_CMD")     or "nginx -s reload"
 UPSTREAM_ADDR        = os.getenv("UPSTREAM_ADDR")        or "http://127.0.0.1:8000"
+FRONTEND_URL         = (os.getenv("FRONTEND_URL") or "").strip()
 # Optional DNS-01 configuration for Certbot (provider plugin)
 CERTBOT_DNS_PROVIDER      = os.getenv("CERTBOT_DNS_PROVIDER")  # e.g., 'cloudflare'
 CERTBOT_DNS_CREDENTIALS   = os.getenv("CERTBOT_DNS_CREDENTIALS")  # path to credentials file

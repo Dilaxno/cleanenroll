@@ -3441,7 +3441,23 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
         data["customDomain"] = domain_val
         data["updatedAt"] = datetime.utcnow().isoformat()
         _write_json(path, data)
-        return {"verified": True, "domain": domain_val, "target": CUSTOM_DOMAIN_TARGET, "sslVerified": bool(ssl_ok)}
+
+        # Auto-issue certificate right after verification (best-effort)
+        issue_result = None
+        try:
+            issue_result = await issue_cert(form_id)  # type: ignore
+        except HTTPException as e:
+            issue_result = {"success": False, "error": e.detail}
+        except Exception as e:
+            issue_result = {"success": False, "error": str(e)}
+
+        return {
+            "verified": True,
+            "domain": domain_val,
+            "target": CUSTOM_DOMAIN_TARGET,
+            "sslVerified": bool(ssl_ok),
+            "issue": issue_result,
+        }
     except HTTPException:
         raise
     except Exception as e:

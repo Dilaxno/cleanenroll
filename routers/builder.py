@@ -18,6 +18,8 @@ import io
 import boto3
 from botocore.client import Config as BotoConfig
 import socket
+import threading
+import time
 try:
     import dns.resolver  # type: ignore
     _DNS_AVAILABLE = True
@@ -677,6 +679,10 @@ os.makedirs(CERTBOT_CONFIG_DIR, exist_ok=True)
 os.makedirs(CERTBOT_WORK_DIR, exist_ok=True)
 os.makedirs(CERTBOT_LOGS_DIR, exist_ok=True)
 
+# Renewal lock/state file
+_RENEW_LOCK_FILE = os.path.join(os.getcwd(), "data", "letsencrypt", "renew.lock")
+_RENEW_LAST_FILE = os.path.join(os.getcwd(), "data", "letsencrypt", "renew.last.json")
+
 # --- Nginx helper templates & functions ---
 
 def _nginx_conf_http(domain: str) -> str:
@@ -844,6 +850,150 @@ UPSTREAM_ADDR        = os.getenv("UPSTREAM_ADDR")        or "http://127.0.0.1:80
 # Optional DNS-01 configuration for Certbot (provider plugin)
 CERTBOT_DNS_PROVIDER      = os.getenv("CERTBOT_DNS_PROVIDER")  # e.g., 'cloudflare'
 CERTBOT_DNS_CREDENTIALS   = os.getenv("CERTBOT_DNS_CREDENTIALS")  # path to credentials file
+
+
+def _certbot_dir_flags() -> str:
+    return (
+        f" --config-dir {CERTBOT_CONFIG_DIR}"
+        f" --work-dir {CERTBOT_WORK_DIR}"
+        f" --logs-dir {CERTBOT_LOGS_DIR}"
+    )
+
+
+def _cert_status_for_domain(primary_domain: str) -> Dict[str, Any]:
+    """Return certificate status for a domain from /etc/letsencrypt/live/<domain>/cert.pem.
+    Uses openssl via _shell to extract subject, issuer, dates, and SANs.
+    """
+    live_dir = f"/etc/letsencrypt/live/{primary_domain}"
+    cert_path = os.path.join(live_dir, "cert.pem")
+    if not os.path.exists(cert_path):
+        return {"exists": False, "domain": primary_domain}
+    try:
+        # Gather fields
+        out_subject = _shell(f"openssl x509 -in {cert_path} -noout -subject").stdout or ""
+        out_issuer  = _shell(f"openssl x509 -in {cert_path} -noout -issuer").stdout or ""
+        out_enddate = _shell(f"openssl x509 -in {cert_path} -noout -enddate").stdout or ""
+        out_start   = _shell(f"openssl x509 -in {cert_path} -noout -startdate").stdout or ""
+        out_san     = _shell(f"openssl x509 -in {cert_path} -noout -ext subjectAltName").stdout or ""
+
+        def _val(line: str) -> str:
+            return (line.strip().split("=", 1)[-1] if "=" in line else line.strip())
+
+        subject = _val(out_subject)
+        issuer  = _val(out_issuer)
+        not_after_raw = _val(out_enddate)
+        not_before_raw = _val(out_start)
+        # Extract SANs
+        sans: List[str] = []
+        try:
+            # subjectAltName= DNS:example.com, DNS:www.example.com
+            san_line = "".join(out_san.strip().splitlines())
+            if "subjectAltName" in san_line and ":" in san_line:
+                part = san_line.split(":", 1)[1]
+                for tok in part.split(","):
+                    tok = tok.strip()
+                    if tok.startswith("DNS:"):
+                        sans.append(tok[4:].strip())
+        except Exception:
+            pass
+
+        # Compute days remaining
+        def _parse_as_dt(s: str) -> Optional[datetime]:
+            try:
+                # Example: notAfter=Dec 27 20:13:11 2025 GMT
+                v = s.strip()
+                if v.lower().startswith("notafter="):
+                    v = v.split("=", 1)[1].strip()
+                if v.lower().startswith("notbefore="):
+                    v = v.split("=", 1)[1].strip()
+                # strptime format
+                return datetime.strptime(v, "%b %d %H:%M:%S %Y %Z")
+            except Exception:
+                return None
+
+        nb = _parse_as_dt(not_before_raw)
+        na = _parse_as_dt(not_after_raw)
+        days_remaining = None
+        if na:
+            try:
+                days_remaining = max(0, (na - datetime.utcnow()).days)
+            except Exception:
+                days_remaining = None
+
+        return {
+            "exists": True,
+            "domain": primary_domain,
+            "subject": subject,
+            "issuer": issuer,
+            "notBefore": not_before_raw.strip(),
+            "notAfter": not_after_raw.strip(),
+            "daysRemaining": days_remaining,
+            "sans": sans,
+            "liveDir": live_dir,
+        }
+    except Exception as e:
+        return {"exists": True, "domain": primary_domain, "error": str(e)}
+
+
+def _certbot_renew_and_reload() -> Dict[str, Any]:
+    """Run certbot renew and reload Nginx if changes applied."""
+    if not (CERTBOT_BIN and shutil.which(CERTBOT_BIN)):
+        return {"ok": False, "reason": "certbot not available"}
+    dir_flags = _certbot_dir_flags()
+    # Prefer relying on saved authenticators; include webroot for safety
+    cmd = f"{CERTBOT_BIN} renew --agree-tos -n" + dir_flags + f" --webroot -w {ACME_WEBROOT}"
+    res = _shell(cmd)
+    changed = "No renewals were attempted" not in (res.stdout or "") and "No renewals were attempted" not in (res.stdout or "").lower()
+    info: Dict[str, Any] = {"ok": res.returncode == 0, "changed": changed, "output": (res.stdout or "")[-8000:]}
+    if res.returncode != 0:
+        return info
+    try:
+        reload_out = _nginx_test_and_reload()
+        info["nginx"] = reload_out
+    except Exception as e:
+        info["nginx_error"] = str(e)
+    # write last run
+    try:
+        os.makedirs(os.path.dirname(_RENEW_LAST_FILE), exist_ok=True)
+        with open(_RENEW_LAST_FILE, "w", encoding="utf-8") as f:
+            json.dump({"ranAt": datetime.utcnow().isoformat(), "changed": bool(changed)}, f)
+    except Exception:
+        pass
+    return info
+
+
+def _start_cert_renew_daemon():
+    """Start a single background thread (per host) to renew certs periodically.
+    Uses a lock file to avoid multiple workers scheduling the same job.
+    """
+    try:
+        # Try to acquire lock file exclusively
+        if os.path.exists(_RENEW_LOCK_FILE):
+            return
+        os.makedirs(os.path.dirname(_RENEW_LOCK_FILE), exist_ok=True)
+        with open(_RENEW_LOCK_FILE, "x", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        # Another process has the lock
+        return
+
+    def _loop():
+        # Initial delay to allow app startup
+        time.sleep(30)
+        while True:
+            try:
+                _certbot_renew_and_reload()
+            except Exception:
+                pass
+            # Sleep 12 hours between checks
+            time.sleep(12 * 3600)
+
+    try:
+        t = threading.Thread(target=_loop, name="certbot-renew", daemon=True)
+        t.start()
+    except Exception:
+        pass
+
 
 def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
     if not RECAPTCHA_SECRET:
@@ -3391,6 +3541,9 @@ async def issue_cert(form_id: str, payload: Dict = None):
             except Exception:
                 ssl_ok = False
 
+            # Capture cert status
+            cert_status = _cert_status_for_domain(domains[0]) if domains else {"exists": False}
+
             data["sslVerified"] = bool(ssl_ok)
             data["updatedAt"] = datetime.utcnow().isoformat()
             _write_json(path, data)
@@ -3398,8 +3551,10 @@ async def issue_cert(form_id: str, payload: Dict = None):
             return {
                 "success": True,
                 "domain": domain_val,
+                "domains": domains,
                 "sslVerified": bool(ssl_ok),
                 "mode": "certbot+nginx",
+                "certStatus": cert_status,
                 "logs": ("\n".join(logs))[-8000:]
             }
 
@@ -3418,8 +3573,52 @@ async def issue_cert(form_id: str, payload: Dict = None):
         "sslVerified": True,
         "mode": "caddy",
         "message": "TLS will be issued automatically by Caddy on first HTTPS hit.",
+        "certStatus": {"exists": False, "domain": domain_val},
         "logs": ("\n".join(logs))[-8000:]
     }
+
+
+@router.get("/forms/{form_id}/custom-domain/cert-status")
+async def get_cert_status(form_id: str):
+    """Report certificate status (exists, SANs, expiry) for the form's custom domain."""
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    primary = _normalize_domain(data.get("customDomain"))
+    if not primary:
+        raise HTTPException(status_code=400, detail="No custom domain configured")
+    status = _cert_status_for_domain(primary)
+    status["verified"] = bool(data.get("customDomainVerified"))
+    status["sslVerified"] = bool(data.get("sslVerified"))
+    return status
+
+
+@router.post("/admin/certificates/renew-now")
+async def renew_now():
+    """Trigger a certbot renew cycle and reload Nginx if certificates changed."""
+    info = _certbot_renew_and_reload()
+    if not info.get("ok"):
+        raise HTTPException(status_code=502, detail=f"renew failed: {info}")
+    return info
+
+
+@router.get("/admin/certificates/renew-health")
+async def renew_health():
+    """Report last renewal run time and whether changes were applied."""
+    try:
+        if os.path.exists(_RENEW_LAST_FILE):
+            with open(_RENEW_LAST_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "enabled": True,
+                "lastRun": data.get("ranAt"),
+                "changed": bool(data.get("changed")),
+            }
+        else:
+            return {"enabled": True, "lastRun": None, "changed": None}
+    except Exception as e:
+        return {"enabled": True, "error": str(e)}
 
 
 @router.get("/forms/{form_id}/responses")

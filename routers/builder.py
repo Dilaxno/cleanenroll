@@ -3537,6 +3537,22 @@ async def issue_cert(form_id: str, payload: Dict = None):
                 raise HTTPException(status_code=502, detail=f"certbot failed: {(res.stdout or '')[-4000:]}\nCommand: {cmd}")
 
             # After successful issuance, write a full TLS config using helpers and reload
+            # Guard: ensure certs were actually written for the primary custom domain
+            try:
+                primary_live_dir = os.path.join("/etc/letsencrypt/live", domain_val)
+                fullchain_path = os.path.join(primary_live_dir, "fullchain.pem")
+                privkey_path = os.path.join(primary_live_dir, "privkey.pem")
+                if not (os.path.exists(fullchain_path) and os.path.exists(privkey_path)):
+                    raise HTTPException(status_code=502, detail=(
+                        "Certificate files not found for custom domain. "
+                        f"Expected: {fullchain_path}.\n"
+                        f"Domains requested: {domains}.\n"
+                        f"Certbot output (tail): {(res.stdout or '')[-1000:]}"
+                    ))
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Post-issue check failed: {e}")
             if shutil.which(NGINX_BIN) and os.path.isdir(NGINX_SITES_AVAILABLE) and os.path.isdir(NGINX_SITES_ENABLED):
                 site_path = os.path.join(NGINX_SITES_AVAILABLE, f"{domain_val}.conf")
                 tls_conf = _nginx_conf_tls_multi(domains)
@@ -3559,8 +3575,8 @@ async def issue_cert(form_id: str, payload: Dict = None):
             except Exception:
                 ssl_ok = False
 
-            # Capture cert status
-            cert_status = _cert_status_for_domain(domains[0]) if domains else {"exists": False}
+            # Capture cert status (explicitly use the primary custom domain)
+            cert_status = _cert_status_for_domain(domain_val)
 
             data["sslVerified"] = bool(ssl_ok)
             data["updatedAt"] = datetime.utcnow().isoformat()

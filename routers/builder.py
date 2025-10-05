@@ -674,6 +674,8 @@ EMAIL_FOR_LE = os.getenv("LETSENCRYPT_EMAIL") or os.getenv("LE_EMAIL") or "admin
 CERTBOT_CONFIG_DIR = os.getenv("CERTBOT_CONFIG_DIR") or os.path.join(os.getcwd(), "data", "letsencrypt", "config")
 CERTBOT_WORK_DIR   = os.getenv("CERTBOT_WORK_DIR")   or os.path.join(os.getcwd(), "data", "letsencrypt", "work")
 CERTBOT_LOGS_DIR   = os.getenv("CERTBOT_LOGS_DIR")   or os.path.join(os.getcwd(), "data", "letsencrypt", "logs")
+# Base directory where live certs are written
+CERT_LIVE_BASE     = os.path.join(CERTBOT_CONFIG_DIR, "live")
 # Ensure directories exist
 os.makedirs(CERTBOT_CONFIG_DIR, exist_ok=True)
 os.makedirs(CERTBOT_WORK_DIR, exist_ok=True)
@@ -719,7 +721,7 @@ server {{
 def _nginx_conf_tls_multi(domains: List[str]) -> str:
     primary = domains[0]
     names = " ".join(domains)
-    cert_base = f"/etc/letsencrypt/live/{primary}"
+    cert_base = os.path.join(CERT_LIVE_BASE, primary)
     form_redirect = ""
     if FRONTEND_URL:
         # Absolute redirect for SPA /form/* paths directly from Nginx to avoid proxy loops
@@ -770,7 +772,7 @@ server {{
 """.strip()
 
 def _nginx_conf_tls(domain: str) -> str:
-    cert_base = f"/etc/letsencrypt/live/{domain}"
+    cert_base = os.path.join(CERT_LIVE_BASE, domain)
     form_redirect = ""
     if FRONTEND_URL:
         form_redirect = f"""
@@ -882,7 +884,7 @@ def _cert_status_for_domain(primary_domain: str) -> Dict[str, Any]:
     """Return certificate status for a domain from /etc/letsencrypt/live/<domain>/cert.pem.
     Uses openssl via _shell to extract subject, issuer, dates, and SANs.
     """
-    live_dir = f"/etc/letsencrypt/live/{primary_domain}"
+    live_dir = os.path.join(CERT_LIVE_BASE, primary_domain)
     cert_path = os.path.join(live_dir, "cert.pem")
     if not os.path.exists(cert_path):
         return {"exists": False, "domain": primary_domain}
@@ -3468,7 +3470,10 @@ async def issue_cert(form_id: str, payload: Dict = None):
     if not data.get("customDomainVerified"):
         raise HTTPException(status_code=400, detail="Domain not verified yet")
 
-    certbot = CERTBOT_BIN
+    # Resolve certbot executable. Guard against CERTBOT_BIN including extra tokens like 'certbot renew'
+    _bin_tokens = str(CERTBOT_BIN or "certbot").strip().split()
+    _bin = _bin_tokens[0] if _bin_tokens else "certbot"
+    certbot = shutil.which(_bin) or _bin
     logs: list[str] = []
     try:
         if certbot and shutil.which(certbot):
@@ -3519,6 +3524,7 @@ async def issue_cert(form_id: str, payload: Dict = None):
                     f"--email {EMAIL_FOR_LE} "
                     f"--dns-cloudflare --dns-cloudflare-credentials {CERTBOT_DNS_CREDENTIALS} "
                     f"--dns-cloudflare-propagation-seconds 60 "
+                    f"--cert-name {domain_val} "
                     f"{dom_flags}" + dir_flags
                 )
             else:
@@ -3528,6 +3534,7 @@ async def issue_cert(form_id: str, payload: Dict = None):
                     f"{certbot} certonly --webroot -w {ACME_WEBROOT} "
                     f"--agree-tos --no-eff-email -n "
                     f"--email {EMAIL_FOR_LE} "
+                    f"--cert-name {domain_val} "
                     f"{dom_flags}" + dir_flags
                 )
 

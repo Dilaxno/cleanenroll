@@ -20,6 +20,12 @@ from botocore.client import Config as BotoConfig
 import socket
 import threading
 import time
+# Email integrations: encryption and sending
+from cryptography.fernet import Fernet
+import base64
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 try:
     import dns.resolver  # type: ignore
     _DNS_AVAILABLE = True
@@ -1403,6 +1409,471 @@ async def get_monthly_usage(userId: str = Query(...)):
 
 # Groq API key for AI Copilot (server-side only)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_TOKEN") or ""
+
+# Email integrations configuration (OAuth + SMTP)
+FERNET_SECRET = os.getenv("FERNET_SECRET") or ""
+OAUTH_STATE_SECRET = os.getenv("OAUTH_STATE_SECRET") or (FERNET_SECRET or "cleanenroll-dev")
+
+# Google OAuth (Gmail API)
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID") or ""
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") or ""
+GOOGLE_OAUTH_REDIRECT_URL = os.getenv("GOOGLE_OAUTH_REDIRECT_URL") or ""
+GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+
+# Microsoft OAuth (Outlook/Office 365 via Microsoft Graph)
+MS_OAUTH_CLIENT_ID = os.getenv("MS_OAUTH_CLIENT_ID") or ""
+MS_OAUTH_CLIENT_SECRET = os.getenv("MS_OAUTH_CLIENT_SECRET") or ""
+MS_OAUTH_REDIRECT_URL = os.getenv("MS_OAUTH_REDIRECT_URL") or ""
+MS_OAUTH_SCOPE = "offline_access Mail.Send"
+
+# Cached Fernet instance
+_FERNET_INSTANCE = None
+
+def _get_fernet() -> Fernet:
+    global _FERNET_INSTANCE
+    if _FERNET_INSTANCE is not None:
+        return _FERNET_INSTANCE
+    key = (FERNET_SECRET or "").strip()
+    if key:
+        try:
+            # Accept raw 32-byte key or base64 urlsafe-encoded
+            kbytes = key.encode("utf-8")
+            # If not base64-like, assume it's already a valid key
+            if b"=" not in kbytes and len(kbytes) == 44:
+                pass
+            else:
+                # Attempt to b64 decode and re-encode to proper format
+                try:
+                    _ = base64.urlsafe_b64decode(kbytes)
+                except Exception:
+                    pass
+            _FERNET_INSTANCE = Fernet(kbytes)
+            return _FERNET_INSTANCE
+        except Exception:
+            pass
+    # Fallback: load or generate a persistent key on disk
+    try:
+        path = os.path.join(os.getcwd(), "data", "fernet.key")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                k = f.read().strip()
+        else:
+            k = Fernet.generate_key()
+            with open(path, "wb") as f:
+                f.write(k)
+        _FERNET_INSTANCE = Fernet(k)
+        return _FERNET_INSTANCE
+    except Exception:
+        # As a last resort, generate an ephemeral key (non-persistent)
+        _FERNET_INSTANCE = Fernet(Fernet.generate_key())
+        return _FERNET_INSTANCE
+
+
+def _enc_secret(plain: str) -> str:
+    try:
+        if plain is None:
+            return ""
+        f = _get_fernet()
+        return f.encrypt(str(plain).encode("utf-8")).decode("utf-8")
+    except Exception:
+        return plain
+
+
+def _dec_secret(token: str) -> str:
+    try:
+        if not token:
+            return ""
+        f = _get_fernet()
+        return f.decrypt(token.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return token
+
+# OAuth state utilities
+try:
+    from itsdangerous import URLSafeSerializer  # type: ignore
+except Exception:
+    URLSafeSerializer = None  # type: ignore
+
+
+def _make_oauth_state(uid: str, provider: str) -> str:
+    try:
+        if not URLSafeSerializer:
+            return f"{uid}:{provider}:{int(time.time())}"
+        ser = URLSafeSerializer(OAUTH_STATE_SECRET, salt="email-oauth-state")
+        return ser.dumps({"uid": uid, "p": provider, "t": int(time.time())})
+    except Exception:
+        return f"{uid}:{provider}:{int(time.time())}"
+
+
+def _read_oauth_state(state: str) -> Dict[str, Any]:
+    try:
+        if not URLSafeSerializer:
+            try:
+                parts = (state or "").split(":", 2)
+                return {"uid": parts[0], "p": parts[1] if len(parts) > 1 else "", "t": int(parts[2]) if len(parts) > 2 else 0}
+            except Exception:
+                return {"uid": "", "p": "", "t": 0}
+        ser = URLSafeSerializer(OAUTH_STATE_SECRET, salt="email-oauth-state")
+        return ser.loads(state)
+    except Exception:
+        return {"uid": "", "p": "", "t": 0}
+
+# Integration storage helpers (Firestore preferred; Supabase optional)
+
+def _store_email_integration(uid: str, patch: Dict[str, Any]) -> None:
+    # Try Supabase when configured
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+        try:
+            # Fetch existing
+            rows = _sb_get("email_integrations", {"select": "*", "uid": f"eq.{uid}", "limit": "1"})
+            row = rows[0] if rows else {"uid": uid}
+            row.update(patch or {})
+            _sb_upsert("email_integrations", row, on_conflict="uid")
+            return
+        except Exception:
+            # Fallback to Firestore
+            pass
+    # Firestore fallback
+    if not _FS_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Firestore not available on server")
+    try:
+        doc = _fs.client().collection("email_integrations").document(uid)
+        doc.set(patch or {}, merge=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to store integration: {e}")
+
+
+def _get_email_integration(uid: str) -> Dict[str, Any]:
+    # Supabase preferred
+    if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+        try:
+            rows = _sb_get("email_integrations", {"select": "*", "uid": f"eq.{uid}", "limit": "1"})
+            if rows:
+                return rows[0] or {}
+        except Exception:
+            pass
+    # Firestore
+    if not _FS_AVAILABLE:
+        return {}
+    try:
+        snap = _fs.client().collection("email_integrations").document(uid).get()
+        return snap.to_dict() or {}
+    except Exception:
+        return {}
+
+# Access token refreshers
+
+def _google_refresh_access_token(refresh_token: str) -> str:
+    if not (GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET):
+        raise HTTPException(status_code=500, detail="Google OAuth not configured")
+    try:
+        data = {
+            "client_id": GOOGLE_OAUTH_CLIENT_ID,
+            "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+        r = requests.post("https://oauth2.googleapis.com/token", data=data, timeout=15)
+        if not r.ok:
+            raise HTTPException(status_code=502, detail=f"Google token refresh failed: {r.text[:200]}")
+        return (r.json() or {}).get("access_token") or ""
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Google token error: {e}")
+
+
+def _ms_refresh_access_token(refresh_token: str) -> str:
+    if not (MS_OAUTH_CLIENT_ID and MS_OAUTH_CLIENT_SECRET):
+        raise HTTPException(status_code=500, detail="Microsoft OAuth not configured")
+    try:
+        data = {
+            "client_id": MS_OAUTH_CLIENT_ID,
+            "scope": MS_OAUTH_SCOPE,
+            "refresh_token": refresh_token,
+            "redirect_uri": MS_OAUTH_REDIRECT_URL,
+            "grant_type": "refresh_token",
+            "client_secret": MS_OAUTH_CLIENT_SECRET,
+        }
+        r = requests.post("https://login.microsoftonline.com/common/oauth2/v2.0/token", data=data, timeout=15)
+        if not r.ok:
+            raise HTTPException(status_code=502, detail=f"Microsoft token refresh failed: {r.text[:200]}")
+        return (r.json() or {}).get("access_token") or ""
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Microsoft token error: {e}")
+
+# Senders
+
+def _send_via_gmail(access_token: str, from_email: str, to_email: str, subject: str, html: str) -> None:
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["To"] = to_email
+        msg["From"] = from_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(html, "html", "utf-8"))
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        body = {"raw": raw}
+        r = requests.post(url, headers=headers, json=body, timeout=15)
+        if not r.ok:
+            raise HTTPException(status_code=502, detail=f"Gmail send failed: {r.text[:200]}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gmail send error: {e}")
+
+
+def _send_via_ms_graph(access_token: str, to_email: str, subject: str, html: str) -> None:
+    try:
+        url = "https://graph.microsoft.com/v1.0/me/sendMail"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        body = {
+            "message": {
+                "subject": subject,
+                "body": {"contentType": "HTML", "content": html},
+                "toRecipients": [{"emailAddress": {"address": to_email}}],
+            },
+            "saveToSentItems": True,
+        }
+        r = requests.post(url, headers=headers, json=body, timeout=15)
+        if not r.ok:
+            raise HTTPException(status_code=502, detail=f"Outlook send failed: {r.text[:200]}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Outlook send error: {e}")
+
+
+def _send_via_smtp(host: str, port: int, username: str, password: str, to_email: str, subject: str, html: str, sender: str | None = None) -> None:
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["To"] = to_email
+        msg["From"] = sender or username
+        msg["Subject"] = subject
+        msg.attach(MIMEText(html, "html", "utf-8"))
+        if int(port) == 465:
+            server = smtplib.SMTP_SSL(host, int(port), timeout=15)
+        else:
+            server = smtplib.SMTP(host, int(port), timeout=15)
+            server.ehlo()
+            server.starttls()
+        with server as s:
+            s.login(username, password)
+            s.sendmail(msg["From"], [to_email], msg.as_string())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"SMTP send error: {e}")
+
+
+def _send_email_via_integration(uid: str, to_email: str, subject: str, html: str, from_email: Optional[str] = None) -> bool:
+    integ = _get_email_integration(uid)
+    if not integ:
+        return False
+    # Google first
+    try:
+        enc = (integ.get("google_refresh_token") or "").strip()
+        if enc:
+            rt = _dec_secret(enc)
+            at = _google_refresh_access_token(rt)
+            if not from_email:
+                # Best effort: use Firebase Auth user email
+                try:
+                    from firebase_admin import auth as _admin_auth  # type: ignore
+                    u = _admin_auth.get_user(uid)
+                    from_email = getattr(u, "email", None) or from_email
+                except Exception:
+                    pass
+            _send_via_gmail(at, from_email or (integ.get("from_email") or "no-reply@cleanenroll.com"), to_email, subject, html)
+            return True
+    except Exception:
+        pass
+    # Microsoft
+    try:
+        enc = (integ.get("ms_refresh_token") or "").strip()
+        if enc:
+            rt = _dec_secret(enc)
+            at = _ms_refresh_access_token(rt)
+            _send_via_ms_graph(at, to_email, subject, html)
+            return True
+    except Exception:
+        pass
+    # SMTP fallback
+    try:
+        smtp = integ.get("smtp") or {}
+        host = (smtp.get("host") or "").strip()
+        port = int(smtp.get("port") or 0)
+        user = (smtp.get("username") or "").strip()
+        encpw = (smtp.get("password") or "").strip()
+        if host and port and user and encpw:
+            pw = _dec_secret(encpw)
+            _send_via_smtp(host, port, user, pw, to_email, subject, html, sender=from_email or user)
+            return True
+    except Exception:
+        pass
+    return False
+
+# ─────────── OAuth routes ───────────
+
+@router.get("/email/oauth/google/url")
+async def email_google_oauth_url(request: Request):
+    uid = _verify_firebase_uid(request)
+    if not (GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_REDIRECT_URL):
+        raise HTTPException(status_code=500, detail="Google OAuth not configured on server")
+    state = _make_oauth_state(uid, "google")
+    params = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URL,
+        "response_type": "code",
+        "scope": GOOGLE_OAUTH_SCOPE,
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+        "state": state,
+    }
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+    return {"authUrl": url}
+
+
+@router.get("/email/oauth/google/callback")
+async def email_google_oauth_callback(code: Optional[str] = None, state: Optional[str] = None):
+    if not code or not state:
+        return Response(content="Missing code/state", media_type="text/plain", status_code=400)
+    meta = _read_oauth_state(state)
+    uid = (meta.get("uid") or "").strip()
+    if not uid:
+        return Response(content="Invalid state", media_type="text/plain", status_code=400)
+    if not (GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REDIRECT_URL):
+        return Response(content="Google OAuth not configured", media_type="text/plain", status_code=500)
+    # Exchange code
+    data = {
+        "code": code,
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URL,
+        "grant_type": "authorization_code",
+    }
+    r = requests.post("https://oauth2.googleapis.com/token", data=data, timeout=15)
+    if not r.ok:
+        return Response(content="Token exchange failed", media_type="text/plain", status_code=502)
+    tk = r.json() or {}
+    rt = (tk.get("refresh_token") or "").strip()
+    if not rt:
+        # If refresh token missing, user may have previously consented without prompt; ask to retry with prompt
+        return Response(content="No refresh token received. Please try again.", media_type="text/plain", status_code=400)
+    enc = _enc_secret(rt)
+    try:
+        _store_email_integration(uid, {"google_refresh_token": enc, "updated_at": datetime.utcnow().isoformat()})
+    except Exception:
+        return Response(content="Failed to store credentials", media_type="text/plain", status_code=500)
+    html = "<script>window.close && window.close();</script><p>Gmail connected. You can close this window.</p>"
+    return Response(content=html, media_type="text/html")
+
+
+@router.get("/email/oauth/microsoft/url")
+async def email_ms_oauth_url(request: Request):
+    uid = _verify_firebase_uid(request)
+    if not (MS_OAUTH_CLIENT_ID and MS_OAUTH_REDIRECT_URL):
+        raise HTTPException(status_code=500, detail="Microsoft OAuth not configured on server")
+    state = _make_oauth_state(uid, "microsoft")
+    params = {
+        "client_id": MS_OAUTH_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": MS_OAUTH_REDIRECT_URL,
+        "response_mode": "query",
+        "scope": MS_OAUTH_SCOPE,
+        "state": state,
+    }
+    url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?" + urllib.parse.urlencode(params)
+    return {"authUrl": url}
+
+
+@router.get("/email/oauth/microsoft/callback")
+async def email_ms_oauth_callback(code: Optional[str] = None, state: Optional[str] = None):
+    if not code or not state:
+        return Response(content="Missing code/state", media_type="text/plain", status_code=400)
+    meta = _read_oauth_state(state)
+    uid = (meta.get("uid") or "").strip()
+    if not uid:
+        return Response(content="Invalid state", media_type="text/plain", status_code=400)
+    if not (MS_OAUTH_CLIENT_ID and MS_OAUTH_CLIENT_SECRET and MS_OAUTH_REDIRECT_URL):
+        return Response(content="Microsoft OAuth not configured", media_type="text/plain", status_code=500)
+    data = {
+        "client_id": MS_OAUTH_CLIENT_ID,
+        "scope": MS_OAUTH_SCOPE,
+        "code": code,
+        "redirect_uri": MS_OAUTH_REDIRECT_URL,
+        "grant_type": "authorization_code",
+        "client_secret": MS_OAUTH_CLIENT_SECRET,
+    }
+    r = requests.post("https://login.microsoftonline.com/common/oauth2/v2.0/token", data=data, timeout=15)
+    if not r.ok:
+        return Response(content="Token exchange failed", media_type="text/plain", status_code=502)
+    tk = r.json() or {}
+    rt = (tk.get("refresh_token") or "").strip()
+    if not rt:
+        return Response(content="No refresh token received. Please try again.", media_type="text/plain", status_code=400)
+    enc = _enc_secret(rt)
+    try:
+        _store_email_integration(uid, {"ms_refresh_token": enc, "updated_at": datetime.utcnow().isoformat()})
+    except Exception:
+        return Response(content="Failed to store credentials", media_type="text/plain", status_code=500)
+    html = "<script>window.close && window.close();</script><p>Outlook connected. You can close this window.</p>"
+    return Response(content=html, media_type="text/html")
+
+
+@router.post("/email/smtp/save")
+async def email_smtp_save(request: Request, payload: Dict = None):
+    uid = _verify_firebase_uid(request)
+    body = payload or {}
+    host = (body.get("host") or "").strip()
+    try:
+        port = int(body.get("port") or 0)
+    except Exception:
+        port = 0
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    if not host or port not in (465, 587) or not username or not password:
+        raise HTTPException(status_code=400, detail="Provide host, port (465/587), username and password")
+    enc_pw = _enc_secret(password)
+    patch = {"smtp": {"host": host, "port": port, "username": username, "password": enc_pw}, "updated_at": datetime.utcnow().isoformat()}
+    _store_email_integration(uid, patch)
+    return {"success": True}
+
+
+@router.get("/email/integration/status")
+async def email_integration_status(request: Request):
+    uid = _verify_firebase_uid(request)
+    row = _get_email_integration(uid) or {}
+    return {
+        "google": bool(row.get("google_refresh_token")),
+        "microsoft": bool(row.get("ms_refresh_token")),
+        "smtp": bool((row.get("smtp") or {}).get("host")),
+    }
+
+
+@router.post("/email/send")
+async def email_send(request: Request, payload: Dict = None):
+    uid = _verify_firebase_uid(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    to = (payload.get("to") or "").strip()
+    subject = (payload.get("subject") or "").strip() or "(no subject)"
+    html = payload.get("html") or payload.get("content_html") or payload.get("body") or ""
+    from_email = (payload.get("fromEmail") or payload.get("from") or "").strip() or None
+    if not to or not html:
+        raise HTTPException(status_code=400, detail="Missing 'to' or 'html'")
+    used = _send_email_via_integration(uid, to, subject, html, from_email=from_email)
+    if not used:
+        # Fallback to default provider
+        try:
+            html_wrapped = render_email("base.html", {"subject": subject, "title": subject, "intro": "", "content_html": html})
+            send_email_html(to, subject, html_wrapped)
+        except Exception:
+            raise HTTPException(status_code=500, detail="No email integration configured and default provider failed")
+    return {"success": True}
 
 @router.get("/brand/colors")
 @limiter.limit("20/minute")

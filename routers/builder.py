@@ -2251,7 +2251,46 @@ async def get_form(form_id: str):
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
-    return _read_json(path)
+    data = _read_json(path)
+    # Normalize background image, custom font, and media field URLs to permanent public R2 URLs
+    try:
+        theme = data.get("theme") or {}
+        raw_bg = theme.get("pageBackgroundImage")
+        if raw_bg:
+            theme["pageBackgroundImage"] = _normalize_bg_public_url(raw_bg)
+        try:
+            raw_font = theme.get("customFontUrl")
+            if raw_font:
+                theme["customFontUrl"] = _normalize_bg_public_url(raw_font)
+        except Exception:
+            pass
+        data["theme"] = theme
+    except Exception:
+        pass
+
+    try:
+        fields = data.get("fields") or []
+        for f in fields:
+            try:
+                ftype = str((f.get("type") or "")).strip().lower()
+            except Exception:
+                ftype = ""
+            if ftype in ("image", "video", "audio"):
+                try:
+                    if f.get("mediaUrl"):
+                        f["mediaUrl"] = _normalize_bg_public_url(f.get("mediaUrl"))
+                except Exception:
+                    pass
+                try:
+                    if f.get("poster"):
+                        f["poster"] = _normalize_bg_public_url(f.get("poster"))
+                except Exception:
+                    pass
+        data["fields"] = fields
+    except Exception:
+        pass
+
+    return data
 
 
 @router.put("/forms/{form_id}")

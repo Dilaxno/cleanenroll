@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Literal, Any
@@ -3467,6 +3467,17 @@ async def get_cert_status(form_id: str):
 # ─────────────────────────────
 # ADMIN (Optional – kept for compatibility)
 # ─────────────────────────────
+@router.get("/allow-domain")
+async def allow_domain(domain: str):
+    # Check your form store for verified domains
+    for name in os.listdir(BACKING_DIR):
+        if not name.endswith(".json"):
+            continue
+        data = _read_json(os.path.join(BACKING_DIR, name))
+        if _normalize_domain(data.get("customDomain")) == domain and data.get("customDomainVerified"):
+            return Response(status_code=200)
+    return Response(status_code=403)
+
 @router.post("/admin/certificates/renew-now")
 async def renew_now():
     """No-op: Caddy handles renewals automatically."""

@@ -1346,216 +1346,70 @@ async def root(request: Request):
 
 @router.get("/embed/{form_id}", response_class=HTMLResponse)
 async def embed_page(form_id: str):
-    # Simple embed page that fetches the config and renders it
+    # Wrapper page that embeds the full-featured frontend SPA FormViewPage.
+    # This guarantees feature and customization parity with the direct form view.
+    # FRONTEND_URL should point to the main app host (e.g., https://cleanenroll.com).
+    frontend_url = os.getenv("FRONTEND_URL", "https://cleanenroll.com").rstrip("/")
     html = """<!doctype html>
 <html lang=\"en\">
 <head>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <meta http-equiv=\"x-ua-compatible\" content=\"ie=edge\" />
   <title>CleanEnroll - Embedded Form</title>
   <style>
-    :root { --border: #e5e7eb; --muted: #6b7280; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: transparent; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
-    .form { width: 100%; max-width: 720px; }
-    .card { background: var(--form-bg, #ffffff); color: var(--form-text, #111827); border-radius: 16px; border: 1px solid var(--border); }
-    .header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
-    .header h1 { margin: 0 0 6px; font-size: 22px; }
-    .header p { margin: 0; color: var(--muted); }
-    .body { padding: 20px 24px; }
-    .field { margin-bottom: 14px; }
-    .field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
-    input[type=text], input[type=number], input[type=date], select, textarea {
-      width: 100%; padding: 12px; background: var(--input-bg, #fff); color: var(--input-text, #111827);
-      border-color: var(--input-border, #d1d5db);
-      border-top-width: var(--input-border-top-width, 1px);
-      border-right-width: var(--input-border-right-width, 1px);
-      border-bottom-width: var(--input-border-bottom-width, 1px);
-      border-left-width: var(--input-border-left-width, 1px);
-      border-top-style: var(--input-border-top-style, solid);
-      border-right-style: var(--input-border-right-style, solid);
-      border-bottom-style: var(--input-border-bottom-style, solid);
-      border-left-style: var(--input-border-left-style, solid);
-      border-radius: var(--radius, 8px);
-      outline: none; transition: box-shadow .15s ease, border-color .15s ease;
-    }
-    input[type=text]:focus, input[type=number]:focus, input[type=date]:focus, select:focus, textarea:focus {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 4px color-mix(in oklab, var(--primary) 20%, transparent);
-    }
-    .actions { padding: 16px 24px 24px; }
-    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 10px; border: 1px solid transparent; background: var(--primary, #4f46e5); color: #fff; cursor: pointer; }
+    html, body { height: 100%; }
+    body { margin: 0; background: transparent; }
+    .frame-wrap { position: relative; width: 100%; min-height: 700px; }
+    iframe { width: 100%; height: 100%; border: 0; display: block; background: transparent; }
   </style>
+  <script>
+    // Proxy the host page's query string to the inner SPA so UTM params and customization flags flow through.
+    (function(){
+      try {
+        var FORM_ID = "__FORM_ID__";
+        var FRONTEND = "__FRONTEND__";
+        var qs = window.location.search || "";
+        var src = FRONTEND + "/form/" + encodeURIComponent(FORM_ID) + qs;
+        window.__ce_embed_src = src;
+      } catch (e) {
+        // fallback without params
+        window.__ce_embed_src = "/form/" + encodeURIComponent("__FORM_ID__");
+      }
+    })();
+  </script>
+  <noscript>To view this form, please enable JavaScript.</noscript>
+  <meta name=\"referrer\" content=\"no-referrer-when-downgrade\" />
 </head>
 <body>
-  <div class=\"form\">
-    <div id=\"card\" class=\"card\">
-      <div class=\"header\">
-        <h1 id=\"title\"></h1>
-        <p id=\"subtitle\"></p>
-      </div>
-      <div id=\"body\" class=\"body\"></div>
-      <div class=\"actions\"><button class=\"btn\" type=\"button\">Submit</button></div>
-    </div>
+  <div class=\"frame-wrap\">
+    <iframe id=\"ce_form_iframe\" src=\"about:blank\" loading=\"lazy\" referrerpolicy=\"no-referrer-when-downgrade\"></iframe>
   </div>
-<script>
-(function(){
-  const FORM_ID = "__FORM_ID__";
-
-  function escapeHtml(str){
-    return String(str).replace(/[&<>\"]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[s]));
-  }
-
-  function renderField(f){
-    const req = f.required ? ' <span style=\"color:var(--muted);font-size:12px\">(required)</span>' : '';
-    const labelHtml = `<label>${escapeHtml(f.label||'Untitled')}${req}</label>`;
-    const ph = f.placeholder ? ` placeholder=\"${escapeHtml(f.placeholder)}\"` : '';
-    if (f.type === 'text') { return `<div class=\"field\">${labelHtml}<input type=\"text\"${ph} /></div>`; }
-    if (f.type === 'number') { return `<div class=\"field\">${labelHtml}<input type=\"number\"${ph} /></div>`; }
-    if (f.type === 'checkbox') { return `<div class=\"field\"><label><input type=\"checkbox\" /> ${escapeHtml(f.label||'Checkbox')}</label></div>`; }
-    if (f.type === 'dropdown') {
-      const opts = (f.options||[]).map(o => `<option>${escapeHtml(o)}</option>`).join('');
-      return `<div class=\"field\">${labelHtml}<select>${opts}</select></div>`; }
-    if (f.type === 'date') { return `<div class=\"field\">${labelHtml}<input type=\"date\" /></div>`; }
-    if (f.type === 'location') {
-      const id = 'loc_' + Math.random().toString(36).slice(2,8);
-      return `<div class=\"field\">${labelHtml}
-        <div style=\"display:flex; gap:8px;\">
-          <input id=\"${id}\" type=\"text\" readonly placeholder=\"Latitude,Longitude\" />
-          <button class=\"btn\" type=\"button\" onclick=\"(function(){navigator.geolocation && navigator.geolocation.getCurrentPosition(function(p){document.getElementById('${id}').value=p.coords.latitude.toFixed(6)+','+p.coords.longitude.toFixed(6);});})()\">Use my location</button>
-        </div>
-      </div>`;
-    }
-    if (f.type === 'textarea') { return `<div class=\"field\">${labelHtml}<textarea rows=\"4\"${ph}></textarea></div>`; }
-    if (f.type === 'url') { return `<div class=\"field\">${labelHtml}<input type=\"url\"${ph} /></div>`; }
-    return `<div class=\"field\">${labelHtml}<input type=\"text\"${ph} /></div>`;
-  }
-
-  async function init(){
-    try {
-      const base = window.location.origin;
-      const res = await fetch(base + '/api/builder/forms/' + FORM_ID);
-      if (!res.ok) throw new Error('Not found');
-      const cfg = await res.json();
-
-      // Theme
-      const t = cfg.theme || {};
-      const card = document.getElementById('card');
-      card.style.setProperty('--form-bg', t.backgroundColor || '#ffffff');
-      card.style.setProperty('--form-text', t.textColor || '#111827');
-      card.style.setProperty('--input-bg', t.inputBgColor || '#ffffff');
-      card.style.setProperty('--input-text', t.inputTextColor || '#111827');
-      card.style.setProperty('--input-border', t.inputBorderColor || '#d1d5db');
-      card.style.setProperty('--radius', (t.inputBorderRadius||8) + 'px');
-      card.style.setProperty('--primary', t.primaryColor || '#4f46e5');
-      // Border per-side customization (width/style/side)
-      (function(){
-        var width = parseInt((t.inputBorderWidth ?? 1), 10); if (isNaN(width) || width < 0) width = 0;
-        var style = (String(t.inputBorderStyle || 'solid')).toLowerCase();
-        var side = (String(t.inputBorderSide || 'all')).toLowerCase();
-        var sides = { top: {w:'0px', s:'none'}, right: {w:'0px', s:'none'}, bottom: {w:'0px', s:'none'}, left: {w:'0px', s:'none'} };
-        if (side === 'all') {
-          sides.top = sides.right = sides.bottom = sides.left = { w: width + 'px', s: style };
-        } else if (sides.hasOwnProperty(side)) {
-          sides[side] = { w: width + 'px', s: style };
-        }
-        card.style.setProperty('--input-border-top-width', sides.top.w);
-        card.style.setProperty('--input-border-right-width', sides.right.w);
-        card.style.setProperty('--input-border-bottom-width', sides.bottom.w);
-        card.style.setProperty('--input-border-left-width', sides.left.w);
-        card.style.setProperty('--input-border-top-style', sides.top.s);
-        card.style.setProperty('--input-border-right-style', sides.right.s);
-        card.style.setProperty('--input-border-bottom-style', sides.bottom.s);
-        card.style.setProperty('--input-border-left-style', sides.left.s);
-      })();
-
-      document.getElementById('title').textContent = cfg.title || '';
-      const sub = document.getElementById('subtitle');
-      sub.textContent = cfg.subtitle || '';
-      sub.style.display = cfg.subtitle ? 'block' : 'none';
-
-      const body = document.getElementById('body');
-      const fields = (cfg.fields||[]).map(renderField).join('');
-      body.innerHTML = fields;
-
-      // Branding logo and Powered by CleanEnroll
-      function _normalizeR2(u){ try{ if(!u) return u; var url=new URL(u, window.location.origin); var host=url.hostname||''; var path=url.pathname||''; if(host.indexOf('.r2.cloudflarestorage.com')!==-1){ return 'https://pub-e30045e3902945f4ada02414d0573c3b.r2.dev'+path; } url.search=''; url.hash=''; return url.toString(); } catch(e){ return u; } }
+  <script>
+    (function(){
       try {
-        var formRoot = document.querySelector('.form');
-        var cardEl = document.getElementById('card');
-        var b = cfg.branding || {};
-        if (b.logo && formRoot && cardEl) {
-          var size = (b.logoSize||'medium');
-          var h = (size==='small')?32:(size==='large')?64:48;
-          var img = document.createElement('img');
-          img.src = _normalizeR2(b.logo);
-          img.alt = 'Logo';
-          img.style.height = h + 'px';
-          img.style.maxWidth = '100%';
-          var wrap = document.createElement('div');
-          wrap.style.textAlign = 'center';
-          wrap.style.margin = (b.logoPosition==='bottom') ? '8px 0 0 0' : '0 0 8px 0';
-          wrap.appendChild(img);
-          if ((b.logoPosition||'top') === 'top') {
-            formRoot.insertBefore(wrap, cardEl);
-          } else {
-            cardEl.insertAdjacentElement('afterend', wrap);
-          }
+        var fr = document.getElementById('ce_form_iframe');
+        fr.src = window.__ce_embed_src || fr.src;
+      } catch (e) {}
+
+      // Optional auto-resize if same-origin (custom domain pointing to FRONTEND_URL). Cross-origin is ignored by browser.
+      try {
+        var sameOrigin = false;
+        try { sameOrigin = !!(new URL(fr.src, window.location.href).origin === window.location.origin); } catch(_) {}
+        if (sameOrigin && 'ResizeObserver' in window) {
+          var ro = new ResizeObserver(function(){
+            try { fr.style.height = fr.contentWindow.document.documentElement.scrollHeight + 'px'; } catch(_) {}
+          });
+          var kick = function(){ try { ro.observe(fr.contentWindow.document.documentElement); } catch(_) {} };
+          fr.addEventListener('load', kick, { once: true });
         }
-        // Powered by CleanEnroll
-        var sp = cfg.showPoweredBy;
-        var show = !(sp === false || String(sp).toLowerCase() === 'false' || sp === 0 || String(sp) === '0');
-        if (show && formRoot) {
-          function _isDarkColor(s){ try{ var str=String(s||'').trim(); var r=255,g=255,b=255; var m=str.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i); if(m){ var h=m[1]; if(h.length===3){ r=parseInt(h[0]+h[0],16); g=parseInt(h[1]+h[1],16); b=parseInt(h[2]+h[2],16);} else { r=parseInt(h.slice(0,2),16); g=parseInt(h.slice(2,4),16); b=parseInt(h.slice(4,6),16);} } else { var m2=str.match(/^rgb\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)/i); if(m2){ r=Math.min(255,parseInt(m2[1],10)); g=Math.min(255,parseInt(m2[2],10)); b=Math.min(255,parseInt(m2[3],10)); } } var bright=(r*299+g*587+b*114)/1000; return bright<128; } catch(e){ return false; } }
-          var pageBg = (cfg.theme && (cfg.theme.pageBackgroundColor || cfg.theme.backgroundColor)) || '#ffffff';
-          var dark = _isDarkColor(pageBg);
-          var pWrap = document.createElement('div');
-          pWrap.style.textAlign = 'center';
-          pWrap.style.marginTop = '12px';
-          var a = document.createElement('a');
-          a.href = 'https://cleanenroll.com';
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
-          a.setAttribute('aria-label','Powered by CleanEnroll');
-          a.style.display = 'inline-flex';
-          a.style.alignItems = 'center';
-          a.style.gap = '6px';
-          a.style.fontSize = '12px';
-          a.style.color = '#6b7280';
-          var span = document.createElement('span');
-          span.textContent = 'Powered by';
-          var logo = document.createElement('img');
-          logo.alt = 'CleanEnroll';
-          logo.style.height = '24px';
-          logo.src = dark ? 'https://cleanenroll.com/Logo%20CleanEnroll.svg' : 'https://cleanenroll.com/Logo%20CleanEnroll%20black.svg';
-          a.appendChild(span);
-          a.appendChild(logo);
-          pWrap.appendChild(a);
-          formRoot.appendChild(pWrap);
-        }
-      } catch (_e) {}
-
-      // Submit button customization
-
-      // Submit button customization
-      const btnEl = document.querySelector('.actions .btn');
-      if (btnEl && cfg.submitButton) {
-        if (cfg.submitButton.label) btnEl.textContent = cfg.submitButton.label;
-        if (cfg.submitButton.color) btnEl.style.background = cfg.submitButton.color;
-        if (cfg.submitButton.textColor) btnEl.style.color = cfg.submitButton.textColor;
-      }
-    } catch (e) {
-      document.body.innerHTML = '<div style="padding:24px;font-family:sans-serif">Form not found</div>';
-    }
-  }
-
-  init();
-})();
-</script>
-</body>
-</html>
-"""
-    html = html.replace("__FORM_ID__", form_id)
+      } catch (_) {}
+    })();
+  </script>
+  </body>
+  </html>
+  """
+    html = html.replace("__FORM_ID__", form_id).replace("__FRONTEND__", frontend_url)
     return HTMLResponse(content=html)
 
 

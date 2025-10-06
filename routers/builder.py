@@ -3952,7 +3952,20 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     font_href = (cfg.get("theme") or {}).get("fontUrl") or None
                     font_family = (cfg.get("theme") or {}).get("fontFamily") or None
                     footer_html = (cfg.get("autoReplyFooterHtml") or "").strip() or None
-                    html = render_email("base.html", {"subject": subject, "title": subject, "content_html": content_html, "footer_html": footer_html, "font_href": font_href, "font_family": font_family})
+                    # Render user-facing client email with unbranded client template, not the app's internal base.html
+                    html = render_email("client_base.html", {
+                        "subject": subject,
+                        "title": subject,
+                        "preheader": None,
+                        "intro": None,
+                        "content_html": content_html,
+                        "footer_html": footer_html,
+                        "font_href": font_href,
+                        "font_family": font_family,
+                        # Optional brand pass-through from form branding
+                        "brand_logo": ((cfg.get("branding") or {}).get("logo") or None),
+                        "brand_name": (cfg.get("title") or "")
+                    })
                     try:
                         used = _send_email_via_integration(owner_id, to_email, subject, html)
                         # Respect requirement to send from connected email; skip fallback when not configured

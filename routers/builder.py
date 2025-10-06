@@ -2557,6 +2557,71 @@ async def presign_font(request: Request, payload: Dict = None):
         logger.exception("R2 font presign failed uid=%s", uid)
         raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
 
+# Profile photo upload (authenticated)
+@router.post("/uploads/profile-photo/presign")
+async def presign_profile_photo(request: Request, payload: Dict = None):
+    """
+    Generate a presigned PUT URL for uploading a user profile photo to Cloudflare R2.
+    Requires Firebase Authorization bearer token.
+    Body: { filename: string, contentType?: string, size?: number }
+    Returns: { uploadUrl, publicUrl, key, headers }
+    """
+    uid = _verify_firebase_uid(request)
+    body = payload or {}
+    raw_name = str(body.get("filename") or "avatar").strip() or "avatar"
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200]
+    content_type = str(body.get("contentType") or "image/jpeg").strip()
+    try:
+        size = int(body.get("size") or 0)
+    except Exception:
+        size = 0
+
+    if not content_type.lower().startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are allowed")
+
+    # Enforce plan-based size limits (same as other uploads)
+    is_pro = _is_pro_plan(uid)
+    limit = PRO_MAX_UPLOAD_BYTES if is_pro else FREE_MAX_UPLOAD_BYTES
+    if size and size > limit:
+        raise HTTPException(status_code=400, detail=f"File too large. Limit is {limit} bytes")
+
+    # Store under "Profile Pictures/<uid>/..."
+    ts = int(time.time())
+    key = f"Profile Pictures/{uid}/{ts}_{safe_name}"
+
+    try:
+        s3 = _r2_client()
+        params = {"Bucket": R2_BUCKET, "Key": key}
+        url = s3.generate_presigned_url(
+            ClientMethod="put_object",
+            Params={**params, "ContentType": content_type},
+            ExpiresIn=300,
+        )
+
+        # Public URL base: allow overriding via R2_PROFILE_PUBLIC_BASE, fallback to R2_PUBLIC_BASE
+        profile_base = (os.getenv("R2_PROFILE_PUBLIC_BASE") or os.getenv("R2_PROFILE_DOMAIN") or R2_PUBLIC_BASE or "").strip()
+        base = profile_base or R2_PUBLIC_BASE
+        try:
+            pr = urlparse(base if base.startswith("http") else ("https://" + base))
+            origin = f"{pr.scheme}://{pr.netloc}".rstrip("/")
+        except Exception:
+            origin = (base or "").rstrip("/")
+        # For r2.dev public domains, bucket is already bound; ensure URL encoding of key
+        if ".r2.dev" in origin:
+            public_url = f"{origin}/{urllib.parse.quote(key)}"
+        else:
+            public_url = f"{origin}/{key}"
+
+        return {
+            "uploadUrl": url,
+            "publicUrl": public_url,
+            "key": key,
+            "headers": {"Content-Type": content_type},
+        }
+    except Exception as e:
+        logger.exception("R2 profile-photo presign failed uid=%s", uid)
+        raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
+
 # Public presign for submission file uploads (no auth; rate-limited)
 @router.post("/uploads/submissions/presign")
 @limiter.limit("60/minute")

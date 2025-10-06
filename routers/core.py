@@ -716,6 +716,7 @@ async def link_custom_domain(req: LinkCustomDomainRequest):
     return {
         "status": "pending",
         "domain": dom,
+        "token": token,
         "verify": {
             "type": "DNS-TXT",
             "name": dom,

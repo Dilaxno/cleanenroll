@@ -566,6 +566,8 @@ class FormConfig(BaseModel):
     autoReplyEmailFieldId: Optional[str] = None
     autoReplySubject: Optional[str] = None
     autoReplyMessageHtml: Optional[str] = None
+    # Optional custom footer HTML for auto-reply emails
+    autoReplyFooterHtml: Optional[str] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
@@ -3841,7 +3843,11 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         return out
                     subject = _apply_tokens(subject_tpl)
                     content_html = _apply_tokens(body_tpl)
-                    html = render_email("base.html", {"subject": subject, "title": subject, "content_html": content_html})
+                    # Include optional footer and Google Font
+                    font_href = (cfg.get("theme") or {}).get("fontUrl") or None
+                    font_family = (cfg.get("theme") or {}).get("fontFamily") or None
+                    footer_html = (cfg.get("autoReplyFooterHtml") or "").strip() or None
+                    html = render_email("base.html", {"subject": subject, "title": subject, "content_html": content_html, "footer_html": footer_html, "font_href": font_href, "font_family": font_family})
                     try:
                         used = _send_email_via_integration(owner_id, to_email, subject, html)
                         # Respect requirement to send from connected email; skip fallback when not configured

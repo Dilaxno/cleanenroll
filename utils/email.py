@@ -141,6 +141,11 @@ def render_email(template_name: str, context: dict) -> str:
         safe_ctx["cta_url"] = sanitize_url(safe_ctx.get("cta_url"))
     if "content_html" in safe_ctx:
         safe_ctx["content_html"] = sanitize_html(safe_ctx.get("content_html"))
+    # Sanitize optional dynamic footer HTML and Google Fonts href
+    if "footer_html" in safe_ctx:
+        safe_ctx["footer_html"] = sanitize_html(safe_ctx.get("footer_html"))
+    if "font_href" in safe_ctx:
+        safe_ctx["font_href"] = sanitize_url(safe_ctx.get("font_href"))
     return template.render(**safe_ctx)
 
 

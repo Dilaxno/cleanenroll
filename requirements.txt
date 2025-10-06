@@ -1,5 +1,6 @@
 # Dependencies for the FastAPI form builder
 fastapi>=0.110.0
+python-multipart>=0.0.9
 uvicorn[standard]>=0.23.0
 pydantic>=2.0.0
 email-validator>=2.1.0.post1

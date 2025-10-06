@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Literal, Any
@@ -2621,6 +2621,48 @@ async def presign_profile_photo(request: Request, payload: Dict = None):
     except Exception as e:
         logger.exception("R2 profile-photo presign failed uid=%s", uid)
         raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
+
+@router.post("/uploads/profile-photo/upload")
+async def upload_profile_photo(request: Request, file: UploadFile = File(...)):
+    """
+    Server-side upload for profile photos to avoid CORS issues.
+    Requires Firebase Authorization bearer token.
+    Accepts multipart/form-data with field name 'file'.
+    Returns: { publicUrl, key }
+    """
+    uid = _verify_firebase_uid(request)
+    if not file:
+        raise HTTPException(status_code=400, detail="Missing file")
+    content_type = (file.content_type or "application/octet-stream").strip()
+    if not content_type.lower().startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are allowed")
+    data = await file.read()
+    is_pro = _is_pro_plan(uid)
+    limit = PRO_MAX_UPLOAD_BYTES if is_pro else FREE_MAX_UPLOAD_BYTES
+    if data and len(data) > limit:
+        raise HTTPException(status_code=400, detail=f"File too large. Limit is {limit} bytes")
+    raw_name = (file.filename or "avatar").strip()
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or "avatar"
+    key = f"Profile Pictures/{uid}/{int(time.time())}_{safe_name}"
+    try:
+        s3 = _r2_client()
+        s3.put_object(Bucket=R2_BUCKET, Key=key, Body=data, ContentType=content_type)
+        # Build public URL (support profile-specific base if defined)
+        profile_base = (os.getenv("R2_PROFILE_PUBLIC_BASE") or os.getenv("R2_PROFILE_DOMAIN") or R2_PUBLIC_BASE or "").strip()
+        base = profile_base or R2_PUBLIC_BASE
+        try:
+            pr = urlparse(base if base.startswith("http") else ("https://" + base))
+            origin = f"{pr.scheme}://{pr.netloc}".rstrip("/")
+        except Exception:
+            origin = (base or "").rstrip("/")
+        if ".r2.dev" in origin:
+            public_url = f"{origin}/{urllib.parse.quote(key)}"
+        else:
+            public_url = f"{origin}/{key}"
+        return {"publicUrl": public_url, "key": key}
+    except Exception as e:
+        logger.exception("R2 profile-photo upload failed uid=%s", uid)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
 # Public presign for submission file uploads (no auth; rate-limited)
 @router.post("/uploads/submissions/presign")

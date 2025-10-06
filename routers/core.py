@@ -1431,6 +1431,14 @@ async def embed_page(form_id: str):
       for p in parts:
         if p not in base_ancestors:
           base_ancestors.append(p)
+    # Allow all HTTPS parents when EMBED_ALLOW_ALL is truthy (e.g., "1", "true", "yes")
+    allow_all = os.getenv("EMBED_ALLOW_ALL", "")
+    try:
+      allow_all_flag = (str(allow_all).strip().lower() not in ("", "0", "false", "no"))
+    except Exception:
+      allow_all_flag = False
+    if allow_all_flag and "https:" not in base_ancestors:
+      base_ancestors.append("https:")
     csp = "frame-ancestors " + " ".join(base_ancestors)
     return HTMLResponse(content=html, headers={
         "Content-Security-Policy": csp

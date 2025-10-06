@@ -561,6 +561,11 @@ class FormConfig(BaseModel):
     customDomain: Optional[str] = None
     customDomainVerified: bool = False
     sslVerified: bool = False
+    # Auto-reply email to client after submission
+    autoReplyEnabled: bool = False
+    autoReplyEmailFieldId: Optional[str] = None
+    autoReplySubject: Optional[str] = None
+    autoReplyMessageHtml: Optional[str] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
@@ -3786,41 +3791,65 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     except Exception:
         pass
 
-    # Automated email notification (best-effort) using user's configured integration
+    # Auto-reply to client from connected email integration (if configured)
     try:
-        owner = str(form_data.get("userId") or "").strip() or None
-        if owner:
-            # Build simple summary
-            subj = f"New submission on {form_data.get('title') or form_id}"
-            html = f"<div><p>New submission received for <strong>{form_data.get('title') or form_id}</strong>.</p><p>Response ID: {resp.get('responseId')}</p></div>"
-            # Choose recipient: use SMTP username if configured, else owner's email when available
-            to_addr = None
-            integ = _get_email_integration(owner)
-            try:
-                sm = (integ.get("smtp") or {})
-                if sm.get("username"):
-                    to_addr = (sm.get("username") or "").strip()
-                elif sm.get("username_enc"):
-                    to_addr = _dec_secret(sm.get("username_enc"))
-            except Exception:
-                to_addr = None
-            if not to_addr:
+        owner_id = str(form_data.get("userId") or "").strip() or None
+        cfg = form_data or {}
+        if owner_id and bool(cfg.get("autoReplyEnabled")):
+            target_id = (cfg.get("autoReplyEmailFieldId") or "").strip()
+            if target_id and isinstance(payload, dict):
+                to_val = payload.get(target_id)
+                if isinstance(to_val, list) and to_val:
+                    to_email = str(to_val[0] or "").strip()
+                else:
+                    to_email = str(to_val or "").strip()
+                # Validate basic email syntax
                 try:
-                    from firebase_admin import auth as _admin_auth  # type: ignore
-                    u = _admin_auth.get_user(owner)
-                    to_addr = getattr(u, "email", None)
+                    if to_email:
+                        _validate_email(to_email, check_deliverability=False)
+                    else:
+                        to_email = ""
                 except Exception:
-                    to_addr = None
-            if to_addr:
-                try:
-                    used = _send_email_via_integration(owner, to_addr, subj, html)
-                    if not used:
-                        html_wrapped = render_email("base.html", {"subject": subj, "title": subj, "intro": "", "content_html": html})
-                        send_email_html(to_addr, subj, html_wrapped)
-                except Exception:
-                    logger.exception("auto email send failed form_id=%s", form_id)
+                    to_email = ""
+                if to_email:
+                    # Personalize subject/body with simple tokens
+                    subject_tpl = (cfg.get("autoReplySubject") or "Thank you for your submission").strip()
+                    body_tpl = (cfg.get("autoReplyMessageHtml") or "").strip()
+                    # Derive identity fields
+                    first_name = ""
+                    full_name = ""
+                    try:
+                        fields_def = cfg.get("fields") or []
+                        name_field = next((f for f in fields_def if (str(f.get("type")) == "full-name") or ("name" in str(f.get("label", "")).lower())), None)
+                        if name_field:
+                            full_name = str(payload.get(name_field.get("id")) or "").strip()
+                            if full_name:
+                                parts = full_name.split()
+                                first_name = parts[0] if parts else ""
+                    except Exception:
+                        pass
+                    tokens = {
+                        "@first_name": first_name,
+                        "@full_name": full_name,
+                        "@email": to_email,
+                        "@form_title": str(cfg.get("title") or "Form"),
+                    }
+                    def _apply_tokens(s: str) -> str:
+                        out = s or ""
+                        for k, v in tokens.items():
+                            out = out.replace(k, v or "")
+                        return out
+                    subject = _apply_tokens(subject_tpl)
+                    content_html = _apply_tokens(body_tpl)
+                    html = render_email("base.html", {"subject": subject, "title": subject, "content_html": content_html})
+                    try:
+                        used = _send_email_via_integration(owner_id, to_email, subject, html)
+                        # Respect requirement to send from connected email; skip fallback when not configured
+                        _ = used  # no-op
+                    except Exception:
+                        pass
     except Exception:
-        logger.exception("auto email notification failed form_id=%s", form_id)
+        logger.exception("auto-reply send failed form_id=%s", form_id)
 
     logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp

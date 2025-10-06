@@ -3861,66 +3861,32 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 @router.post("/forms/{form_id}/custom-domain/verify")
 async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optional[str] = None):
     """
-    Verify custom domain by resolving its CNAME to our target (api.cleanenroll.com).
-    Prevent duplicates, mark as ready for Caddy's automatic TLS.
+    Verify that a user domain points to our SaaS target and mark it ready for Caddy on-demand TLS.
     """
     path = _form_path(form_id)
-    data: Dict = {}
-    if os.path.exists(path):
-        data = _read_json(path)
-    else:
-        inbound_domain = _normalize_domain(
-            domain
-            or ((payload or {}).get("customDomain") if isinstance(payload, dict) else None)
-            or ((payload or {}).get("domain") if isinstance(payload, dict) else None)
-        )
-        if not inbound_domain:
-            raise HTTPException(status_code=400, detail="Missing custom domain")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found. Save it first.")
 
-        # Do not create a new minimal form. Hydrate from Firestore when available
-        if _FS_AVAILABLE:
-            try:
-                snap = _fs.client().collection("forms").document(form_id).get()
-                fdata = snap.to_dict() or {}
-            except Exception:
-                fdata = {}
-            if not fdata:
-                # Require that the original form be saved first
-                raise HTTPException(status_code=404, detail="Form not found on server. Save the form first, then verify the domain.")
-            # Merge inbound custom domain onto hydrated data
-            fdata["id"] = form_id
-            fdata["customDomain"] = inbound_domain
-            fdata["customDomainVerified"] = False
-            fdata["sslVerified"] = False
-            if not fdata.get("createdAt"):
-                fdata["createdAt"] = datetime.utcnow().isoformat()
-            fdata["updatedAt"] = datetime.utcnow().isoformat()
-            _write_json(path, fdata)
-            data = fdata
-        else:
-            # No server record; refuse to create a duplicate placeholder
-            raise HTTPException(status_code=404, detail="Form not found on server. Save the form first, then verify the domain.")
+    data = _read_json(path)
 
-    domain_val = _normalize_domain(
-        data.get("customDomain")
-        or domain
-        or ((payload or {}).get("customDomain") if isinstance(payload, dict) else None)
+    inbound_domain = _normalize_domain(
+        domain or (payload or {}).get("customDomain") or (payload or {}).get("domain")
     )
-    if not domain_val:
-        raise HTTPException(status_code=400, detail="No custom domain configured")
+    if not inbound_domain:
+        raise HTTPException(status_code=400, detail="Missing custom domain")
 
-    # ── Prevent duplicate domain use ──
+    # Prevent duplicates
     for name in os.listdir(BACKING_DIR):
         if not name.endswith(".json"):
             continue
         other = _read_json(os.path.join(BACKING_DIR, name))
-        if _normalize_domain(other.get("customDomain")) == domain_val and other.get("id") != form_id:
+        if _normalize_domain(other.get("customDomain")) == inbound_domain and other.get("id") != form_id:
             raise HTTPException(status_code=409, detail="This domain is already used by another form")
 
-    # ── DNS verification (CNAME or A record) ──
+    # DNS check
     cname_ok, apex_ok = False, False
     try:
-        answers = dns.resolver.resolve(domain_val + ".", "CNAME")
+        answers = dns.resolver.resolve(inbound_domain + ".", "CNAME")
         targets = [str(rdata.target).rstrip('.').lower() for rdata in answers]
         cname_ok = any(t == CUSTOM_DOMAIN_TARGET for t in targets)
     except Exception:
@@ -3939,31 +3905,30 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
                     except Exception:
                         pass
                 return found
-
-            apex_ok = bool(ips(domain_val) & ips(CUSTOM_DOMAIN_TARGET))
+            apex_ok = bool(ips(inbound_domain) & ips(CUSTOM_DOMAIN_TARGET))
         except Exception:
             apex_ok = False
 
     if not (cname_ok or apex_ok):
-        raise HTTPException(status_code=400, detail=f"Domain {domain_val} must point to {CUSTOM_DOMAIN_TARGET}")
+        raise HTTPException(status_code=400, detail=f"Domain {inbound_domain} must point to {CUSTOM_DOMAIN_TARGET}")
 
-    # ── Mark verified (Caddy will handle SSL) ──
+    # Mark verified
     data.update({
-        "customDomain": domain_val,
+        "customDomain": inbound_domain,
         "customDomainVerified": True,
-        "sslVerified": True,  # Will be handled automatically by Caddy
+        "sslVerified": True,  # Caddy handles SSL automatically
         "updatedAt": datetime.utcnow().isoformat(),
     })
     _write_json(path, data)
 
     return {
         "verified": True,
-        "domain": domain_val,
-        "target": CUSTOM_DOMAIN_TARGET,
+        "domain": inbound_domain,
         "sslVerified": True,
         "mode": "caddy",
         "message": "Domain verified and ready for Caddy automatic SSL."
     }
+
 
 
 # ─────────────────────────────
@@ -4023,7 +3988,10 @@ async def get_cert_status(form_id: str):
 # ─────────────────────────────
 @router.get("/allow-domain")
 async def allow_domain(domain: str):
-    # Check your form store for verified domains
+    """
+    Endpoint used by Caddy on-demand TLS.
+    Returns 200 if the domain is verified for SSL.
+    """
     for name in os.listdir(BACKING_DIR):
         if not name.endswith(".json"):
             continue
@@ -4031,6 +3999,7 @@ async def allow_domain(domain: str):
         if _normalize_domain(data.get("customDomain")) == domain and data.get("customDomainVerified"):
             return Response(status_code=200)
     return Response(status_code=403)
+
 
 @router.post("/admin/certificates/renew-now")
 async def renew_now():

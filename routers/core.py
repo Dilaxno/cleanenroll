@@ -684,6 +684,113 @@ async def sync_disposable_domains(strict: bool = True):
 
     return {"status": "ok", "count": count}
 
+# -----------------------------
+# Custom domains API (Caddy on-demand TLS integration)
+# -----------------------------
+from pydantic import BaseModel as _BaseModel
+
+class LinkCustomDomainRequest(_BaseModel):
+    formId: str
+    domain: str
+
+@router.post("/api/custom-domain/link")
+@router.post("/api/custom-domain/link/")
+async def link_custom_domain(req: LinkCustomDomainRequest):
+    dom = _normalize_domain(req.domain)
+    if not _is_valid_domain(dom):
+        raise HTTPException(status_code=400, detail="Invalid domain")
+    # Load form and persist pending custom domain with a verification token
+    try:
+        data = _load_form(req.formId)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Form not found")
+    token = data.get("customDomainToken") or uuid.uuid4().hex
+    data.update({
+        "customDomain": dom,
+        "customDomainVerified": False,
+        "customDomainToken": token,
+    })
+    with open(_form_path(req.formId), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    # Return DNS instructions for verification
+    return {
+        "status": "pending",
+        "domain": dom,
+        "verify": {
+            "type": "DNS-TXT",
+            "name": dom,
+            "value": f"ce-verify={token}",
+            "note": "Create a TXT record at your domain apex with this exact value, then run verify.",
+        }
+    }
+
+@router.get("/api/custom-domain/status")
+@router.get("/api/custom-domain/status/")
+async def custom_domain_status(formId: str):
+    try:
+        data = _load_form(formId)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Form not found")
+    return {
+        "domain": data.get("customDomain") or "",
+        "verified": bool(data.get("customDomainVerified")),
+        "token": data.get("customDomainToken") or "",
+    }
+
+class VerifyCustomDomainRequest(_BaseModel):
+    formId: str
+
+@router.post("/api/custom-domain/verify")
+@router.post("/api/custom-domain/verify/")
+async def verify_custom_domain(req: VerifyCustomDomainRequest):
+    try:
+        data = _load_form(req.formId)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Form not found")
+    dom = _normalize_domain(data.get("customDomain") or "")
+    if not _is_valid_domain(dom):
+        raise HTTPException(status_code=400, detail="No domain linked")
+    token = (data.get("customDomainToken") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="No verification token found")
+    # Check TXT records for ce-verify={token}
+    txts = _txt_lookup(dom)
+    ok = any((f"ce-verify={token}" in (t or "")) for t in txts)
+    if not ok:
+        # Try common subdomain record name e.g., _ce.<domain>
+        txts2 = _txt_lookup(f"_ce.{dom}")
+        ok = any((f"ce-verify={token}" in (t or "")) for t in txts2)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Verification TXT record not found")
+    # Mark verified
+    data["customDomainVerified"] = True
+    with open(_form_path(req.formId), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return {"status": "ok", "verified": True, "domain": dom}
+
+@router.get("/api/allow-domain")
+async def allow_domain(domain: str | None = None, request: Request = None):
+    """Endpoint for Caddy on_demand_tls ask. Returns 200 if domain is allowed.
+    Caddy calls: GET /api/allow-domain?domain=<requested-host>&remote_ip=<ip>
+    """
+    dom = _normalize_domain(domain or "")
+    if not _is_valid_domain(dom):
+        return PlainTextResponse("invalid", status_code=403)
+    try:
+        for name in os.listdir(DATA_DIR):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(DATA_DIR, name), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("customDomainVerified") and _normalize_domain(str(data.get("customDomain") or "")) == dom:
+                    return PlainTextResponse("ok", status_code=200)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return PlainTextResponse("denied", status_code=403)
+
 @router.get("/api/validate-email")
 @router.get("/api/validate-email/")
 @limiter.limit("30/minute")
@@ -909,6 +1016,61 @@ def _load_form(form_id: str) -> Dict:
         raise FileNotFoundError
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+# -----------------------------
+# Custom domains helpers
+# -----------------------------
+
+def _normalize_domain(dom: str) -> str:
+    try:
+        d = (dom or "").strip().lower().strip(".")
+        # Remove protocol and path if accidentally included
+        if d.startswith("http://"):
+            d = d[len("http://"):]
+        if d.startswith("https://"):
+            d = d[len("https://"):]
+        d = d.split("/", 1)[0]
+        return d
+    except Exception:
+        return (dom or "").strip().lower().strip(".")
+
+
+def _is_valid_domain(dom: str) -> bool:
+    d = _normalize_domain(dom)
+    if not d or "." not in d:
+        return False
+    # Basic safe pattern; allow letters, digits, hyphens and dots; 1-63 label length
+    import re
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+", d):
+        return False
+    return True
+
+
+def _txt_lookup(name: str) -> list[str]:
+    if not _DNSPY_AVAILABLE:
+        return []
+    try:
+        answers = _dns_resolver.resolve(name, "TXT", lifetime=2.5)  # type: ignore
+        vals: list[str] = []
+        for rdata in answers:  # type: ignore
+            try:
+                # dnspython returns list of strings/bytes per record
+                parts = []
+                for s in getattr(rdata, 'strings', []) or []:
+                    try:
+                        parts.append(s.decode('utf-8', errors='ignore'))
+                    except Exception:
+                        parts.append(str(s))
+                if hasattr(rdata, 'strings') and parts:
+                    vals.append("".join(parts))
+                else:
+                    txt = str(rdata.to_text().strip('"'))
+                    vals.append(txt)
+            except Exception:
+                continue
+        return vals
+    except Exception:
+        return []
 
 
 # -----------------------------

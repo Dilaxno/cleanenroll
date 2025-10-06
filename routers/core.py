@@ -1410,7 +1410,28 @@ async def embed_page(form_id: str):
   </html>
   """
     html = html.replace("__FORM_ID__", form_id).replace("__FRONTEND__", frontend_url)
-    csp = "frame-ancestors 'self' https://api.cleanenroll.com http://localhost:5173 http://127.0.0.1:5173"
+    # Build Content Security Policy dynamically so embeds can be allowed on configured parent sites
+    base_ancestors = [
+        "'self'",
+        "https://api.cleanenroll.com",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    # Include FRONTEND_URL origin explicitly (e.g., https://cleanenroll.com)
+    try:
+      fe = frontend_url
+      if fe and fe not in base_ancestors:
+        base_ancestors.append(fe)
+    except Exception:
+      pass
+    # Add extra allowed parents from environment: EMBED_ALLOWED_PARENTS or FRAME_ANCESTORS (space/comma separated)
+    extra = os.getenv("EMBED_ALLOWED_PARENTS", "") or os.getenv("FRAME_ANCESTORS", "")
+    if extra:
+      parts = [p.strip() for p in extra.replace(",", " ").split() if p.strip()]
+      for p in parts:
+        if p not in base_ancestors:
+          base_ancestors.append(p)
+    csp = "frame-ancestors " + " ".join(base_ancestors)
     return HTMLResponse(content=html, headers={
         "Content-Security-Policy": csp
     })

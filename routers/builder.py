@@ -482,6 +482,7 @@ class FieldSchema(BaseModel):
         "image",
         "video",
         "audio",
+        "signature",
     ]
     required: bool = False
     placeholder: Optional[str] = None
@@ -591,6 +592,7 @@ EXTENDED_ALLOWED_TYPES = {
     "image",
     "video",
     "audio",
+    "signature",
 }
 
 
@@ -3783,6 +3785,42 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 _inc_month_count(_owner, _month_key(), 1)
     except Exception:
         pass
+
+    # Automated email notification (best-effort) using user's configured integration
+    try:
+        owner = str(form_data.get("userId") or "").strip() or None
+        if owner:
+            # Build simple summary
+            subj = f"New submission on {form_data.get('title') or form_id}"
+            html = f"<div><p>New submission received for <strong>{form_data.get('title') or form_id}</strong>.</p><p>Response ID: {resp.get('responseId')}</p></div>"
+            # Choose recipient: use SMTP username if configured, else owner's email when available
+            to_addr = None
+            integ = _get_email_integration(owner)
+            try:
+                sm = (integ.get("smtp") or {})
+                if sm.get("username"):
+                    to_addr = (sm.get("username") or "").strip()
+                elif sm.get("username_enc"):
+                    to_addr = _dec_secret(sm.get("username_enc"))
+            except Exception:
+                to_addr = None
+            if not to_addr:
+                try:
+                    from firebase_admin import auth as _admin_auth  # type: ignore
+                    u = _admin_auth.get_user(owner)
+                    to_addr = getattr(u, "email", None)
+                except Exception:
+                    to_addr = None
+            if to_addr:
+                try:
+                    used = _send_email_via_integration(owner, to_addr, subj, html)
+                    if not used:
+                        html_wrapped = render_email("base.html", {"subject": subj, "title": subj, "intro": "", "content_html": html})
+                        send_email_html(to_addr, subj, html_wrapped)
+                except Exception:
+                    logger.exception("auto email send failed form_id=%s", form_id)
+    except Exception:
+        logger.exception("auto email notification failed form_id=%s", form_id)
 
     logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp

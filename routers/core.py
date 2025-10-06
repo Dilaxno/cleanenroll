@@ -1531,17 +1531,48 @@ async def embed_js():
 # SPA route redirect helpers
 # --------------
 @router.get("/form/{path:path}")
-async def spa_form_redirect(path: str):
+async def spa_form_redirect(path: str, request: Request):
     """Redirect SPA /form/* paths to the frontend app to avoid 404s on the API server.
     Set FRONTEND_URL (e.g., https://cleanenroll.com) so the API can redirect.
     """
     frontend = os.getenv("FRONTEND_URL")
     if frontend:
+        # Avoid self-redirect loops when FRONTEND_URL points to the same host as this API
+        try:
+            from urllib.parse import urlparse
+            fh = (urlparse(frontend).hostname or "").strip().lower().strip(".")
+            if not fh:
+                # Fallback: strip protocol manually
+                fh = frontend.replace("https://", "").replace("http://", "").split("/", 1)[0].strip().lower().strip(".")
+        except Exception:
+            fh = frontend.replace("https://", "").replace("http://", "").split("/", 1)[0].strip().lower().strip(".")
+        req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(":", 1)[0].strip().lower().strip(".")
+        if fh and fh == req_host:
+            # Serve a small OK response instead of redirecting to ourselves
+            return PlainTextResponse("Form route handled by frontend; avoiding self-redirect", status_code=200)
         url = f"{frontend.rstrip('/')}/form/{path}"
         return RedirectResponse(url, status_code=307)
     return PlainTextResponse(
         "This path is handled by the frontend SPA. Set FRONTEND_URL to enable redirects.",
         status_code=404,
+    )
+
+@router.head("/form/{path:path}")
+async def spa_form_head(path: str):
+    # Allow HEAD requests to succeed (used by curl -I, proxies, and health checks)
+    return PlainTextResponse("", status_code=204)
+
+@router.options("/form/{path:path}")
+async def spa_form_options(path: str):
+    # Allow CORS preflight or proxy OPTIONS checks
+    return PlainTextResponse(
+        "",
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
     )
 
 # --------------

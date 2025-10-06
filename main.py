@@ -97,6 +97,9 @@ async def custom_domain_routing(request: Request, call_next):
             path = ""
         if path.startswith("/.well-known/acme-challenge/"):
             return await call_next(request)
+        # Skip redirect if already on /form/* to avoid redundant redirects/loops
+        if path.startswith("/form/"):
+            return await call_next(request)
         if host:
             for name in _os.listdir(DATA_FORMS_DIR):
                 if not name.endswith(".json"):

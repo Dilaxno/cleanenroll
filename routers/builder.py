@@ -4112,6 +4112,85 @@ async def list_responses(
     sliced = items[offset: offset + max(0, int(limit))]
     return {"count": len(items), "responses": sliced}
 
+@router.post("/forms/{form_id}/responses/delete-batch")
+async def delete_responses_batch(form_id: str, request: Request, payload: Dict = None):
+    """
+    Delete multiple stored responses for a form by responseId.
+    Auth required: Firebase ID token in Authorization: Bearer <token> header. Only the form owner can delete.
+    Body: { "ids": ["<responseId>", ...] }
+    Response: { success: true, deleted: <count>, idsDeleted: [...], idsFailed: [...] }
+    """
+    try:
+        uid = _verify_firebase_uid(request)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = payload or {}
+    ids_raw = body.get("ids") or body.get("responseIds") or []
+    if not isinstance(ids_raw, list) or len(ids_raw) == 0:
+        raise HTTPException(status_code=400, detail="Provide 'ids' as a non-empty array")
+
+    # Verify form exists and ownership
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    try:
+        form_data = _read_json(path)
+    except Exception:
+        form_data = {}
+    owner_id = str(form_data.get("userId") or "").strip() or None
+    if not owner_id or owner_id != uid:
+        raise HTTPException(status_code=403, detail="Not authorized to delete responses for this form")
+
+    dir_path = _responses_dir(form_id)
+    if not os.path.isdir(dir_path):
+        return {"success": True, "deleted": 0, "idsDeleted": [], "idsFailed": [str(i) for i in ids_raw]}
+
+    ids = [str(i).strip() for i in ids_raw if str(i).strip()]
+    deleted: List[str] = []
+    failed: List[str] = []
+
+    for rid in ids:
+        try:
+            # First try filename pattern match: *_{rid}.json
+            target_file = None
+            try:
+                for name in os.listdir(dir_path):
+                    if not name.endswith('.json'):
+                        continue
+                    if name.endswith(f"_{rid}.json"):
+                        target_file = os.path.join(dir_path, name)
+                        break
+            except Exception:
+                target_file = None
+
+            # Fallback: scan files and match by responseId field
+            if not target_file:
+                for name in os.listdir(dir_path):
+                    if not name.endswith('.json'):
+                        continue
+                    fp = os.path.join(dir_path, name)
+                    try:
+                        rec = _read_json(fp)
+                        if str(rec.get("responseId") or rec.get("id") or "").strip() == rid:
+                            target_file = fp
+                            break
+                    except Exception:
+                        continue
+
+            if target_file and os.path.exists(target_file):
+                try:
+                    os.remove(target_file)
+                    deleted.append(rid)
+                except Exception:
+                    failed.append(rid)
+            else:
+                failed.append(rid)
+        except Exception:
+            failed.append(rid)
+
+    return {"success": True, "deleted": len(deleted), "idsDeleted": deleted, "idsFailed": failed}
+
 @router.get("/forms/{form_id}/analytics/countries")
 async def get_countries_analytics(form_id: str, from_ts: Optional[str] = Query(default=None, alias="from"), to_ts: Optional[str] = Query(default=None, alias="to")):
     """

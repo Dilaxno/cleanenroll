@@ -929,16 +929,8 @@ async def create_form(cfg: FormConfig):
     data = cfg.dict()
     form_id = _save_form(data)
 
-    # Build fully-qualified embed URL on API subdomain
-    embed_url = f"https://api.cleanenroll.com/embed/{form_id}"
-    iframe_snippet = (
-        f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
-    )
-
     return {
-        "id": form_id,
-        "embedUrl": embed_url,
-        "iframeSnippet": iframe_snippet,
+        "id": form_id
     }
 
 
@@ -1094,7 +1086,7 @@ BUILDER_HTML = """<!doctype html>
         <div><strong>Embed code</strong> (copy & paste into your site):</div>
         <pre id=\"iframeCode\" style=\"white-space: pre-wrap; background:#0b1020; color:#d1e7ff; padding:10px; border-radius:8px\"></pre>
         <button id=\"copyIframeBtn\" class=\"btn\">Copy code</button>
-        <div class=\"muted\">If the iframe src starts with /embed/, prepend your server origin (e.g. https://your-domain.com/embed/XYZ).</div>
+        <div class=\"muted\">Paste the script tag into your site where you want the form to appear.</div>
       </div>
     </div>
 
@@ -1283,10 +1275,9 @@ BUILDER_HTML = """<!doctype html>
       });
       if (!res.ok) throw new Error('Failed to save form');
       const data = await res.json();
-      // If server returned relative embedUrl, build absolute snippet
-      const origin = window.location.origin;
-      const src = data.embedUrl.startsWith('http') ? data.embedUrl : origin + data.embedUrl;
-      const snippet = `<iframe src=\"${src}\" width=\"100%\" height=\"600\" frameborder=\"0\"></iframe>`;
+      const formId = data.id;
+      const api = window.location.origin;
+      const snippet = `<script async src=\"${api}/embed.js\" data-ce-form=\"${formId}\"></script>`;
       document.getElementById('iframeCode').textContent = snippet;
       document.getElementById('saveBox').style.display = 'block';
     } catch (e) {
@@ -1335,7 +1326,7 @@ async def root(request: Request):
                         data = json.load(f)
                     if data.get("customDomainVerified") and (str(data.get("customDomain") or "").strip().lower().strip(".") == host):
                         form_id = data.get("id") or name.replace(".json", "")
-                        return RedirectResponse(url=f"/embed/{form_id}", status_code=307)
+                        return RedirectResponse(url=f"/form/{form_id}", status_code=307)
                 except Exception:
                     continue
     except Exception:
@@ -1344,105 +1335,33 @@ async def root(request: Request):
     return PlainTextResponse("app is running")
 
 
-@router.get("/embed/{form_id}", response_class=HTMLResponse)
-async def embed_page(form_id: str):
-    # Wrapper page that embeds the full-featured frontend SPA FormViewPage.
-    # This guarantees feature and customization parity with the direct form view.
-    # FRONTEND_URL should point to the main app host (e.g., https://cleanenroll.com).
+@router.get("/embed.js")
+@router.get("/v1/ce-embed.js")
+async def embed_js():
     frontend_url = os.getenv("FRONTEND_URL", "https://cleanenroll.com").rstrip("/")
-    html = """<!doctype html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <meta http-equiv=\"x-ua-compatible\" content=\"ie=edge\" />
-  <title>CleanEnroll - Embedded Form</title>
-  <style>
-    html, body { height: 100%; }
-    body { margin: 0; background: transparent; }
-    .frame-wrap { position: relative; width: 100%; min-height: 700px; }
-    iframe { width: 100%; height: 100%; border: 0; display: block; background: transparent; }
-  </style>
-  <script>
-    // Proxy the host page's query string to the inner SPA so UTM params and customization flags flow through.
-    (function(){
-      try {
-        var FORM_ID = "__FORM_ID__";
-        var FRONTEND = "__FRONTEND__";
-        var qs = window.location.search || "";
-        var src = FRONTEND + "/form/" + encodeURIComponent(FORM_ID) + qs;
-        window.__ce_embed_src = src;
-      } catch (e) {
-        // fallback without params
-        window.__ce_embed_src = "/form/" + encodeURIComponent("__FORM_ID__");
-      }
-    })();
-  </script>
-  <noscript>To view this form, please enable JavaScript.</noscript>
-  <meta name=\"referrer\" content=\"no-referrer-when-downgrade\" />
-</head>
-<body>
-  <div class=\"frame-wrap\">
-    <iframe id=\"ce_form_iframe\" src=\"about:blank\" loading=\"lazy\" referrerpolicy=\"no-referrer-when-downgrade\"></iframe>
-  </div>
-  <script>
-    (function(){
-      try {
-        var fr = document.getElementById('ce_form_iframe');
-        fr.src = window.__ce_embed_src || fr.src;
-      } catch (e) {}
-
-      // Optional auto-resize if same-origin (custom domain pointing to FRONTEND_URL). Cross-origin is ignored by browser.
-      try {
-        var sameOrigin = false;
-        try { sameOrigin = !!(new URL(fr.src, window.location.href).origin === window.location.origin); } catch(_) {}
-        if (sameOrigin && 'ResizeObserver' in window) {
-          var ro = new ResizeObserver(function(){
-            try { fr.style.height = fr.contentWindow.document.documentElement.scrollHeight + 'px'; } catch(_) {}
-          });
-          var kick = function(){ try { ro.observe(fr.contentWindow.document.documentElement); } catch(_) {} };
-          fr.addEventListener('load', kick, { once: true });
-        }
-      } catch (_) {}
-    })();
-  </script>
-  </body>
-  </html>
-  """
-    html = html.replace("__FORM_ID__", form_id).replace("__FRONTEND__", frontend_url)
-    # Build Content Security Policy dynamically so embeds can be allowed on configured parent sites
-    base_ancestors = [
-        "'self'",
-        "https://api.cleanenroll.com",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
-    # Include FRONTEND_URL origin explicitly (e.g., https://cleanenroll.com)
-    try:
-      fe = frontend_url
-      if fe and fe not in base_ancestors:
-        base_ancestors.append(fe)
-    except Exception:
-      pass
-    # Add extra allowed parents from environment: EMBED_ALLOWED_PARENTS or FRAME_ANCESTORS (space/comma separated)
-    extra = os.getenv("EMBED_ALLOWED_PARENTS", "") or os.getenv("FRAME_ANCESTORS", "")
-    if extra:
-      parts = [p.strip() for p in extra.replace(",", " ").split() if p.strip()]
-      for p in parts:
-        if p not in base_ancestors:
-          base_ancestors.append(p)
-    # Allow all HTTPS parents when EMBED_ALLOW_ALL is truthy (e.g., "1", "true", "yes")
-    allow_all = os.getenv("EMBED_ALLOW_ALL", "")
-    try:
-      allow_all_flag = (str(allow_all).strip().lower() not in ("", "0", "false", "no"))
-    except Exception:
-      allow_all_flag = False
-    if allow_all_flag and "https:" not in base_ancestors:
-      base_ancestors.append("https:")
-    csp = "frame-ancestors " + " ".join(base_ancestors)
-    return HTMLResponse(content=html, headers={
-        "Content-Security-Policy": csp
-    })
+    js = f"""(function(){{
+  try {{
+    var d=document,w=window;
+    var s=d.currentScript||d.querySelector('script[data-ce-form]');
+    if(!s) return;
+    var formId=s.getAttribute('data-ce-form')||s.getAttribute('data-form');
+    if(!formId) return;
+    var origin = s.getAttribute('data-ce-origin') || '{frontend_url}';
+    var src = origin.replace(/\/$/,'') + '/form/' + encodeURIComponent(formId) + '?embed=1';
+    var container = d.createElement('div');
+    container.className='ce-embed';
+    var iframe = d.createElement('iframe');
+    iframe.src = src;
+    iframe.loading='lazy';
+    iframe.referrerPolicy='no-referrer-when-downgrade';
+    iframe.style.width='100%';
+    iframe.style.minHeight='700px';
+    iframe.style.border='0';
+    container.appendChild(iframe);
+    s.parentNode.insertBefore(container, s.nextSibling);
+  }} catch(e) {{}}
+}})();"""
+    return PlainTextResponse(js, media_type="application/javascript", headers={"Cache-Control": "public, max-age=86400"})
 
 
 # --------------

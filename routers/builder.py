@@ -2945,14 +2945,14 @@ async def create_form(cfg: FormConfig):
         embed_url = f"/embed/{form_id}"
         iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
         logger.info("form create idempotent hit id=%s (exists)", form_id)
-        return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet, "existing": True}
+        return {"id": form_id, "existing": True}
 
     _write_json(target_path, data)
 
     embed_url = f"/embed/{form_id}"
     iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
     logger.info("form created id=%s fields=%s published=%s", form_id, len(data.get("fields") or []), bool(data.get("isPublished", False)))
-    return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet}
+    return {"id": form_id}
 
 
 @router.get("/forms/{form_id}")
@@ -3082,7 +3082,7 @@ async def update_form(form_id: str, cfg: FormConfig):
     embed_url = f"/embed/{form_id}"
     iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
     logger.info("form updated id=%s fields=%s published=%s", form_id, len(data.get("fields") or []), bool(data.get("isPublished", False)))
-    return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet}
+    return {"id": form_id}
 
 
 @router.delete("/forms/{form_id}")
@@ -3107,9 +3107,7 @@ async def get_embed_snippet(form_id: str):
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
-    embed_url = f"/embed/{form_id}"
-    iframe_snippet = f'<iframe src="{embed_url}" width="100%" height="600" frameborder="0"></iframe>'
-    return {"id": form_id, "embedUrl": embed_url, "iframeSnippet": iframe_snippet}
+    return {"id": form_id}
 
 
 @router.put("/forms/{form_id}/publish")

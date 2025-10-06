@@ -3806,17 +3806,29 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
         if not inbound_domain:
             raise HTTPException(status_code=400, detail="Missing custom domain")
 
-        now = datetime.utcnow().isoformat()
-        data = {
-            "id": form_id,
-            "title": "Untitled Form",
-            "customDomain": inbound_domain,
-            "customDomainVerified": False,
-            "sslVerified": False,
-            "createdAt": now,
-            "updatedAt": now,
-        }
-        _write_json(path, data)
+        # Do not create a new minimal form. Hydrate from Firestore when available
+        if _FS_AVAILABLE:
+            try:
+                snap = _fs.client().collection("forms").document(form_id).get()
+                fdata = snap.to_dict() or {}
+            except Exception:
+                fdata = {}
+            if not fdata:
+                # Require that the original form be saved first
+                raise HTTPException(status_code=404, detail="Form not found on server. Save the form first, then verify the domain.")
+            # Merge inbound custom domain onto hydrated data
+            fdata["id"] = form_id
+            fdata["customDomain"] = inbound_domain
+            fdata["customDomainVerified"] = False
+            fdata["sslVerified"] = False
+            if not fdata.get("createdAt"):
+                fdata["createdAt"] = datetime.utcnow().isoformat()
+            fdata["updatedAt"] = datetime.utcnow().isoformat()
+            _write_json(path, fdata)
+            data = fdata
+        else:
+            # No server record; refuse to create a duplicate placeholder
+            raise HTTPException(status_code=404, detail="Form not found on server. Save the form first, then verify the domain.")
 
     domain_val = _normalize_domain(
         data.get("customDomain")

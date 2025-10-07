@@ -48,6 +48,14 @@ except Exception:
     _has_any_dkim = None  # type: ignore
     _REPUTATION_HELPERS_AVAILABLE = False
 
+# Geo helpers (IP -> country/lat/lon)
+try:
+    from .builder import _geo_from_ip  # type: ignore
+    _GEO_HELPERS_AVAILABLE = True
+except Exception:
+    _geo_from_ip = None  # type: ignore
+    _GEO_HELPERS_AVAILABLE = False
+
 # Fuzzy matching for email domain typo suggestions
 try:
     from rapidfuzz.distance import Levenshtein as _lev  # type: ignore
@@ -262,6 +270,79 @@ async def signup_record(request: Request):
     except Exception:
         pass
     return {"status": "ok"}
+
+# -----------------------------
+# Signup enrichment (IP + country)
+# -----------------------------
+
+@router.options("/api/auth/signup/enrich")
+@router.options("/api/auth/signup/enrich/")
+async def signup_enrich_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+
+@router.post("/api/auth/signup/enrich")
+@router.post("/api/auth/signup/enrich/")
+async def signup_enrich(request: Request):
+    """Record the caller's signup IP and country onto their Firestore user doc.
+    Requires a valid Firebase ID token in the Authorization header.
+    """
+    # Extract bearer token
+    authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if not authz.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization")
+    token = authz.split(" ", 1)[1].strip()
+
+    # Initialize Firebase Admin
+    try:
+        _ensure_firebase_initialized()
+    except HTTPException as e:
+        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
+    if not (_FB_AVAILABLE and admin_auth is not None and admin_firestore is not None):
+        raise HTTPException(status_code=500, detail="Firebase Admin unavailable")
+
+    # Verify token -> uid
+    try:
+        decoded = admin_auth.verify_id_token(token)
+        uid = decoded.get("uid")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Determine client IP and geo
+    ip = _ip_from_req(request)
+    country = None
+    lat = None
+    lon = None
+    try:
+        if _geo_from_ip is not None:
+            c, la, lo = _geo_from_ip(ip)
+            country, lat, lon = (c or None), (la if isinstance(la, (int, float)) else None), (lo if isinstance(lo, (int, float)) else None)
+    except Exception:
+        country, lat, lon = None, None, None
+
+    # Best-effort write to Firestore
+    try:
+        fs = admin_firestore.client()
+        updates = {
+            "signupIp": ip or None,
+            "signupCountry": (str(country).upper() if isinstance(country, str) and country else None),
+            "signupGeoLat": lat,
+            "signupGeoLon": lon,
+            "signupUserAgent": (request.headers.get("user-agent") or None),
+            "signupAtServer": admin_firestore.SERVER_TIMESTAMP,
+        }
+        fs.collection("users").document(uid).set(updates, merge=True)
+    except Exception:
+        # Do not fail the request on storage errors
+        pass
+
+    return {"status": "ok", "ip": ip, "country": (str(country).upper() if country else None)}
 
 # --- Token helpers for password reset ---
 RESET_TOKEN_LEEWAY = 60  # seconds of clock skew allowed

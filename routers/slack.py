@@ -183,13 +183,14 @@ def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
 
 
 @router.get("/channels")
-def list_channels(userId: str = Query(...)):
+def list_channels(userId: str = Query(...), types: Optional[str] = Query(None)):
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Slack integration is available on Pro plans.")
     token, _ = _get_slack_creds(userId)
     if not token:
         return {"channels": []}
-    url = "https://slack.com/api/conversations.list?exclude_archived=true&types=public_channel,private_channel"
+    t = (types or "public_channel").strip()
+    url = f"https://slack.com/api/conversations.list?exclude_archived=true&types={t}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/x-www-form-urlencoded"}
     resp = requests.get(url, headers=headers, timeout=20)
     if resp.status_code != 200:
@@ -288,6 +289,23 @@ def _format_text(rec: Dict[str, Any]) -> str:
         )
     except Exception:
         return "📩 New form submission (details unavailable)"
+
+
+@router.post("/disconnect")
+def disconnect(userId: str = Query(...)):
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Slack integration is available on Pro plans.")
+    doc_ref = _get_user_doc(userId)
+    snap = doc_ref.get()
+    data = snap.to_dict() or {}
+    integ = (data.get("integrations") or {})
+    # Clear Slack creds and mappings but keep other integrations intact
+    if "slack" in integ:
+        integ.pop("slack", None)
+    if "slackMappings" in integ:
+        integ.pop("slackMappings", None)
+    doc_ref.set({"integrations": integ}, merge=True)
+    return {"disconnected": True}
 
 
 @router.post("/test")

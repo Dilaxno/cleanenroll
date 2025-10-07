@@ -491,7 +491,44 @@ def create_and_export(
         timeout=30,
     )
     if create_resp.status_code not in (200, 201):
-        raise HTTPException(status_code=400, detail=f"Failed to create audience: {create_resp.text}")
+        # Graceful fallback: user may not be allowed to create audiences on their Mailchimp plan.
+        # In this case, return existing audiences and guidance instead of failing outright.
+        try:
+            err_json = create_resp.json()
+        except Exception:
+            err_json = None
+        title = (err_json or {}).get("title")
+        detail = (err_json or {}).get("detail") or create_resp.text
+        if create_resp.status_code == 403 or (title and "user action not permitted" in str(title).lower()):
+            # Load available audiences so the client can pick one
+            lists_url = f"{auth['api_base']}/lists"
+            lists_resp = requests.get(lists_url, headers={"Authorization": f"Bearer {auth['token']}"}, timeout=20)
+            available = []
+            if lists_resp.status_code == 200:
+                lists_data = lists_resp.json()
+                available = [{
+                    "id": x.get("id"),
+                    "name": x.get("name"),
+                    "member_count": (x.get("stats") or {}).get("member_count"),
+                } for x in (lists_data.get("lists") or [])]
+            tip = (
+                "You need to create an audience in Mailchimp before sending contacts to it. Steps: "
+                "1) Log in to Mailchimp. 2) Go to Audience > Audience dashboard. "
+                "3) If you don't have an audience, click Create Audience and fill in company address and permission reminder. "
+                "4) After it is created, come back here, select that audience, and run the export again."
+            )
+            return {
+                "createdListId": None,
+                "createdListName": None,
+                "exported": 0,
+                "skipped": 0,
+                "total": len(members),
+                "error": {"status": create_resp.status_code, "title": title or "User action not permitted", "detail": detail},
+                "availableAudiences": available,
+                "tip": tip,
+            }
+        # Other errors: propagate
+        raise HTTPException(status_code=400, detail=f"Failed to create audience: {detail}")
     created = create_resp.json()
     list_id = created.get("id")
     if not list_id:

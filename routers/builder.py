@@ -561,6 +561,8 @@ class FormConfig(BaseModel):
     customDomain: Optional[str] = None
     customDomainVerified: bool = False
     sslVerified: bool = False
+    # Domains allowed to embed this form (origins/domains)
+    embedAllowList: Optional[List[str]] = []
     # Auto-reply email to client after submission
     autoReplyEnabled: bool = False
     autoReplyEmailFieldId: Optional[str] = None
@@ -3006,6 +3008,20 @@ async def create_form(cfg: FormConfig):
     # Custom domain normalization
     data["customDomain"] = _normalize_domain(data.get("customDomain"))
     data["customDomainVerified"] = bool(data.get("customDomainVerified")) and bool(data.get("customDomain"))
+    # Normalize embed allow list (store bare domains)
+    try:
+        allow = data.get("embedAllowList") or []
+        if isinstance(allow, list):
+            norm = []
+            for d in allow:
+                nd = _normalize_domain(d)
+                if nd and nd not in norm:
+                    norm.append(nd)
+            data["embedAllowList"] = norm
+        else:
+            data["embedAllowList"] = []
+    except Exception:
+        data["embedAllowList"] = []
     # Normalize background image URL and custom font to permanent public URLs if needed
     try:
         theme = data.get("theme") or {}
@@ -3138,6 +3154,22 @@ async def update_form(form_id: str, cfg: FormConfig):
         data["customDomainVerified"] = False
     else:
         data["customDomainVerified"] = bool(prev.get("customDomainVerified"))
+    # Normalize embed allow list (store bare domains, preserve previous when absent)
+    try:
+        allow = data.get("embedAllowList")
+        if allow is None:
+            allow = prev.get("embedAllowList") or []
+        if isinstance(allow, list):
+            norm = []
+            for d in allow:
+                nd = _normalize_domain(d)
+                if nd and nd not in norm:
+                    norm.append(nd)
+            data["embedAllowList"] = norm
+        else:
+            data["embedAllowList"] = []
+    except Exception:
+        data["embedAllowList"] = prev.get("embedAllowList") or []
     # Preserve published state if not explicitly provided
     existing_published = prev.get("isPublished", False)
     incoming_published = data.get("isPublished")
@@ -3215,6 +3247,90 @@ async def get_embed_snippet(form_id: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Form not found")
     return {"id": form_id}
+
+
+@router.get("/forms/{form_id}/embed/allowlist")
+async def get_embed_allowlist(form_id: str):
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    allow = data.get("embedAllowList") or []
+    if not isinstance(allow, list):
+        allow = []
+    # return bare domains
+    return {"domains": allow}
+
+
+@router.post("/forms/{form_id}/embed/allow")
+async def add_embed_allow_domain(form_id: str, request: Request, payload: Dict = None):
+    uid = _verify_firebase_uid(request)
+    body = payload or {}
+    raw = (body.get("domain") or body.get("origin") or body.get("host") or "").strip()
+    dom = _normalize_domain(raw)
+    if not dom:
+        raise HTTPException(status_code=400, detail="Invalid domain")
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    owner_id = str(data.get("userId") or "").strip() or None
+    if not owner_id or owner_id != uid:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    allow = data.get("embedAllowList") or []
+    if not isinstance(allow, list):
+        allow = []
+    if dom not in allow:
+        allow.append(dom)
+    data["embedAllowList"] = allow
+    data["updatedAt"] = datetime.utcnow().isoformat()
+    _write_json(path, data)
+    return {"success": True, "domains": allow}
+
+
+@router.get("/embed/{form_id}")
+async def serve_embed_page(form_id: str):
+    """Serve an embeddable page that wraps the frontend form and enforces a per-form frame-ancestors allowlist via CSP."""
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    data = _read_json(path)
+    allow = data.get("embedAllowList") or []
+    if not isinstance(allow, list):
+        allow = []
+    # Build CSP frame-ancestors list
+    origins: List[str] = []
+    for d in allow:
+        nd = _normalize_domain(d)
+        if not nd:
+            continue
+        for o in (f"https://{nd}", f"http://{nd}", f"https://*.{nd}", f"http://*.{nd}"):
+            if o not in origins:
+                origins.append(o)
+    csp = "frame-ancestors 'self'" + (" " + " ".join(origins) if origins else "")
+    # Iframe target: frontend /form/{id}
+    target = (FRONTEND_URL or "").strip()
+    if target:
+        if not target.startswith("http"):
+            target = "https://" + target
+        target = target.rstrip("/") + f"/form/{form_id}"
+    else:
+        # Fallback to same domain path
+        target = f"/form/{form_id}"
+    html = f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Form {form_id}</title>
+  <style>html,body,iframe{{margin:0;padding:0;height:100%;width:100%;border:0;}}</style>
+</head>
+<body>
+  <iframe src=\"{target}\" allowfullscreen loading=\"eager\" referrerpolicy=\"no-referrer-when-downgrade\"></iframe>
+</body>
+</html>"""
+    resp = Response(content=html, media_type="text/html")
+    resp.headers["Content-Security-Policy"] = csp
+    # Do not emit X-Frame-Options to allow CSP to control framing
+    return resp
 
 
 @router.put("/forms/{form_id}/publish")
@@ -3953,7 +4069,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     font_family = (cfg.get("theme") or {}).get("fontFamily") or None
                     footer_html = (cfg.get("autoReplyFooterHtml") or "").strip() or None
                     # Render user-facing client email with unbranded client template, not the app's internal base.html
-                    html = render_email("client_base.html", {
+                    html = render_email("base.html", {
                         "subject": subject,
                         "title": subject,
                         "preheader": None,
@@ -3967,9 +4083,13 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         "brand_name": (cfg.get("title") or "")
                     })
                     try:
-                        used = _send_email_via_integration(owner_id, to_email, subject, html)
-                        # Respect requirement to send from connected email; skip fallback when not configured
-                        _ = used  # no-op
+                        # Try user's connected integration first; if not configured or fails, fall back to default SMTP
+                        try:
+                            sent_via_integration = _send_email_via_integration(owner_id, to_email, subject, html)
+                        except Exception:
+                            sent_via_integration = False
+                        if not sent_via_integration:
+                            send_email_html(to_email, subject, html)
                     except Exception:
                         pass
     except Exception:

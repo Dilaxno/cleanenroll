@@ -91,8 +91,10 @@ def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
     from urllib.parse import urlencode, quote_plus
     scopes = [
         "chat:write",
+        "chat:write.public",
         "incoming-webhook",
         "channels:read",
+        "channels:join",
     ]
     params = {
         "client_id": SLACK_CLIENT_ID,
@@ -246,18 +248,46 @@ def _send_via_webhook(webhook_url: str, record: Dict[str, Any]):
 
 def _send_via_bot(token: str, channel_id: str, record: Dict[str, Any]):
     text = _format_text(record)
-    r = requests.post(
-        "https://slack.com/api/chat.postMessage",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        data=json.dumps({"channel": channel_id, "text": text}),
-        timeout=15,
-    )
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"channel": channel_id, "text": text}
+
+    def _post():
+        return requests.post(
+            "https://slack.com/api/chat.postMessage",
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=15,
+        )
+
+    r = _post()
     try:
         data = r.json()
     except Exception:
         data = {"ok": False}
-    if r.status_code != 200 or not data.get("ok"):
-        raise RuntimeError(f"chat.postMessage failed: {r.text}")
+
+    if r.status_code == 200 and data.get("ok"):
+        return
+
+    # If the bot isn't in the channel yet, try joining and retry once
+    if isinstance(data, dict) and data.get("error") == "not_in_channel":
+        try:
+            requests.post(
+                "https://slack.com/api/conversations.join",
+                headers=headers,
+                data=json.dumps({"channel": channel_id}),
+                timeout=15,
+            )
+        except Exception:
+            pass
+        r2 = _post()
+        try:
+            data2 = r2.json()
+        except Exception:
+            data2 = {"ok": False}
+        if r2.status_code == 200 and data2.get("ok"):
+            return
+
+    raise RuntimeError(f"chat.postMessage failed: {r.text}")
 
 
 def _format_text(rec: Dict[str, Any]) -> str:

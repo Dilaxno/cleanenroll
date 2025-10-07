@@ -259,6 +259,19 @@ def _get_mailchimp_auth(user_id: str) -> Dict[str, str]:
     return {"token": token, "dc": dc, "api_base": api_base or f"https://{dc}.api.mailchimp.com/3.0"}
 
 
+@router.post("/disconnect")
+def disconnect(userId: str = Query(...)):
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
+    doc_ref = _get_user_doc(userId)
+    snap = doc_ref.get()
+    data = snap.to_dict() or {}
+    integ = (data.get("integrations") or {})
+    if "mailchimp" in integ:
+        integ.pop("mailchimp", None)
+    doc_ref.set({"integrations": integ}, merge=True)
+    return {"disconnected": True}
+
 @router.get("/audiences")
 def list_audiences(userId: str = Query(...)):
     """List audiences (lists) for the connected Mailchimp account."""

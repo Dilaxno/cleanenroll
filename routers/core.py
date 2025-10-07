@@ -331,6 +331,7 @@ class FormConfig(BaseModel):
     subtitle: str = ""
     theme: ThemeSchema = ThemeSchema()
     fields: List[FieldSchema] = []
+    allowedDomains: Optional[List[str]] = None
 
 
 # -----------------------------
@@ -1090,6 +1091,24 @@ async def create_form(cfg: FormConfig):
 
     # Persist
     data = cfg.dict()
+    # Normalize allowedDomains and apply defaults when not specified
+    try:
+        raw = cfg.allowedDomains or []
+        norm = []
+        seen = set()
+        for d in raw:
+            try:
+                nd = _normalize_domain(d)
+            except Exception:
+                nd = (d or '').strip().lower()
+            if nd and nd not in seen:
+                seen.add(nd)
+                norm.append(nd)
+        if not norm:
+            norm = ["cleanenroll.com", "localhost"]
+        data["allowedDomains"] = norm
+    except Exception:
+        data["allowedDomains"] = ["cleanenroll.com", "localhost"]
     form_id = _save_form(data)
 
     return {
@@ -1510,7 +1529,8 @@ async def embed_js():
     var formId=s.getAttribute('data-ce-form')||s.getAttribute('data-form');
     if(!formId) return;
     var origin = s.getAttribute('data-ce-origin') || '{frontend_url}';
-    var src = origin.replace(/\/$/,'') + '/form/' + encodeURIComponent(formId) + '?embed=1';
+    var pageHost = (window.location && window.location.hostname) ? window.location.hostname : '';
+    var src = origin.replace(/\/$/,'') + '/form/' + encodeURIComponent(formId) + '?embed=1' + (pageHost ? '&host=' + encodeURIComponent(pageHost) : '');
     var container = d.createElement('div');
     container.className='ce-embed';
     var iframe = d.createElement('iframe');

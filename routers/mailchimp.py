@@ -279,7 +279,7 @@ def list_audiences(userId: str = Query(...)):
         raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
     auth = _get_mailchimp_auth(userId)
     url = f"{auth['api_base']}/lists"
-    resp = requests.get(url, headers={"Authorization": f"OAuth {auth['token']}"}, timeout=20)
+    resp = requests.get(url, headers={"Authorization": f"Bearer {auth['token']}"}, timeout=20)
     if resp.status_code != 200:
         raise HTTPException(status_code=400, detail=f"Failed to list audiences: {resp.text}")
     data = resp.json()
@@ -351,7 +351,7 @@ def export_members(
     exported = 0
     skipped = 0
     for m in members:
-        resp = requests.post(url, headers={"Authorization": f"OAuth {auth['token']}", "Content-Type": "application/json"}, data=json.dumps(m), timeout=20)
+        resp = requests.post(url, headers={"Authorization": f"Bearer {auth['token']}", "Content-Type": "application/json"}, data=json.dumps(m), timeout=20)
         if resp.status_code in (200, 201):
             exported += 1
         else:
@@ -486,7 +486,7 @@ def create_and_export(
     create_url = f"{auth['api_base']}/lists"
     create_resp = requests.post(
         create_url,
-        headers={"Authorization": f"OAuth {auth['token']}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {auth['token']}", "Content-Type": "application/json"},
         data=json.dumps(list_payload),
         timeout=30,
     )
@@ -509,7 +509,7 @@ def create_and_export(
                 m.pop("merge_fields", None)
             resp = requests.post(
                 add_url,
-                headers={"Authorization": f"OAuth {auth['token']}", "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {auth['token']}", "Content-Type": "application/json"},
                 data=json.dumps(m),
                 timeout=20,
             )

@@ -378,6 +378,22 @@ def list_mappings(userId: str = Query(...)):
     return {"mappings": out}
 
 
+@router.post("/disconnect")
+def disconnect(userId: str = Query(...)):
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
+    doc_ref = _get_user_doc(userId)
+    snap = doc_ref.get()
+    data = snap.to_dict() or {}
+    integ = (data.get("integrations") or {})
+    # Clear Google Sheets creds and mappings but keep other integrations intact
+    if "googleSheets" in integ:
+        integ.pop("googleSheets", None)
+    if "googleSheetsMappings" in integ:
+        integ.pop("googleSheetsMappings", None)
+    doc_ref.set({"integrations": integ}, merge=True)
+    return {"disconnected": True}
+
 # Helper used by builder.submit_form to auto-append new rows when synced
 
 def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str, Any]):

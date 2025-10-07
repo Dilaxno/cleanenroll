@@ -367,3 +367,169 @@ def export_members(
             skipped += 1
 
     return {"exported": exported, "skipped": skipped, "total": len(members)}
+
+
+@router.post("/create-and-export")
+def create_and_export(
+    userId: str = Query(...),
+    formId: str = Query(...),
+    audienceName: str = Query(...),
+    status: str = Query("subscribed"),  # or "pending" for double opt-in
+):
+    """
+    Create a new Mailchimp audience and export subscribers collected for a form to it.
+    The audience name is provided by the user. Members will be added using email and
+    best-effort name parsing into FNAME/LNAME.
+    """
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
+    if status not in ("subscribed", "pending"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    audienceName = (audienceName or "").strip()
+    if not audienceName:
+        raise HTTPException(status_code=400, detail="audienceName is required")
+
+    # Read responses from filesystem store used by builder router
+    responses_dir = os.path.join(os.getcwd(), "data", "responses", formId)
+    if not os.path.exists(responses_dir):
+        # Nothing to export; still create the audience
+        members: List[Dict[str, Any]] = []
+    else:
+        # Gather emails and name fields heuristically from stored answers
+        members = []
+        for name in os.listdir(responses_dir):
+            if not name.endswith('.json'):
+                continue
+            try:
+                with open(os.path.join(responses_dir, name), 'r', encoding='utf-8') as f:
+                    rec = json.load(f)
+                answers = rec.get('answers') or {}
+                email = None
+                first_name: Optional[str] = None
+                last_name: Optional[str] = None
+                full_name: Optional[str] = None
+                # Try typical keys
+                for k, v in answers.items():
+                    lk = str(k).lower()
+                    try:
+                        sv = v if isinstance(v, str) else (v[0] if isinstance(v, list) and v else None)
+                    except Exception:
+                        sv = None
+                    if not sv:
+                        continue
+                    ssv = str(sv).strip()
+                    if ("email" in lk) and (not email):
+                        email = ssv
+                    elif ("first" in lk and "name" in lk) and not first_name:
+                        first_name = ssv
+                    elif ("last" in lk and "name" in lk) and not last_name:
+                        last_name = ssv
+                    elif any(x in lk for x in ["full-name", "fullname"]) or (lk == "name"):
+                        full_name = ssv
+                # Derive first/last from full name when split fields missing
+                if (not first_name or not last_name) and full_name:
+                    parts = [p for p in full_name.split() if p.strip()]
+                    if len(parts) == 1:
+                        first_name = first_name or parts[0]
+                    elif len(parts) >= 2:
+                        first_name = first_name or parts[0]
+                        last_name = last_name or " ".join(parts[1:])
+                if email:
+                    mf: Dict[str, Any] = {}
+                    if first_name:
+                        mf["FNAME"] = first_name[:255]
+                    if last_name:
+                        mf["LNAME"] = last_name[:255]
+                    members.append({"email_address": email, "status": status, "merge_fields": mf})
+            except Exception:
+                continue
+
+    auth = _get_mailchimp_auth(userId)
+
+    # Create the audience (list)
+    # Derive optional defaults from user profile if present
+    try:
+        udoc = _get_user_doc(userId).get()
+        udata = (udoc.to_dict() or {}) if udoc and udoc.exists else {}
+    except Exception:
+        udata = {}
+    from_email = (udata.get("email") or (udata.get("profile") or {}).get("email") or "no-reply@cleanenroll.com")
+    from_name = (udata.get("name") or (udata.get("profile") or {}).get("name") or "CleanEnroll User")
+    company = (udata.get("company") or (udata.get("profile") or {}).get("company") or audienceName)
+    address_obj = (udata.get("address") or (udata.get("profile") or {}).get("address") or {})
+    address1 = (address_obj.get("address1") if isinstance(address_obj, dict) else None) or "123 Main St"
+    city = (address_obj.get("city") if isinstance(address_obj, dict) else None) or "City"
+    state = (address_obj.get("state") if isinstance(address_obj, dict) else None) or ""
+    zip_code = (address_obj.get("zip") if isinstance(address_obj, dict) else None) or "00000"
+    country = (address_obj.get("country") if isinstance(address_obj, dict) else None) or "US"
+
+    list_payload = {
+        "name": audienceName,
+        "contact": {
+            "company": str(company)[:200],
+            "address1": str(address1)[:200],
+            "city": str(city)[:200],
+            "state": str(state)[:50],
+            "zip": str(zip_code)[:50],
+            "country": str(country)[:2]
+        },
+        "permission_reminder": "You're receiving this email because you opted in via our website.",
+        "campaign_defaults": {
+            "from_name": str(from_name)[:100],
+            "from_email": str(from_email)[:254],
+            "subject": "",
+            "language": "en"
+        },
+        "email_type_option": False
+    }
+
+    create_url = f"{auth['api_base']}/lists"
+    create_resp = requests.post(
+        create_url,
+        headers={"Authorization": f"OAuth {auth['token']}", "Content-Type": "application/json"},
+        data=json.dumps(list_payload),
+        timeout=30,
+    )
+    if create_resp.status_code not in (200, 201):
+        raise HTTPException(status_code=400, detail=f"Failed to create audience: {create_resp.text}")
+    created = create_resp.json()
+    list_id = created.get("id")
+    if not list_id:
+        raise HTTPException(status_code=400, detail="Audience created but id missing in response")
+
+    # Add members
+    exported = 0
+    skipped = 0
+    if members:
+        add_url = f"{auth['api_base']}/lists/{list_id}/members"
+        for m in members:
+            # Clean empty merge_fields to avoid 400s
+            mf = m.get("merge_fields") or {}
+            if not mf:
+                m.pop("merge_fields", None)
+            resp = requests.post(
+                add_url,
+                headers={"Authorization": f"OAuth {auth['token']}", "Content-Type": "application/json"},
+                data=json.dumps(m),
+                timeout=20,
+            )
+            if resp.status_code in (200, 201):
+                exported += 1
+            else:
+                try:
+                    err = resp.json()
+                    if str(err.get('title')).lower().find('exists') != -1:
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass
+                logger.warning("Mailchimp add member failed: %s", resp.text)
+                skipped += 1
+
+    return {
+        "createdListId": list_id,
+        "createdListName": audienceName,
+        "exported": exported,
+        "skipped": skipped,
+        "total": len(members)
+    }

@@ -1418,6 +1418,47 @@ async def get_monthly_usage(userId: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch usage: {e}") 
 
+@router.post("/forms/{form_id}/view")
+@limiter.limit("60/minute")
+async def increment_form_view(form_id: str, request: Request):
+    """Server-side views increment: atomically increments forms/{form_id}.views.
+    Also updates lastViewAt/updatedAt to server timestamp. Best-effort and idempotency is
+    delegated to caller (e.g., per-tab/session guard) while the route enforces basic rate limiting.
+    """
+    if not _FS_AVAILABLE:
+        return {"success": False, "reason": "firestore_unavailable"}
+    try:
+        # Prefer native Increment operator when available
+        try:
+            from google.cloud.firestore_v1 import Increment as _FSIncrement  # type: ignore
+            _fs.client().collection("forms").document(form_id).set({
+                "views": _FSIncrement(1),
+                "lastViewAt": _fs.SERVER_TIMESTAMP,
+                "updatedAt": _fs.SERVER_TIMESTAMP,
+            }, merge=True)
+        except Exception:
+            # Fallback: read-modify-write
+            try:
+                doc_ref = _fs.client().collection("forms").document(form_id)
+                snap = doc_ref.get()
+                data = snap.to_dict() or {}
+                cur = 0
+                try:
+                    cur = int(data.get("views", 0))
+                except Exception:
+                    cur = 0
+                doc_ref.set({
+                    "views": cur + 1,
+                    "lastViewAt": _fs.SERVER_TIMESTAMP,
+                    "updatedAt": _fs.SERVER_TIMESTAMP,
+                }, merge=True)
+            except Exception:
+                raise
+        return {"success": True}
+    except Exception as e:
+        # Non-fatal: return success false but 200 to avoid breaking client flows
+        return JSONResponse(status_code=200, content={"success": False, "error": str(e)}) 
+
 # Groq API key for AI Copilot (server-side only)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_TOKEN") or ""
 

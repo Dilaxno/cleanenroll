@@ -521,11 +521,20 @@ class FieldSchema(BaseModel):
         return v
 
 
+class HeadingStyle(BaseModel):
+    bold: bool = False
+    italic: bool = False
+    level: Literal[1,2,3,4,5,6] = 1
+
+
 class FormConfig(BaseModel):
     id: Optional[str] = None
     userId: Optional[str] = None
     title: str = "Untitled Form"
     subtitle: str = ""
+    # Title/subtitle typography
+    titleStyle: Optional[HeadingStyle] = HeadingStyle(bold=True, italic=False, level=1)
+    subtitleStyle: Optional[HeadingStyle] = HeadingStyle(bold=False, italic=False, level=3)
     # UI language for this form (ISO code like 'en', 'es', 'fr', ...)
     language: Optional[str] = "en"
     thankYouMessage: str = "Thank you for your submission! We'll get back to you soon."

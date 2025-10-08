@@ -3986,6 +3986,50 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 try_notify_slack_for_form(owner_id, form_id, record)
         except Exception:
             logger.exception("slack notify failed form_id=%s", form_id)
+        # Email notification to form owner (best-effort)
+        try:
+            owner_id = str(form_data.get("userId") or "").strip() or None
+            owner_email = None
+            if _FS_AVAILABLE and owner_id:
+                try:
+                    snap = _fs.client().collection("users").document(owner_id).get()
+                    d = snap.to_dict() or {}
+                    em = d.get("email")
+                    if isinstance(em, str) and "@" in em:
+                        owner_email = em.strip()
+                except Exception:
+                    owner_email = None
+            if owner_email:
+                form_title = str(form_data.get("title") or "Form").strip() or "Form"
+                subject = f"New submission — {form_title}"
+                preview = ""
+                try:
+                    ans = record.get("answers") or {}
+                    parts = []
+                    for k, v in list(ans.items())[:10]:
+                        try:
+                            if isinstance(v, list):
+                                vv = ", ".join(str(x) for x in v)
+                            elif isinstance(v, dict):
+                                vv = json.dumps(v, ensure_ascii=False)
+                            else:
+                                vv = str(v)
+                            parts.append(f"<div><strong>{k}:</strong> {vv}</div>")
+                        except Exception:
+                            continue
+                    preview = "".join(parts)
+                except Exception:
+                    preview = ""
+                html = render_email("base.html", {
+                    "subject": subject,
+                    "title": subject,
+                    "intro": f"You received a new submission for {form_title}.",
+                    "content_html": preview or "",
+                    "preheader": f"New submission for {form_title}",
+                })
+                send_email_html(owner_email, subject, html)
+        except Exception:
+            logger.exception("owner email notify failed form_id=%s", form_id)
         # Attempt Airtable append if syncing is enabled for this form
         try:
             try:

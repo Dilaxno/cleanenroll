@@ -421,6 +421,7 @@ class ThemeSchema(BaseModel):
     pageBackgroundDim: int = Field(default=0, ge=0, le=80)
     textColor: str = "#111827"
     titleColor: str = "#000000"
+    subtitleColor: str = "#6b7280"
     # Field label customization
     fieldLabelColor: str = "#cccccc"
     inputBgColor: str = "#ffffff"
@@ -1421,6 +1422,17 @@ async def file_scan(request: Request, file: UploadFile = File(...)):
       permalink?: str
     }
     """
+    return {
+        "enabled": False,
+        "scanned": False,
+        "malicious": False,
+        "risk_score": None,
+        "unsafe": False,
+        "phishing": False,
+        "malware": False,
+        "suspicious": False,
+        "category": "removed",
+    }
     # Ensure API key configured
     api_key = (os.getenv("VIRUSTOTAL_API_KEY") or os.getenv("VT_API_KEY") or "").strip()
     if not api_key:

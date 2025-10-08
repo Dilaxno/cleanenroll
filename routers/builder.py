@@ -4005,16 +4005,28 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 preview = ""
                 try:
                     ans = record.get("answers") or {}
+                    # Map field ids to labels for human-readable output
+                    label_by_id = {}
+                    try:
+                        for f in (form_data.get("fields") or []):
+                            if isinstance(f, dict):
+                                fid = str(f.get("id") or "").strip()
+                                lab = str(f.get("label") or "").strip()
+                                if fid:
+                                    label_by_id[fid] = lab or fid
+                    except Exception:
+                        label_by_id = {}
                     parts = []
                     for k, v in list(ans.items())[:10]:
                         try:
+                            label = label_by_id.get(str(k), str(k))
                             if isinstance(v, list):
                                 vv = ", ".join(str(x) for x in v)
                             elif isinstance(v, dict):
                                 vv = json.dumps(v, ensure_ascii=False)
                             else:
                                 vv = str(v)
-                            parts.append(f"<div><strong>{k}:</strong> {vv}</div>")
+                            parts.append(f"<div><strong>{label}:</strong> {vv}</div>")
                         except Exception:
                             continue
                     preview = "".join(parts)

@@ -2233,6 +2233,144 @@ async def get_brand_colors(request: Request, url: str):
 @router.get("/url/scan")
 @limiter.limit("30/minute")
 async def ipqs_url_scan(request: Request, url: str, strictness: Optional[int] = None):
+    # Heuristic malicious URL scanning using local rules and libraries.
+    # Short-circuit and return without calling any third-party provider.
+    try:
+        import re as _re
+        from urllib.parse import urlparse as _urlparse
+        import ipaddress as _ipaddr
+        import tldextract as _tldextract
+        import validators as _validators
+    except Exception:
+        # If required libs are not available, report disabled to caller
+        return {
+            "enabled": False,
+            "scanned": False,
+            "malicious": False,
+            "risk_score": None,
+            "unsafe": False,
+            "phishing": False,
+            "malware": False,
+            "suspicious": False,
+            "category": None,
+        }
+
+    target = (url or "").strip()
+    if not target:
+        return {
+            "enabled": True,
+            "scanned": False,
+            "malicious": False,
+            "risk_score": None,
+            "unsafe": False,
+            "phishing": False,
+            "malware": False,
+            "suspicious": False,
+            "category": None,
+        }
+
+    # Normalize scheme for parsing and validation
+    if not _re.match(r"^https?://", target, _re.I):
+        target = "https://" + target
+
+    # Reject malformed URLs early
+    if not _validators.url(target):
+        return {
+            "enabled": True,
+            "scanned": True,
+            "malicious": True,
+            "risk_score": 99,
+            "unsafe": True,
+            "phishing": False,
+            "malware": False,
+            "suspicious": True,
+            "category": "invalid_url",
+        }
+
+    pr = _urlparse(target)
+    host = pr.hostname or ""
+
+    # Block URLs that use raw IP addresses
+    ip_flag = False
+    try:
+        if host:
+            _ipaddr.ip_address(host)
+            ip_flag = True
+    except Exception:
+        # Basic dotted-quad pattern fallback
+        if _re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host):
+            ip_flag = True
+
+    # Extract domain/TLD using tldextract
+    ext = _tldextract.extract(target)
+    suffix = (ext.suffix or "").lower()
+    tld = suffix.split(".")[-1] if suffix else ""
+
+    # Blocked/low-reputation TLDs
+    blocked_tlds = {
+        "biz", "ru", "xyz", "top", "click",
+        # Common spammy TLDs; extend as needed
+        "work", "info", "gq", "cf", "ml", "tk"
+    }
+
+    blocked_tld = (tld in blocked_tlds) or any(x == suffix for x in blocked_tlds)
+
+    # Heuristic suspicious patterns
+    suspicious_keywords = (
+        "login", "freegift", "bank", "verify", "account", "bonus",
+        "prize", "giveaway", "paypal", "reset", "wallet", "crypto"
+    )
+    lower_url = target.lower()
+    kw_in_url = any(k in lower_url for k in suspicious_keywords)
+
+    # Long query strings are suspicious
+    qlen = len(pr.query or "")
+    long_query = qlen >= 180
+
+    # Aggregate flags
+    suspicious = bool(ip_flag or blocked_tld or kw_in_url or long_query)
+    phishing = bool(kw_in_url)
+    unsafe = bool(ip_flag or blocked_tld)
+    malware = False  # Not determinable via heuristics alone
+
+    # Risk scoring (0-100)
+    risk_score = 0
+    if ip_flag:
+        risk_score += 40
+    if blocked_tld:
+        risk_score += 50
+    if kw_in_url:
+        risk_score += 30
+    if long_query:
+        risk_score += 20
+    # Clamp
+    risk_score = min(100, risk_score)
+
+    malicious = bool(suspicious and (unsafe or phishing or risk_score >= 40))
+
+    reasons = []
+    if ip_flag:
+        reasons.append("ip_address_url")
+    if blocked_tld:
+        reasons.append(f"blocked_tld:{tld or suffix}")
+    if kw_in_url:
+        reasons.append("suspicious_keyword")
+    if long_query:
+        reasons.append("long_query")
+    category = ",".join(reasons) if reasons else None
+
+    return {
+        "enabled": True,
+        "scanned": True,
+        "malicious": malicious,
+        "risk_score": int(risk_score),
+        "unsafe": bool(unsafe),
+        "phishing": bool(phishing),
+        "malware": bool(malware),
+        "suspicious": bool(suspicious),
+        "category": category,
+    }
+    # Legacy provider-based code below will not execute due to early return above.
     """
     Malicious URL Scanner (IPQualityScore) proxy.
     Query: url (string), strictness (0-3 optional)

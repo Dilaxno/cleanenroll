@@ -272,6 +272,154 @@ async def signup_record(request: Request):
     return {"status": "ok"}
 
 # -----------------------------
+# IPQualityScore Proxy/VPN detection for signup
+# -----------------------------
+
+@router.options("/api/abuse/ipqs-check")
+@router.options("/api/abuse/ipqs-check/")
+async def ipqs_check_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+
+@router.get("/api/abuse/ipqs-check")
+@router.get("/api/abuse/ipqs-check/")
+@limiter.limit("20/minute")
+async def ipqs_check(request: Request):
+    """Query IPQualityScore for the caller IP and decide if signup should be blocked.
+    Returns {allowed: true} when allowed. On block, responds 403 with detail.
+
+    Environment variables:
+      - IPQS_API_KEY: required to enable checks. If missing, endpoint allows by default.
+      - IPQS_STRICTNESS: optional (0-3), default 1.
+      - IPQS_MAX_FRAUD_SCORE: optional (0-100), default 85. Block when fraud_score >= threshold.
+    """
+    import json as _json
+    import urllib.parse as _urlparse
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+    import socket as _socket
+
+    api_key = (os.getenv("IPQS_API_KEY") or os.getenv("IPQUALITYSCORE_API_KEY") or "").strip()
+    if not api_key:
+        # Feature disabled: allow by default
+        return {"enabled": False, "allowed": True}
+
+    # Extract client IP and user agent
+    ip = _ip_from_req(request) or (getattr(getattr(request, "client", None), "host", "") or "")
+    ua = request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
+    lang = request.headers.get("accept-language") or request.headers.get("Accept-Language") or ""
+
+    # If IP is local/private or missing, skip strict blocking
+    try:
+        import ipaddress as _ipaddr
+        if not ip:
+            return {"enabled": True, "allowed": True, "reason": "no_ip"}
+        addr = _ipaddr.ip_address(ip)
+        if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local:
+            return {"enabled": True, "allowed": True, "reason": "private_ip"}
+    except Exception:
+        # Proceed anyway
+        pass
+
+    # Compose IPQS request
+    try:
+        strictness = int(os.getenv("IPQS_STRICTNESS", "1"))
+    except Exception:
+        strictness = 1
+    strictness = max(0, min(3, strictness))
+    try:
+        max_score = int(os.getenv("IPQS_MAX_FRAUD_SCORE", "85"))
+    except Exception:
+        max_score = 85
+
+    base = "https://www.ipqualityscore.com/api/json/ip"
+    q = {
+        "strictness": str(strictness),
+        "user_agent": ua,
+        "user_language": lang,
+        "fast": "1",
+    }
+    query = _urlparse.urlencode(q)
+    url = f"{base}/{api_key}/{_urlparse.quote(ip)}?{query}"
+
+    # Call IPQS with short timeout
+    data = None
+    try:
+        req = _urlreq.Request(url, headers={"Accept": "application/json"})
+        with _urlreq.urlopen(req, timeout=6) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            try:
+                data = _json.loads(raw)
+            except Exception:
+                data = None
+    except _urlerr.HTTPError as e:
+        # Attempt to parse error body
+        try:
+            raw = e.read().decode("utf-8", errors="ignore")
+            data = _json.loads(raw)
+        except Exception:
+            data = None
+    except Exception:
+        data = None
+
+    # If API failed, default allow (fail-open) to avoid blocking legit users on transient errors
+    if not isinstance(data, dict):
+        return {"enabled": True, "allowed": True, "reason": "ipqs_unavailable"}
+
+    # Extract core signals
+    def _truthy(v):
+        return True if v is True else (str(v).lower() in ("1", "true", "yes") if isinstance(v, (str, int, float)) else False)
+
+    proxy = _truthy(data.get("proxy"))
+    vpn = _truthy(data.get("vpn"))
+    tor = _truthy(data.get("tor"))
+    active_vpn = _truthy(data.get("active_vpn")) or _truthy(data.get("vpn_active"))
+    active_tor = _truthy(data.get("active_tor"))
+    recent_abuse = _truthy(data.get("recent_abuse"))
+    bot = _truthy(data.get("bot_status")) or _truthy(data.get("is_crawler"))
+    fraud_score = 0
+    try:
+        fraud_score = int(data.get("fraud_score") or 0)
+    except Exception:
+        fraud_score = 0
+
+    reasons: list[str] = []
+    blocked = False
+    if proxy:
+        blocked = True; reasons.append("proxy")
+    if vpn or active_vpn:
+        blocked = True; reasons.append("vpn")
+    if tor or active_tor:
+        blocked = True; reasons.append("tor")
+    if recent_abuse:
+        blocked = True; reasons.append("recent_abuse")
+    if bot:
+        blocked = True; reasons.append("automation")
+    if fraud_score >= max_score:
+        blocked = True; reasons.append(f"fraud_score>={max_score}")
+
+    country = data.get("country_code") or data.get("country")
+
+    # Respond according to decision
+    if blocked:
+        # Keep message user-friendly and actionable
+        msg = "Signup blocked due to VPN/proxy or high IP risk. Disable VPN/proxy or try another network."
+        # Return 403 to align with frontend's error handling pattern
+        raise HTTPException(status_code=403, detail=msg)
+
+    return {
+        "enabled": True,
+        "allowed": True,
+        "ip": ip,
+        "country": (str(country).upper() if isinstance(country, str) and country else None),
+        "fraud_score": fraud_score,
+    }
+
+# -----------------------------
 # Signup enrichment (IP + country)
 # -----------------------------
 

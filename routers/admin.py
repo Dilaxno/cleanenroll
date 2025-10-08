@@ -630,3 +630,246 @@ async def migrate_firestore_submissions(
         "scope": (formId or "all"),
         "dryRun": bool(dryRun),
     }
+
+
+# -----------------------------
+# Firestore Explorer Admin APIs
+# -----------------------------
+
+class DocWritePayload(BaseModel):
+    path: Optional[str] = None
+    data: Dict[str, Any]
+    merge: Optional[bool] = True
+
+class DocNewPayload(BaseModel):
+    collectionPath: str
+    id: Optional[str] = None
+    data: Dict[str, Any]
+    merge: Optional[bool] = True
+
+class BatchDeletePayload(BaseModel):
+    paths: List[str]
+    cascade: Optional[bool] = False
+
+
+def _resolve_collection_ref(fs, path: str):
+    p = [seg for seg in str(path or '').split('/') if seg]
+    if not p or len(p) % 2 == 0:
+        raise HTTPException(status_code=400, detail="Invalid collection path")
+    ref = fs.collection(p[0])
+    i = 1
+    while i < len(p):
+        if i + 1 >= len(p):
+            break
+        ref = ref.document(p[i]).collection(p[i+1])
+        i += 2
+    return ref
+
+
+def _resolve_doc_ref(fs, path: str):
+    p = [seg for seg in str(path or '').split('/') if seg]
+    if not p or len(p) % 2 != 0:
+        raise HTTPException(status_code=400, detail="Invalid document path")
+    ref = fs.collection(p[0]).document(p[1])
+    i = 2
+    while i < len(p):
+        ref = ref.collection(p[i]).document(p[i+1])
+        i += 2
+    return ref
+
+
+def _delete_doc_recursive(doc_ref) -> int:
+    deleted = 0
+    try:
+        for sub in doc_ref.collections():
+            for d in sub.stream():
+                deleted += _delete_doc_recursive(d.reference)
+    except Exception:
+        pass
+    try:
+        doc_ref.delete()
+        deleted += 1
+    except Exception:
+        pass
+    return deleted
+
+
+@router.get("/firestore/collections")
+@limiter.limit("30/minute")
+async def fs_list_collections(request: Request):
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    fs = admin_firestore.client()
+    try:
+        cols = [c.id for c in fs.collections()]
+        cols.sort()
+        return {"collections": cols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/firestore/collection")
+@limiter.limit("60/minute")
+async def fs_get_collection(request: Request, path: str = Query(..., description="Collection path"), limit: int = Query(default=50, ge=1, le=500)):
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    fs = admin_firestore.client()
+    try:
+        col = _resolve_collection_ref(fs, path)
+        docs = list(col.limit(limit).stream())
+        items = []
+        for d in docs:
+            data = d.to_dict() or {}
+            subcols = []
+            try:
+                subcols = [c.id for c in d.reference.collections()]
+            except Exception:
+                subcols = []
+            items.append({
+                "id": d.id,
+                "path": f"{path}/{d.id}",
+                "data": data,
+                "subcollections": subcols,
+            })
+        return {"path": path, "items": items, "count": len(items)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/firestore/doc")
+@limiter.limit("60/minute")
+async def fs_get_doc(request: Request, path: str = Query(..., description="Document path")):
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    fs = admin_firestore.client()
+    try:
+        ref = _resolve_doc_ref(fs, path)
+        snap = ref.get()
+        if not snap.exists:
+            raise HTTPException(status_code=404, detail="Document not found")
+        data = snap.to_dict() or {}
+        subs = []
+        try:
+            subs = [c.id for c in ref.collections()]
+        except Exception:
+            subs = []
+        return {"path": path, "id": snap.id, "data": data, "subcollections": subs}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/firestore/doc")
+@limiter.limit("60/minute")
+async def fs_patch_doc(request: Request, payload: DocWritePayload = Body(...)):
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    if not payload.path:
+        raise HTTPException(status_code=400, detail="Missing document path")
+    fs = admin_firestore.client()
+    try:
+        ref = _resolve_doc_ref(fs, payload.path)
+        ref.set(payload.data or {}, merge=bool(payload.merge))
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/firestore/doc")
+@limiter.limit("60/minute")
+async def fs_delete_doc(request: Request, path: str = Query(..., description="Document path"), cascade: bool = Query(default=False)):
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    fs = admin_firestore.client()
+    try:
+        ref = _resolve_doc_ref(fs, path)
+        if cascade:
+            n = _delete_doc_recursive(ref)
+            return {"status": "ok", "deleted": n}
+        else:
+            ref.delete()
+            return {"status": "ok", "deleted": 1}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/firestore/doc-new")
+@limiter.limit("60/minute")
+async def fs_new_doc(request: Request, payload: DocNewPayload = Body(...)):
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    fs = admin_firestore.client()
+    try:
+        col = _resolve_collection_ref(fs, payload.collectionPath)
+        if payload.id:
+            ref = col.document(payload.id)
+        else:
+            ref = col.document()
+        ref.set(payload.data or {}, merge=bool(payload.merge))
+        return {"status": "ok", "path": "/".join([payload.collectionPath.strip("/"), ref.id]), "id": ref.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/firestore/batch-delete")
+@limiter.limit("20/minute")
+async def fs_batch_delete(request: Request, payload: BatchDeletePayload = Body(...)):
+    _ = _require_admin(request)
+    _ensure_firebase_initialized()
+    if admin_firestore is None:
+        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    fs = admin_firestore.client()
+    try:
+        paths = [p for p in (payload.paths or []) if str(p).strip()]
+        if not paths:
+            return {"deleted": 0}
+        total = 0
+        if payload.cascade:
+            for p in paths:
+                try:
+                    ref = _resolve_doc_ref(fs, p)
+                    total += _delete_doc_recursive(ref)
+                except Exception:
+                    continue
+            return {"deleted": total}
+        CHUNK = 400
+        for i in range(0, len(paths), CHUNK):
+            chunk = paths[i:i+CHUNK]
+            batch = fs.batch()
+            refs = []
+            for p in chunk:
+                try:
+                    r = _resolve_doc_ref(fs, p)
+                    refs.append(r)
+                    batch.delete(r)
+                except Exception:
+                    continue
+            if refs:
+                batch.commit()
+                total += len(refs)
+        return {"deleted": total}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

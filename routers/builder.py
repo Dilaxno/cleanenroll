@@ -537,6 +537,7 @@ class FormConfig(BaseModel):
     emailRejectBadReputation: bool = False
     minDomainAgeDays: int = 30
     recaptchaEnabled: bool = False
+    urlScanEnabled: bool = False
     gdprComplianceEnabled: bool = False
     showPoweredBy: bool = True
     passwordProtectionEnabled: bool = False
@@ -2228,6 +2229,143 @@ async def get_brand_colors(request: Request, url: str):
         "palette": palette,
         "suggestions": suggestions,
     }
+
+@router.get("/url/scan")
+@limiter.limit("30/minute")
+async def ipqs_url_scan(request: Request, url: str, strictness: Optional[int] = None):
+    """
+    Malicious URL Scanner (IPQualityScore) proxy.
+    Query: url (string), strictness (0-3 optional)
+    Returns a compact, frontend-friendly payload:
+      {
+        enabled: bool,       # false when API key missing
+        scanned: bool,       # true when provider returned a result
+        malicious: bool,     # true if unsafe/phishing/malware/suspicious or risk_score >= threshold
+        risk_score: int|None,
+        unsafe: bool,
+        phishing: bool,
+        malware: bool,
+        suspicious: bool,
+        category: str|None,
+        domain_age: int|None
+      }
+    Fails open (enabled=false, scanned=false) when provider not configured or unreachable.
+    """
+    try:
+        API_KEY = (os.getenv("IPQS_API_KEY") or os.getenv("IPQUALITYSCORE_API_KEY") or "").strip()
+        if not API_KEY:
+            return {"enabled": False, "scanned": False}
+        # Normalize url (prepend https:// when missing) and validate
+        raw = (url or "").strip()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Missing url")
+        try:
+            target = raw
+            if not re.match(r"^https?://", target, flags=re.I):
+                target = "https://" + target
+            # Validate URL structure
+            _ = urllib.parse.urlparse(target)
+            if not _.scheme or not _.netloc:
+                raise ValueError("invalid")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid url")
+
+        # Strictness and thresholds (env-overridable)
+        try:
+            s = int(strictness) if strictness is not None else int(os.getenv("IPQS_URL_STRICTNESS") or 1)
+        except Exception:
+            s = 1
+        try:
+            max_score = int(os.getenv("IPQS_URL_MAX_RISK_SCORE") or 85)
+        except Exception:
+            max_score = 85
+        s = max(0, min(3, s))
+
+        # Build request to IPQualityScore Malicious URL Scanner API
+        qurl = (
+            f"https://ipqualityscore.com/api/json/url/{API_KEY}/"
+            + urllib.parse.quote(target, safe="")
+            + "?" + urllib.parse.urlencode({
+                "strictness": s,
+                "fast": 1,
+                "timeout": 10,
+                # Pass basic hints which some providers use heuristically
+                "user_language": (request.headers.get("Accept-Language") or "en").split(",")[0][:8],
+            })
+        )
+        headers = {
+            "User-Agent": request.headers.get("User-Agent") or "CleanEnroll-Backend/1.0",
+            "Accept": "application/json",
+        }
+        try:
+            r = requests.get(qurl, headers=headers, timeout=10)
+        except Exception as e:
+            # Fail open (do not block submissions on provider error)
+            return {"enabled": True, "scanned": False, "error": str(e)}
+        if not r.ok:
+            # Provider reachable but non-200 -> treat as not scanned
+            return {"enabled": True, "scanned": False, "status": r.status_code}
+        data = {}
+        try:
+            data = r.json() or {}
+        except Exception:
+            data = {}
+
+        # Extract fields defensively across potential key variants
+        def _bool(*keys):
+            for k in keys:
+                v = data.get(k)
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, (int, float)):
+                    return bool(v)
+            return False
+        def _int(*keys):
+            for k in keys:
+                v = data.get(k)
+                try:
+                    if v is None:
+                        continue
+                    return int(v)
+                except Exception:
+                    continue
+            return None
+        def _str(*keys):
+            for k in keys:
+                v = data.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return None
+
+        risk_score = _int("risk_score", "riskScore", "overall_score", "score")
+        phishing = _bool("phishing")
+        malware = _bool("malware")
+        suspicious = _bool("suspicious")
+        unsafe = _bool("unsafe", "unsafe_url", "dangerous")
+        category = _str("category", "category_description")
+        # Domain age may appear as object or days
+        domain_age = _int("domain_age_days", "domain_age", "age")
+
+        malicious = bool(
+            unsafe or phishing or malware or suspicious or ((risk_score or 0) >= max_score)
+        )
+        return {
+            "enabled": True,
+            "scanned": True,
+            "malicious": malicious,
+            "risk_score": risk_score,
+            "unsafe": unsafe,
+            "phishing": phishing,
+            "malware": malware,
+            "suspicious": suspicious,
+            "category": category,
+            "domain_age": domain_age,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Fail open; surface enabled to indicate feature is configured
+        return {"enabled": True, "scanned": False, "error": str(e)}
 
 @router.post("/ai/copilot")
 @limiter.limit("20/minute")

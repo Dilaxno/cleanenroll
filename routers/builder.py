@@ -4166,7 +4166,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     font_family = (cfg.get("theme") or {}).get("fontFamily") or None
                     footer_html = (cfg.get("autoReplyFooterHtml") or "").strip() or None
                     # Render user-facing client email with unbranded client template, not the app's internal base.html
-                    html = render_email("base.html", {
+                    html = render_email("client_base.html", {
                         "subject": subject,
                         "title": subject,
                         "preheader": None,

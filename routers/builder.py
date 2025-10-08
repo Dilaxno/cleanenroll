@@ -2242,17 +2242,92 @@ async def ipqs_url_scan(request: Request, url: str, strictness: Optional[int] = 
         import tldextract as _tldextract
         import validators as _validators
     except Exception:
-        # If required libs are not available, report disabled to caller
+        # Fallback when optional libs are missing: perform minimal stdlib-based heuristics
+        import re as _re
+        from urllib.parse import urlparse as _urlparse
+        target = (url or "").strip()
+        if not target:
+            return {
+                "enabled": True,
+                "scanned": False,
+                "malicious": False,
+                "risk_score": None,
+                "unsafe": False,
+                "phishing": False,
+                "malware": False,
+                "suspicious": False,
+                "category": None,
+            }
+        if not _re.match(r"^https?://", target, _re.I):
+            target = "https://" + target
+        pr = _urlparse(target)
+        host = pr.hostname or ""
+        # Basic URL validity
+        if not host:
+            return {
+                "enabled": True,
+                "scanned": True,
+                "malicious": True,
+                "risk_score": 99,
+                "unsafe": True,
+                "phishing": False,
+                "malware": False,
+                "suspicious": True,
+                "category": "invalid_url",
+            }
+        # IP address detection (regex only)
+        ip_flag = bool(_re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host))
+        # TLD extraction (approximate without tldextract)
+        parts = host.split(".")
+        tld = parts[-1].lower() if len(parts) >= 2 else ""
+        blocked_tlds = {
+            "biz", "ru", "xyz", "top", "click",
+            "work", "info", "gq", "cf", "ml", "tk"
+        }
+        blocked_tld = (tld in blocked_tlds)
+        suspicious_keywords = (
+            "login", "freegift", "bank", "verify", "account", "bonus",
+            "prize", "giveaway", "paypal", "reset", "wallet", "crypto"
+        )
+        lower_url = target.lower()
+        kw_in_url = any(k in lower_url for k in suspicious_keywords)
+        qlen = len(pr.query or "")
+        long_query = qlen >= 180
+        suspicious = bool(ip_flag or blocked_tld or kw_in_url or long_query)
+        phishing = bool(kw_in_url)
+        unsafe = bool(ip_flag or blocked_tld)
+        malware = False
+        risk_score = 0
+        if ip_flag:
+            risk_score += 40
+        if blocked_tld:
+            risk_score += 50
+        if kw_in_url:
+            risk_score += 30
+        if long_query:
+            risk_score += 20
+        risk_score = min(100, risk_score)
+        malicious = bool(suspicious and (unsafe or phishing or risk_score >= 40))
+        reasons = []
+        if ip_flag:
+            reasons.append("ip_address_url")
+        if blocked_tld:
+            reasons.append(f"blocked_tld:{tld}")
+        if kw_in_url:
+            reasons.append("suspicious_keyword")
+        if long_query:
+            reasons.append("long_query")
+        category = ",".join(reasons) if reasons else None
         return {
-            "enabled": False,
-            "scanned": False,
-            "malicious": False,
-            "risk_score": None,
-            "unsafe": False,
-            "phishing": False,
-            "malware": False,
-            "suspicious": False,
-            "category": None,
+            "enabled": True,
+            "scanned": True,
+            "malicious": malicious,
+            "risk_score": int(risk_score),
+            "unsafe": bool(unsafe),
+            "phishing": bool(phishing),
+            "malware": bool(malware),
+            "suspicious": bool(suspicious),
+            "category": category,
         }
 
     target = (url or "").strip()

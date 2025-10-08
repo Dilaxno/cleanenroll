@@ -4756,7 +4756,15 @@ async def analytics_summary(form_id: str, from_ts: Optional[str] = Query(default
             fields["filled"][flab] = fields["filled"].get(flab, 0) + 1
         if t == "field_error":
             fields["errors"][flab] = fields["errors"].get(flab, 0) + 1
-    conv = round(((totals["submissions"] / totals["views"]) * 1000)) / 10 if totals["views"] else 0
+    # Compute conversion rate (%), capped to [0, 100] with 1 decimal precision
+    if totals["views"]:
+        conv = round((totals["submissions"] / totals["views"]) * 1000) / 10
+    else:
+        conv = 0.0
+    if conv < 0:
+        conv = 0.0
+    if conv > 100:
+        conv = 100.0
     return {
         "totals": totals,
         "conversionRate": conv,

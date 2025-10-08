@@ -1399,6 +1399,170 @@ except Exception:
 
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
 
+@router.post("/file/scan")
+@limiter.limit("30/minute")
+async def file_scan(request: Request, file: UploadFile = File(...)):
+    """
+    Real-time file malware scanning using VirusTotal (vt-py official client).
+    Accepts multipart/form-data file and returns a normalized verdict structure compatible with the viewer.
+
+    Response shape:
+    {
+      enabled: bool,
+      scanned: bool,
+      malicious: bool,
+      risk_score: int|null,
+      unsafe: bool,
+      phishing: bool,
+      malware: bool,
+      suspicious: bool,
+      category: str|null,
+      sha256?: str,
+      permalink?: str
+    }
+    """
+    # Ensure API key configured
+    api_key = (os.getenv("VIRUSTOTAL_API_KEY") or os.getenv("VT_API_KEY") or "").strip()
+    if not api_key:
+        return {
+            "enabled": False,
+            "scanned": False,
+            "malicious": False,
+            "risk_score": None,
+            "unsafe": False,
+            "phishing": False,
+            "malware": False,
+            "suspicious": False,
+            "category": "not_configured",
+        }
+    # Read entire file into memory (VT free endpoints require direct upload; size <= ~32MB)
+    try:
+        content = await file.read()
+    except Exception:
+        content = b""
+    size = len(content or b"")
+    if size <= 0:
+        return {
+            "enabled": True,
+            "scanned": True,
+            "malicious": True,
+            "risk_score": 99,
+            "unsafe": True,
+            "phishing": False,
+            "malware": True,
+            "suspicious": True,
+            "category": "empty_file",
+        }
+    # VT v3 public API typical file upload limit is 32MB; block larger files
+    MAX_VT_BYTES = 32 * 1024 * 1024
+    if size > MAX_VT_BYTES:
+        return {
+            "enabled": True,
+            "scanned": False,
+            "malicious": False,
+            "risk_score": None,
+            "unsafe": False,
+            "phishing": False,
+            "malware": False,
+            "suspicious": False,
+            "category": "too_large",
+        }
+    try:
+        import vt  # vt-py official client
+    except Exception:
+        return {
+            "enabled": True,
+            "scanned": False,
+            "malicious": False,
+            "risk_score": None,
+            "unsafe": False,
+            "phishing": False,
+            "malware": False,
+            "suspicious": False,
+            "category": "vt_client_missing",
+        }
+    sha256 = None
+    try:
+        with vt.Client(api_key) as client:  # type: ignore
+            # Submit file for analysis
+            analysis = client.scan_file(content, file.filename or "upload.bin")
+            analysis_id = getattr(analysis, "id", None) or getattr(analysis, "_id", None)
+            # Try to capture sha256 from meta if available
+            try:
+                meta = getattr(analysis, "meta", None) or {}
+                if isinstance(meta, dict):
+                    finfo = meta.get("file_info") or {}
+                    sha256 = finfo.get("sha256") or sha256
+            except Exception:
+                pass
+            # Poll until completed or timeout (~20s)
+            result = None
+            for _ in range(20):
+                try:
+                    if not analysis_id:
+                        break
+                    result = client.get_object(f"/analyses/{analysis_id}")
+                    status = getattr(result, "status", None) or (getattr(result, "attributes", {}).get("status") if hasattr(result, "attributes") else None)
+                    if status == "completed":
+                        break
+                    time.sleep(1.0)
+                except Exception:
+                    time.sleep(1.0)
+            # Extract stats
+            stats = None
+            try:
+                stats = getattr(result, "stats", None)
+                if stats is None and hasattr(result, "attributes"):
+                    stats = getattr(result, "attributes").get("stats")  # type: ignore
+            except Exception:
+                stats = None
+            # Fallback: query file object by hash if we know it
+            if (not stats) and sha256:
+                try:
+                    fobj = client.get_object(f"/files/{sha256}")
+                    stats = getattr(fobj, "last_analysis_stats", None) or (getattr(fobj, "attributes", {}).get("last_analysis_stats") if hasattr(fobj, "attributes") else None)
+                except Exception:
+                    pass
+            mal = int((stats or {}).get("malicious", 0) or 0)
+            susp = int((stats or {}).get("suspicious", 0) or 0)
+            undet = int((stats or {}).get("undetected", 0) or 0)
+            harmless = int((stats or {}).get("harmless", 0) or 0)
+            # Compute a simple risk score
+            risk_score = min(100, mal * 20 + susp * 10 + (0 if undet or harmless else 5))
+            malicious = bool(mal > 0 or susp > 0)
+            category = ",".join([
+                f"malicious={mal}",
+                f"suspicious={susp}",
+                f"harmless={harmless}",
+                f"undetected={undet}",
+            ])
+            permalink = f"https://www.virustotal.com/gui/file/{sha256}" if sha256 else None
+            return {
+                "enabled": True,
+                "scanned": True,
+                "malicious": malicious,
+                "risk_score": int(risk_score),
+                "unsafe": malicious,
+                "phishing": False,
+                "malware": malicious,
+                "suspicious": bool(susp > 0),
+                "category": category,
+                "sha256": sha256,
+                "permalink": permalink,
+            }
+    except Exception as e:
+        return {
+            "enabled": True,
+            "scanned": False,
+            "malicious": False,
+            "risk_score": None,
+            "unsafe": False,
+            "phishing": False,
+            "malware": False,
+            "suspicious": False,
+            "category": f"error:{e}",
+        } 
+
 @router.get("/usage/submissions-month")
 async def get_monthly_usage(userId: str = Query(...)):
     """Return this month's submissions count for a user and plan-aware limit.

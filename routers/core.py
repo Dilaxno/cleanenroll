@@ -1631,6 +1631,29 @@ async def embed_js():
 # --------------
 # SPA route redirect helpers
 # --------------
+@router.get("/form/{form_id}", response_class=HTMLResponse)
+async def serve_form_backend(form_id: str):
+    """Serve /form/{form_id} directly from the backend with headers that allow embedding anywhere.
+    This avoids relying on frontend redirects and ensures XFO/CSP are set permissively for embeds.
+    """
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Form {form_id}</title>
+</head>
+<body>
+  <div id="ce-embed"></div>
+  <script async src="/embed.js" data-ce-form="{form_id}"></script>
+</body>
+</html>"""
+    resp = HTMLResponse(content=html)
+    # Allow embedding by clearing XFO and setting permissive frame-ancestors
+    resp.headers["X-Frame-Options"] = ""
+    resp.headers["Content-Security-Policy"] = "frame-ancestors *;"
+    return resp
+
 @router.get("/form/{path:path}")
 async def spa_form_redirect(path: str, request: Request):
     """Redirect SPA /form/* paths to the frontend app to avoid 404s on the API server.

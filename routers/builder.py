@@ -1086,7 +1086,7 @@ def _normalize_domain(s: Optional[str]) -> Optional[str]:
 
 # Common role-based local-part prefixes
 _ROLE_BASED_PREFIXES = {
-    'admin','administrator','hostmaster','webmaster','postmaster','root','support','info','sales','contact','help','noreply','no-reply','abuse','billing','security','office','hr'
+    'admin','administrator','hostmaster','webmaster','postmaster','root','support','info','sales','contact','help','noreply','no-reply','abuse','billing','security','office','hr','hello','hi'
 }
 
 def _is_role_based_email(email: str) -> bool:

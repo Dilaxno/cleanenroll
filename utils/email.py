@@ -39,6 +39,10 @@ SMTP_FROM = os.getenv("SMTP_FROM", "no-reply@cleanenroll.com")
 # Resend configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM = os.getenv("RESEND_FROM", SMTP_FROM)
+# Friendly display name for From header
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "").strip()
+RESEND_FROM_NAME = os.getenv("RESEND_FROM_NAME", "").strip()
+DEFAULT_FROM_NAME = SMTP_FROM_NAME or RESEND_FROM_NAME or os.getenv("APP_NAME", "CleanEnroll")
 
 # Debugging
 EMAIL_DEBUG = os.getenv("EMAIL_DEBUG", "false").lower() in ("1", "true", "yes", "on")
@@ -49,6 +53,23 @@ logger = logging.getLogger("backend.email")
 def _elog(msg: str):
     if EMAIL_DEBUG:
         logger.debug(msg)
+
+
+def _format_from(name: str | None, addr: str | None) -> str:
+    """Return a properly formatted From header.
+    If addr already contains a display name with angle brackets, return as-is.
+    """
+    try:
+        a = (addr or "").strip()
+        if not a:
+            return (name or "")
+        # If already in "Name <email@domain>" form or just has angle brackets, keep it
+        if ("<" in a) and (">" in a):
+            return a
+        n = (name or "").strip()
+        return f"{n} <{a}>" if n else a
+    except Exception:
+        return (addr or "")
 
 from pathlib import Path
 
@@ -162,7 +183,9 @@ def send_email_html(to_email: str, subject: str, html_body: str, from_addr: str 
       - SMTP_PORT: SMTP server port (default: 587 for STARTTLS)
       - SMTP_USER: SMTP username (Resend recommends 'resend')
       - RESEND_API_KEY or SMTP_PASSWORD: SMTP password (use your Resend API key)
-      - RESEND_FROM / SMTP_FROM: From address
+      - RESEND_FROM / SMTP_FROM: From address (can be bare email or "Name <email@domain>")
+      - RESEND_FROM_NAME / SMTP_FROM_NAME: Optional display name used when From is a bare email
+      - APP_NAME: Optional fallback display name when the above are not set
     """
     host = os.getenv("SMTP_HOST", "smtp.resend.com")
     try:
@@ -173,6 +196,7 @@ def send_email_html(to_email: str, subject: str, html_body: str, from_addr: str 
     password = os.getenv("RESEND_API_KEY") or os.getenv("SMTP_PASSWORD", "")
 
     from_addr_effective = (from_addr or "").strip() or RESEND_FROM or SMTP_FROM
+    sender_name = DEFAULT_FROM_NAME
 
     if not password:
         logger.error("SMTP password / RESEND_API_KEY missing; cannot send email")
@@ -180,7 +204,7 @@ def send_email_html(to_email: str, subject: str, html_body: str, from_addr: str 
 
     # Build MIME email with plain-text fallback
     msg = EmailMessage()
-    msg["From"] = from_addr_effective
+    msg["From"] = _format_from(sender_name, from_addr_effective)
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.set_content("This email contains HTML content. If you see this, please view in an HTML-capable client.")
@@ -201,7 +225,7 @@ def send_email_html(to_email: str, subject: str, html_body: str, from_addr: str 
                 server.ehlo()
                 server.login(username, password)
                 server.send_message(msg)
-        _elog(f"SMTP send ok via {host}:{port} from={from_addr_effective} to={to_email}")
+        _elog(f"SMTP send ok via {host}:{port} from={msg['From']} to={to_email}")
     except smtplib.SMTPResponseException as e:
         code = getattr(e, 'smtp_code', None)
         err = getattr(e, 'smtp_error', b'').decode('utf-8', 'ignore') if isinstance(getattr(e, 'smtp_error', b''), (bytes, bytearray)) else str(getattr(e, 'smtp_error', ''))

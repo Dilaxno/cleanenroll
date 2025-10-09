@@ -2418,8 +2418,92 @@ async def get_brand_colors(request: Request, url: str):
 @router.get("/url/scan")
 @limiter.limit("30/minute")
 async def ipqs_url_scan(request: Request, url: str, strictness: Optional[int] = None):
-    # Heuristic malicious URL scanning using local rules and libraries.
-    # Short-circuit and return without calling any third-party provider.
+    """
+    Malicious URL scanning using Google Safe Browsing (primary) with heuristic fallback.
+    """
+    # Normalize incoming URL
+    target_raw = (url or "").strip()
+    if not target_raw:
+        return {
+            "enabled": True,
+            "scanned": False,
+            "malicious": False,
+            "risk_score": None,
+            "unsafe": False,
+            "phishing": False,
+            "malware": False,
+            "suspicious": False,
+            "category": None,
+        }
+    target_norm = target_raw if re.match(r"^https?://", target_raw, re.I) else ("https://" + target_raw)
+
+    # Google Safe Browsing v4 (primary)
+    API_KEY = (os.getenv("GOOGLE_SAFE_BROWSING_API_KEY") or os.getenv("SAFE_BROWSING_API_KEY") or "").strip()
+    if API_KEY:
+        try:
+            gsb_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={API_KEY}"
+            body = {
+                "client": {"clientId": "cleanenroll", "clientVersion": "1.0.0"},
+                "threatInfo": {
+                    "threatTypes": [
+                        "MALWARE",
+                        "SOCIAL_ENGINEERING",
+                        "UNWANTED_SOFTWARE",
+                        "POTENTIALLY_HARMFUL_APPLICATION",
+                    ],
+                    "platformTypes": ["ANY_PLATFORM"],
+                    "threatEntryTypes": ["URL"],
+                    "threatEntries": [{"url": target_norm}],
+                },
+            }
+            resp = requests.post(gsb_url, json=body, timeout=10)
+            if resp.ok:
+                data = resp.json() if resp.text else {}
+                matches = data.get("matches") or data.get("threatMatches") or []
+                if isinstance(matches, list) and len(matches) > 0:
+                    # Aggregate threat types
+                    types = set()
+                    for m in matches:
+                        try:
+                            tt = str(m.get("threatType") or m.get("threat") or "").upper()
+                            if tt:
+                                types.add(tt)
+                        except Exception:
+                            continue
+                    phishing = any(t in types for t in ("SOCIAL_ENGINEERING", "SOCIAL_ENGINEERING_EXTENDED_COVERAGE"))
+                    malware = ("MALWARE" in types)
+                    unwanted = any(t in types for t in ("UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"))
+                    suspicious = phishing or malware or unwanted
+                    category = ",".join(sorted(types)) if types else "google_safe_browsing_match"
+                    return {
+                        "enabled": True,
+                        "scanned": True,
+                        "malicious": True,
+                        "risk_score": 100,
+                        "unsafe": True,
+                        "phishing": phishing,
+                        "malware": malware,
+                        "suspicious": suspicious,
+                        "category": category,
+                    }
+                # No matches => clean
+                return {
+                    "enabled": True,
+                    "scanned": True,
+                    "malicious": False,
+                    "risk_score": 0,
+                    "unsafe": False,
+                    "phishing": False,
+                    "malware": False,
+                    "suspicious": False,
+                    "category": None,
+                }
+            # Non-200 => fall back
+        except Exception:
+            # Fall through to heuristics
+            pass
+
+    # Heuristic fallback when Safe Browsing is not configured or fails
     try:
         import re as _re
         from urllib.parse import urlparse as _urlparse
@@ -2430,21 +2514,7 @@ async def ipqs_url_scan(request: Request, url: str, strictness: Optional[int] = 
         # Fallback when optional libs are missing: perform minimal stdlib-based heuristics
         import re as _re
         from urllib.parse import urlparse as _urlparse
-        target = (url or "").strip()
-        if not target:
-            return {
-                "enabled": True,
-                "scanned": False,
-                "malicious": False,
-                "risk_score": None,
-                "unsafe": False,
-                "phishing": False,
-                "malware": False,
-                "suspicious": False,
-                "category": None,
-            }
-        if not _re.match(r"^https?://", target, _re.I):
-            target = "https://" + target
+        target = target_norm
         pr = _urlparse(target)
         host = pr.hostname or ""
         # Basic URL validity

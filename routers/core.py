@@ -773,6 +773,32 @@ async def verify_send_options():
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
     })
 
+# -----------------------------
+# Email existence (privacy-preserving, no enumeration)
+# -----------------------------
+@router.options("/api/auth/email-exists")
+@router.options("/api/auth/email-exists/")
+async def email_exists_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+@router.get("/api/auth/email-exists")
+@router.get("/api/auth/email-exists/")
+@limiter.limit("30/minute")
+async def email_exists(email: str | None = None):
+    """Generic responder for email existence checks.
+    Always returns 200 without revealing existence to prevent user enumeration.
+    """
+    try:
+        masked = _mask_email(email)
+        logger.info("[email-exists] check for %s", masked)
+    except Exception:
+        pass
+    return {"status": "ok"}
+
 
 @router.get("/api/auth/verify/confirm")
 @router.get("/api/auth/verify/confirm/")

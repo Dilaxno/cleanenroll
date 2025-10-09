@@ -1409,6 +1409,24 @@ except Exception:
 
 router = APIRouter(prefix="/api/builder", tags=["builder"]) 
 
+@router.get("/user/plan")
+@limiter.limit("120/minute")
+async def get_user_plan(userId: str = Query(...)):
+    """
+    Return the user's subscription plan resolved via Supabase (fallback to Firestore when Supabase isn't configured).
+    Response: { plan: 'free'|'pro', isPro: boolean }
+    """
+    try:
+        uid = (userId or "").strip()
+        if not uid:
+            raise HTTPException(status_code=400, detail="Missing userId")
+        is_pro = _is_pro_plan(uid)
+        return {"plan": ("pro" if is_pro else "free"), "isPro": bool(is_pro)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch plan: {e}") 
+
 @router.post("/file/scan")
 @limiter.limit("30/minute")
 async def file_scan(request: Request, file: UploadFile = File(...)):

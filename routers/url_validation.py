@@ -181,14 +181,14 @@ async def validate_url_options():
 @router.get("/api/validate-url")
 @router.get("/api/validate-url/")
 @limiter.limit("30/minute")
-async def validate_url_get(url: str):
+async def validate_url_get(request: Request, url: str):
     return await _validate_url_impl(url)
 
 
 @router.post("/api/validate-url")
 @router.post("/api/validate-url/")
 @limiter.limit("30/minute")
-async def validate_url_post(req: UrlCheckRequest):
+async def validate_url_post(request: Request, req: UrlCheckRequest):
     return await _validate_url_impl(req.url)
 
 

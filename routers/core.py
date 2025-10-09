@@ -788,7 +788,7 @@ async def email_exists_options():
 @router.get("/api/auth/email-exists")
 @router.get("/api/auth/email-exists/")
 @limiter.limit("30/minute")
-async def email_exists(email: str | None = None):
+async def email_exists(request: Request, email: str | None = None):
     """Generic responder for email existence checks.
     Always returns 200 without revealing existence to prevent user enumeration.
     """

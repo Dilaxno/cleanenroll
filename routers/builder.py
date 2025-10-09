@@ -1645,6 +1645,194 @@ async def increment_form_view(form_id: str, request: Request):
         # Non-fatal: return success false but 200 to avoid breaking client flows
         return JSONResponse(status_code=200, content={"success": False, "error": str(e)}) 
 
+# Session recordings to Cloudflare R2 (private bucket)
+@router.post("/forms/{form_id}/sessions/{session_id}/upload")
+@limiter.limit("240/minute")
+async def upload_session_chunk(form_id: str, session_id: str, request: Request, payload: Dict = None):
+    """
+    Public endpoint used by the form viewer to upload rrweb chunks securely to private R2.
+    Body: { idx: number, data: string } where data is JSON.stringify([...rrweb events...]).
+    """
+    try:
+        body = payload or {}
+        try:
+            idx = int(body.get("idx") or 0)
+        except Exception:
+            idx = 0
+        data = str(body.get("data") or "")
+        if not data:
+            raise HTTPException(status_code=400, detail="invalid_chunk")
+        if idx < 0:
+            raise HTTPException(status_code=400, detail="invalid_index")
+        # Verify form exists to resolve owner id
+        path = _form_path(form_id)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="form_not_found")
+        form_data = _read_json(path)
+        owner_id = str(form_data.get("userId") or "").strip()
+        if not owner_id:
+            raise HTTPException(status_code=400, detail="missing_owner")
+        # Enforce reasonable per-chunk limits (events are text JSON)
+        if len(data) > 2_000_000:  # ~2MB raw safety cap
+            raise HTTPException(status_code=413, detail="chunk_too_large")
+        # Gzip compress to save storage/bandwidth
+        import gzip, io
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+            gz.write(data.encode("utf-8"))
+        content = buf.getvalue()
+        key = f"recordings/{owner_id}/{form_id}/{session_id}/chunk-{idx:06d}.json.gz"
+        try:
+            s3 = _r2_client()
+            s3.put_object(Bucket=R2_BUCKET, Key=key, Body=content, ContentType="application/json", ContentEncoding="gzip")
+            return {"ok": True, "key": key, "bytes": len(content)}
+        except Exception as e:
+            logger.exception("upload_session_chunk failed form=%s session=%s", form_id, session_id)
+            raise HTTPException(status_code=500, detail=f"failed_upload: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:  # pragma: no cover
+        logger.exception("upload_session_chunk unexpected error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/forms/{form_id}/sessions")
+async def list_sessions(form_id: str, request: Request):
+    """
+    List rrweb sessions stored in R2 for the authenticated form owner.
+    Returns { sessions: [{ sessionId, chunks, bytes }] }
+    """
+    uid = _verify_firebase_uid(request)
+    # Ownership check
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="form_not_found")
+    form_data = _read_json(path)
+    owner_id = str(form_data.get("userId") or "").strip()
+    if uid != owner_id:
+        raise HTTPException(status_code=403, detail="forbidden")
+    prefix = f"recordings/{owner_id}/{form_id}/"
+    try:
+        s3 = _r2_client()
+        sessions: Dict[str, Dict[str, Any]] = {}
+        token = None
+        while True:
+            resp = s3.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix, ContinuationToken=token) if token else s3.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix)
+            for obj in resp.get("Contents", []):
+                key = str(obj.get("Key") or "")
+                parts = key.split("/")
+                if len(parts) < 4:
+                    continue
+                sid = parts[3]
+                ent = sessions.setdefault(sid, {"sessionId": sid, "chunks": 0, "bytes": 0})
+                ent["chunks"] += 1
+                try:
+                    ent["bytes"] += int(obj.get("Size") or 0)
+                except Exception:
+                    pass
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+        items = sorted(sessions.values(), key=lambda x: x["sessionId"])  # stable order
+        return {"sessions": items}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("list_sessions failed form=%s", form_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/forms/{form_id}/sessions/{session_id}/chunks")
+async def get_session_chunks(form_id: str, session_id: str, request: Request):
+    """
+    Return presigned GET URLs for all chunks in a session for the authenticated owner.
+    { chunks: [{ idx, url, key }], count }
+    """
+    uid = _verify_firebase_uid(request)
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="form_not_found")
+    form_data = _read_json(path)
+    owner_id = str(form_data.get("userId") or "").strip()
+    if uid != owner_id:
+        raise HTTPException(status_code=403, detail="forbidden")
+    prefix = f"recordings/{owner_id}/{form_id}/{session_id}/"
+    try:
+        s3 = _r2_client()
+        resp = s3.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix)
+        out: list[Dict[str, Any]] = []
+        for obj in resp.get("Contents", []):
+            key = obj.get("Key")
+            if not key:
+                continue
+            try:
+                url = s3.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={"Bucket": R2_BUCKET, "Key": key},
+                    ExpiresIn=120,
+                )
+            except Exception:
+                continue
+            # Attempt to extract chunk index
+            idx = 0
+            try:
+                import re as _re
+                m = _re.search(r"chunk-(\d+)\.json", key)
+                if m:
+                    idx = int(m.group(1))
+            except Exception:
+                pass
+            out.append({"idx": idx, "url": url, "key": key})
+        out.sort(key=lambda x: x.get("idx", 0))
+        return {"chunks": out, "count": len(out)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_session_chunks failed form=%s session=%s", form_id, session_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/forms/{form_id}/sessions/{session_id}/delete")
+async def delete_session_recordings(form_id: str, session_id: str, request: Request, payload: Dict = None):
+    """
+    Delete all R2 objects for a session for the authenticated owner.
+    """
+    uid = _verify_firebase_uid(request)
+    path = _form_path(form_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="form_not_found")
+    form_data = _read_json(path)
+    owner_id = str(form_data.get("userId") or "").strip()
+    if uid != owner_id:
+        raise HTTPException(status_code=403, detail="forbidden")
+    prefix = f"recordings/{owner_id}/{form_id}/{session_id}/"
+    try:
+        s3 = _r2_client()
+        keys: list[Dict[str, str]] = []
+        token = None
+        while True:
+            resp = s3.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix, ContinuationToken=token) if token else s3.list_objects_v2(Bucket=R2_BUCKET, Prefix=prefix)
+            for obj in resp.get("Contents", []):
+                k = obj.get("Key")
+                if k:
+                    keys.append({"Key": k})
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+        deleted = 0
+        for i in range(0, len(keys), 900):
+            try:
+                res = s3.delete_objects(Bucket=R2_BUCKET, Delete={"Objects": keys[i:i+900]})
+                deleted += len(res.get("Deleted", []))
+            except Exception:
+                pass
+        return {"deleted": deleted}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("delete_session_recordings failed form=%s session=%s", form_id, session_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
 # New: bulk delete session recordings (server-side) to avoid client-side Firestore blocks
 @router.post("/forms/{form_id}/sessions/delete-batch")
 @limiter.limit("60/minute")

@@ -1411,7 +1411,7 @@ router = APIRouter(prefix="/api/builder", tags=["builder"])
 
 @router.get("/user/plan")
 @limiter.limit("120/minute")
-async def get_user_plan(userId: str = Query(...)):
+async def get_user_plan(request: Request, userId: str = Query(...)):
     """
     Return the user's subscription plan resolved via Supabase (fallback to Firestore when Supabase isn't configured).
     Response: { plan: 'free'|'pro', isPro: boolean }

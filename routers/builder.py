@@ -1645,6 +1645,84 @@ async def increment_form_view(form_id: str, request: Request):
         # Non-fatal: return success false but 200 to avoid breaking client flows
         return JSONResponse(status_code=200, content={"success": False, "error": str(e)}) 
 
+# New: bulk delete session recordings (server-side) to avoid client-side Firestore blocks
+@router.post("/forms/{form_id}/sessions/delete-batch")
+@limiter.limit("60/minute")
+async def delete_sessions_batch(form_id: str, request: Request, payload: Dict = None):
+    """Delete multiple session recordings and their chunk documents under forms/{form_id}/sessions/*.
+    Body: { ids: [sessionId1, sessionId2, ...] }
+    Requires the caller to be authenticated and own the form.
+    """
+    uid = _verify_firebase_uid(request)
+    body = payload or {}
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or len(ids) == 0:
+        raise HTTPException(status_code=400, detail="Provide 'ids' array of session IDs")
+    if not _FS_AVAILABLE:
+        raise HTTPException(status_code=500, detail="firestore_unavailable")
+
+    # Ownership check (Firestore first, then file-based fallback)
+    owner_ok = False
+    try:
+        snap = _fs.client().collection("forms").document(form_id).get()
+        data = snap.to_dict() or {}
+        owner = str(data.get("userId") or data.get("user_id") or "").strip()
+        if owner and owner == uid:
+            owner_ok = True
+        elif owner and owner != uid:
+            raise HTTPException(status_code=403, detail="Not your form")
+    except HTTPException:
+        raise
+    except Exception:
+        owner_ok = False
+    if not owner_ok:
+        try:
+            path = _form_path(form_id)
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                owner = str((info or {}).get("userId") or "").strip()
+                if owner and owner == uid:
+                    owner_ok = True
+        except Exception:
+            owner_ok = False
+    if not owner_ok:
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    db = _fs.client()
+    deleted = 0
+    for sid in ids:
+        sid = str(sid or "").strip()
+        if not sid:
+            continue
+        try:
+            chunks_ref = db.collection("forms").document(form_id).collection("sessions").document(sid).collection("chunks")
+            # Collect chunk doc ids
+            chunk_ids = []
+            try:
+                for doc in chunks_ref.stream():
+                    chunk_ids.append(doc.id)
+            except Exception:
+                chunk_ids = []
+            # Delete chunks in batches (<= 400 per commit)
+            for i in range(0, len(chunk_ids), 400):
+                batch = db.batch()
+                for cid in chunk_ids[i:i+400]:
+                    batch.delete(chunks_ref.document(cid))
+                try:
+                    batch.commit()
+                except Exception:
+                    pass
+            # Delete the session document itself
+            try:
+                db.collection("forms").document(form_id).collection("sessions").document(sid).delete()
+            except Exception:
+                pass
+            deleted += 1
+        except Exception:
+            continue
+    return {"success": True, "deleted": deleted}
+
 # Groq API key for AI Copilot (server-side only)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_TOKEN") or ""
 

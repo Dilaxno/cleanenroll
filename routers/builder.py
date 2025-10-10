@@ -4616,7 +4616,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         pass
 
     # Duplicate submission check by IP within a time window
-    if is_pro and bool(form_data.get("preventDuplicateByIP")):
+    if bool(form_data.get("preventDuplicateByIP")):
         try:
             window_hours = int(form_data.get("duplicateWindowHours") or 24)
         except Exception:
@@ -4652,7 +4652,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             pass
 
     # reCAPTCHA verification when enabled
-    if is_pro and form_data.get("recaptchaEnabled"):
+    if form_data.get("recaptchaEnabled"):
         if not isinstance(payload, dict):
             payload = payload or {}
         token = (

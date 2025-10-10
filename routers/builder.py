@@ -479,6 +479,9 @@ class FieldSchema(BaseModel):
         "phone",
         "full-name",
         "password",
+        "time",
+        "count",
+        "linear-scale",
         # Media display (non-interactive)
         "image",
         "video",
@@ -509,6 +512,19 @@ class FieldSchema(BaseModel):
     passwordRequireLowercase: Optional[bool] = True
     passwordRequireNumber: Optional[bool] = True
     passwordRequireSpecial: Optional[bool] = False
+    # Time field options (HTML5 time input)
+    minTime: Optional[str] = None  # "HH:MM" or "HH:MM:SS"
+    maxTime: Optional[str] = None  # "HH:MM" or "HH:MM:SS"
+    timeStep: Optional[int] = None  # seconds granularity
+    # Count field options
+    minCount: Optional[int] = None
+    maxCount: Optional[int] = None
+    allowCustomCount: Optional[bool] = None
+    # Linear scale options
+    minScale: Optional[int] = None  # default 1
+    maxScale: Optional[int] = None  # default 5
+    lowLabel: Optional[str] = None
+    highLabel: Optional[str] = None
 
     @validator("options", always=True)
     def normalize_options(cls, v, values):
@@ -608,6 +624,10 @@ EXTENDED_ALLOWED_TYPES = {
     # Sensitive/validated input types
     "full-name",
     "password",
+    # New input types
+    "time",
+    "count",
+    "linear-scale",
     # Media display (non-interactive)
     "image",
     "video",
@@ -632,6 +652,76 @@ def _validate_form(cfg: FormConfig):
                     raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid passwordMinLength")
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid passwordMinLength")
+
+        # Time field validation
+        if f.type == "time":
+            def _is_time_str(s: Optional[str]) -> bool:
+                try:
+                    if s is None:
+                        return True
+                    ss = str(s).strip()
+                    return bool(re.match(r"^\d{2}:\d{2}(:\d{2})?$", ss))
+                except Exception:
+                    return False
+            if not _is_time_str(getattr(f, "minTime", None)):
+                raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid minTime (use HH:MM or HH:MM:SS)")
+            if not _is_time_str(getattr(f, "maxTime", None)):
+                raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid maxTime (use HH:MM or HH:MM:SS)")
+            # Compare times when both provided
+            def _to_secs(s: str) -> int:
+                parts = [int(p) for p in s.split(":")]
+                if len(parts) == 2:
+                    h, m = parts
+                    sec = 0
+                else:
+                    h, m, sec = parts
+                return max(0, h) * 3600 + max(0, m) * 60 + max(0, sec)
+            if getattr(f, "minTime", None) and getattr(f, "maxTime", None):
+                try:
+                    if _to_secs(str(f.minTime)) > _to_secs(str(f.maxTime)):
+                        raise HTTPException(status_code=400, detail=f"Field '{f.label}' has minTime greater than maxTime")
+                except HTTPException:
+                    raise
+                except Exception:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid time range")
+            if getattr(f, "timeStep", None) is not None:
+                try:
+                    step = int(f.timeStep)  # seconds
+                    if step < 1:
+                        raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid timeStep (must be >= 1)")
+                except HTTPException:
+                    raise
+                except Exception:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid timeStep")
+
+        # Count field validation
+        if f.type == "count":
+            try:
+                minc = int(f.minCount) if getattr(f, "minCount", None) is not None else None
+                maxc = int(f.maxCount) if getattr(f, "maxCount", None) is not None else None
+                if minc is not None and minc < 0:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid minCount (must be >= 0)")
+                if maxc is not None and maxc < 0:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid maxCount (must be >= 0)")
+                if minc is not None and maxc is not None and minc > maxc:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has minCount greater than maxCount")
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Field '{f.label}' has non-integer minCount/maxCount")
+
+        # Linear scale validation
+        if f.type == "linear-scale":
+            try:
+                mins = int(f.minScale) if getattr(f, "minScale", None) is not None else 1
+                maxs = int(f.maxScale) if getattr(f, "maxScale", None) is not None else 5
+                if mins < 1 or maxs < 1:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has invalid scale (must be >= 1)")
+                if mins > maxs:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has minScale greater than maxScale")
+                # Clamp to a reasonable bound 1..10
+                if maxs > 10:
+                    raise HTTPException(status_code=400, detail=f"Field '{f.label}' has maxScale too large (<= 10)")
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Field '{f.label}' has non-integer minScale/maxScale")
 
     
 

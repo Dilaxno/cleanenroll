@@ -4462,20 +4462,44 @@ async def notify_submission(payload: Dict = None):
     title = (payload.get("title") or subject).strip()
 
     # Legacy helpers
-    form_title = (payload.get("formTitle") or "").strip()
+    form_title = (payload.get("form_title") or payload.get("formTitle") or "").strip()
     summary = (payload.get("summary") or "").strip()
-
-    # Content assembly
+    # Allow raw pre-built HTML
     content_html = payload.get("content_html") or payload.get("html") or ""
     intro = (payload.get("intro") or (summary if summary else "")).strip()
+    # Optionally append signature thumbnails if provided in payload.signatures
+    try:
+        sigs = payload.get("signatures") if isinstance(payload, dict) else None
+    except Exception:
+        sigs = None
+    sigs_html = ""
+    if isinstance(sigs, dict) and sigs:
+        items = []
+        for k, v in sigs.items():
+            try:
+                url = (v.get("url") or v.get("dataUrl") or "").strip()
+                if url:
+                    safe = _normalize_bg_public_url(url) if url.startswith("http") else url
+                    items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></div>")
+            except Exception:
+                continue
+        if items:
+            sigs_html = "<div style='margin-top:12px'><div style='font-weight:600;margin-bottom:6px'>Signatures</div>" + "".join(items) + "</div>"
+
     if (not content_html) and (form_title or summary):
         # Build a simple content block if only legacy fields are provided
         ft = form_title or "Form"
         sm = summary or "A new submission was received."
         content_html = (
             f"<div><p style='margin:0 0 12px;color:#d1d5db'>New submission: <strong>{ft}</strong></p>"
-            f"<p style='margin:0;color:#d1d5db'>{sm}</p></div>"
+            f"<p style='margin:0;color:#d1d5db'>{sm}</p>{sigs_html}</div>"
         )
+    elif sigs_html:
+        # Append after provided content when present
+        try:
+            content_html = (content_html or "") + sigs_html
+        except Exception:
+            pass
 
     preheader = (payload.get("preheader") or intro or "Automated notification from CleanEnroll").strip()
 
@@ -4788,7 +4812,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
     # Success payload mirrors configured behavior
     # Build response payload for client
-    resp: Dict[str, Optional[str] | bool] = {
+    resp: Dict[str, Optional[str] | bool | Dict] = {
         "success": True,
         "message": form_data.get("thankYouMessage"),
     }
@@ -4800,8 +4824,10 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     try:
         submitted_at = datetime.utcnow().isoformat()
         response_id = uuid.uuid4().hex
+
         # Only persist answers for known fields, keyed by field id
         answers: Dict[str, object] = {}
+        signatures: Dict[str, Dict[str, str]] = {}
         fields_def = form_data.get("fields") or []
         payload = payload or {}
         for f in fields_def:
@@ -4842,6 +4868,54 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     answers[fid] = [_file_to_url(x) for x in val]
                 else:
                     answers[fid] = _file_to_url(val)
+            elif ftype == "signature" and val is not None:
+                # Persist signature PNG to R2 when provided as a data URL
+                try:
+                    # Accept either data URL string or object with dataUrl
+                    data_url = None
+                    if isinstance(val, str):
+                        data_url = val.strip()
+                    elif isinstance(val, dict):
+                        data_url = str((val.get("dataUrl") or val.get("dataURL") or "")).strip()
+                    if data_url and data_url.startswith("data:image/") and ";base64," in data_url:
+                        head, b64 = data_url.split(",", 1)
+                        # Determine extension (default png)
+                        ext = "png"
+                        try:
+                            mime = head.split(":",1)[1].split(";",1)[0]
+                            if "/" in mime:
+                                ext = mime.split("/",1)[1] or "png"
+                        except Exception:
+                            ext = "png"
+                        try:
+                            raw = base64.b64decode(b64, validate=False)
+                        except Exception:
+                            raw = b""
+                        if raw:
+                            key = f"submissions/{form_id}/{response_id}_{fid}.{ext}"
+                            try:
+                                s3 = _r2_client()
+                                s3.put_object(Bucket=R2_BUCKET, Key=key, Body=raw, ContentType=f"image/{ext}")
+                                url = _public_url_for_key(key)
+                                # Store structured signature metadata
+                                signatures[fid] = {"status": "signed", "url": url, "key": key}
+                                answers[fid] = signatures[fid]
+                                continue
+                            except Exception:
+                                # Fall through to store data URL if upload fails
+                                pass
+                    # Fallback: store minimal structure with status and original value
+                    meta = {"status": "signed", "dataUrl": data_url or str(val)}
+                    signatures[fid] = meta
+                    answers[fid] = meta
+                except Exception:
+                    # On unexpected error, still record that a signature was provided
+                    try:
+                        meta = {"status": "signed", "value": str(val)}
+                        signatures[fid] = meta
+                        answers[fid] = meta
+                    except Exception:
+                        answers[fid] = str(val)
             elif val is not None:
                 answers[fid] = val
         # Build a downloadable ZIP archive of uploaded files (best-effort)
@@ -4914,6 +4988,10 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             "lon": lon,
             "answers": answers,
         }
+        # Attach signature metadata to record and API response when available
+        if isinstance(signatures, dict) and signatures:
+            record["signatures"] = signatures
+            resp["signatures"] = signatures
         if files_zip_meta:
             record["filesZip"] = files_zip_meta
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)
@@ -5053,11 +5131,30 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     preview = "".join(parts)
                 except Exception:
                     preview = ""
+                # If signatures are available, append thumbnails below the preview
+                try:
+                    sigs = record.get("signatures") or {}
+                except Exception:
+                    sigs = {}
+                sigs_html = ""
+                if isinstance(sigs, dict) and sigs:
+                    items = []
+                    for k, v in sigs.items():
+                        try:
+                            url = (v.get("url") or v.get("dataUrl") or "").strip()
+                            if url:
+                                safe = _normalize_bg_public_url(url) if url.startswith("http") else url
+                                items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></div>")
+                        except Exception:
+                            continue
+                    if items:
+                        sigs_html = "<div style='margin-top:12px'><div style='font-weight:600;margin-bottom:6px'>Signatures</div>" + "".join(items) + "</div>"
+
                 html = render_email("base.html", {
                     "subject": subject,
                     "title": subject,
                     "intro": f"You received a new submission for {form_title}.",
-                    "content_html": preview or "",
+                    "content_html": (preview or "") + sigs_html,
                     "preheader": f"New submission for {form_title}",
                 })
                 send_email_html(owner_email, subject, html)

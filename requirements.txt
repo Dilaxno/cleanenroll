@@ -36,3 +36,4 @@ validators>=0.22.0
 # Google Safe Browsing client (using stdlib HTTP, no extra lib needed)
 # Ensure public suffix list updates for tldextract in production
 publicsuffixlist>=0.10.0
+pyshorteners>=1.0.1

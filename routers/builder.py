@@ -3518,6 +3518,87 @@ async def presign_field_media(request: Request, payload: Dict = None):
         logger.exception("R2 media presign failed uid=%s", uid)
         raise HTTPException(status_code=500, detail=f"Failed to create upload URL: {e}")
 
+# Direct upload for media (image) display fields
+@router.post("/uploads/media/upload")
+async def upload_field_media(request: Request, file: UploadFile = File(...), formId: Optional[str] = None, fieldId: Optional[str] = None, kind: Optional[str] = None):
+    """
+    Upload an image for an Image (display) field directly to Cloudflare R2.
+    Auth: Firebase ID token required (bearer).
+    Accepts multipart/form-data with 'file'.
+    Optionally provide formId and fieldId to update the form field's mediaUrl.
+    """
+    uid = _verify_firebase_uid(request)
+    if not file:
+        raise HTTPException(status_code=400, detail="Missing file")
+    content_type = (file.content_type or "application/octet-stream").strip().lower()
+    inferred_kind = "image"
+    if kind:
+        k = str(kind).strip().lower()
+        if k in ("image", "video", "audio"):
+            inferred_kind = k
+    if not content_type.startswith("image/") and inferred_kind == "image":
+        raise HTTPException(status_code=400, detail="Only image uploads are allowed")
+
+    data = await file.read()
+
+    # Plan size enforcement
+    is_pro = _is_pro_plan(uid)
+    limit = PRO_MAX_UPLOAD_BYTES if is_pro else FREE_MAX_UPLOAD_BYTES
+    if data and len(data) > limit:
+        mb = int(limit // (1024 * 1024))
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum allowed is {mb}MB on your plan.")
+
+    # Build R2 key
+    raw_name = (file.filename or "image").strip()
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", raw_name)[:200] or "image"
+    prefix = f"form-media/{uid}/{inferred_kind}/"
+    if formId:
+        prefix += f"{formId.strip()}/"
+    key = f"{prefix}{int(datetime.utcnow().timestamp()*1000)}_{safe_name}"
+
+    # Upload to R2
+    try:
+        s3 = _r2_client()
+        s3.put_object(Bucket=R2_BUCKET, Key=key, Body=data, ContentType=content_type)
+        public_url = _public_url_for_key(key)
+    except Exception as e:
+        logger.exception("R2 media direct upload failed uid=%s", uid)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+    # Optionally update the form field's mediaUrl
+    updated = False
+    if formId and fieldId:
+        try:
+            path = _form_path(formId)
+            if os.path.exists(path):
+                form_data = _read_json(path)
+                fields = form_data.get("fields") or []
+                idx = None
+                for i, f in enumerate(fields):
+                    try:
+                        if str(f.get("id")) == str(fieldId) or (str(f.get("label") or "").strip() == str(fieldId)):
+                            idx = i
+                            break
+                    except Exception:
+                        continue
+                if idx is not None:
+                    fobj = fields[idx] or {}
+                    ftype = str(fobj.get("type") or "").strip().lower()
+                    if inferred_kind == "image" and ftype != "image":
+                        # Skip update if types mismatch
+                        pass
+                    else:
+                        fobj["mediaUrl"] = public_url
+                        fields[idx] = fobj
+                        form_data["fields"] = fields
+                        form_data["updatedAt"] = datetime.utcnow().isoformat()
+                        _write_json(path, form_data)
+                        updated = True
+        except Exception:
+            updated = False
+
+    return {"publicUrl": public_url, "key": key, "kind": inferred_kind, "formId": formId or None, "fieldId": fieldId or None, "updated": updated}
+
 @router.post("/uploads/font/presign")
 async def presign_font(request: Request, payload: Dict = None):
     """
@@ -4501,7 +4582,7 @@ async def notify_submission(payload: Dict = None):
         items = []
         for k, v in sigs.items():
             try:
-                url = (v.get("url") or v.get("dataUrl") or "").strip()
+                url = (v.get("pngUrl") or v.get("url") or v.get("pngDataUrl") or v.get("dataUrl") or "").strip()
                 if url:
                     safe = _normalize_bg_public_url(url) if url.startswith("http") else url
                     link = _shorten_url(safe) if safe.startswith("http") else safe
@@ -4894,44 +4975,41 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 else:
                     answers[fid] = _file_to_url(val)
             elif ftype == "signature" and val is not None:
-                # Persist signature PNG to R2 when provided as a data URL
+                # Persist signature PNG to R2 when provided as a data URL and return status 'signed' with a PNG URL
                 try:
                     # Accept either data URL string or object with dataUrl
                     data_url = None
                     if isinstance(val, str):
                         data_url = val.strip()
                     elif isinstance(val, dict):
-                        data_url = str((val.get("dataUrl") or val.get("dataURL") or "")).strip()
+                        data_url = str((val.get("dataUrl") or val.get("dataURL") or val.get("pngDataUrl") or "")).strip()
                     if data_url and data_url.startswith("data:image/") and ";base64," in data_url:
                         head, b64 = data_url.split(",", 1)
-                        # Determine extension (default png)
-                        ext = "png"
-                        try:
-                            mime = head.split(":",1)[1].split(";",1)[0]
-                            if "/" in mime:
-                                ext = mime.split("/",1)[1] or "png"
-                        except Exception:
-                            ext = "png"
                         try:
                             raw = base64.b64decode(b64, validate=False)
                         except Exception:
                             raw = b""
                         if raw:
-                            key = f"submissions/{form_id}/{response_id}_{fid}.{ext}"
+                            # Always store as PNG for consistency
+                            key = f"submissions/{form_id}/{response_id}_{fid}.png"
                             try:
                                 s3 = _r2_client()
-                                s3.put_object(Bucket=R2_BUCKET, Key=key, Body=raw, ContentType=f"image/{ext}")
+                                s3.put_object(Bucket=R2_BUCKET, Key=key, Body=raw, ContentType="image/png")
                                 url = _public_url_for_key(key)
                                 short = _shorten_url(url)
-                                # Store structured signature metadata
-                                signatures[fid] = {"status": "signed", "url": url, "shortUrl": short, "key": key}
-                                answers[fid] = signatures[fid]
+                                # Store structured signature metadata, include canonical pngUrl
+                                sig = {"status": "signed", "url": url, "pngUrl": url, "shortUrl": short, "key": key}
+                                signatures[fid] = sig
+                                answers[fid] = sig
                                 continue
                             except Exception:
                                 # Fall through to store data URL if upload fails
                                 pass
-                    # Fallback: store minimal structure with status and original value
+                    # Fallback: store minimal structure with status and a PNG data URL
                     meta = {"status": "signed", "dataUrl": data_url or str(val)}
+                    # Alias as pngDataUrl for consumers expecting a PNG field
+                    if data_url:
+                        meta["pngDataUrl"] = data_url
                     signatures[fid] = meta
                     answers[fid] = meta
                 except Exception:
@@ -5167,7 +5245,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     items = []
                     for k, v in sigs.items():
                         try:
-                            url = (v.get("url") or v.get("dataUrl") or "").strip()
+                            url = (v.get("pngUrl") or v.get("url") or v.get("pngDataUrl") or v.get("dataUrl") or "").strip()
                             if url:
                                 safe = _normalize_bg_public_url(url) if url.startswith("http") else url
                                 link = _shorten_url(safe) if safe.startswith("http") else safe

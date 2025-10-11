@@ -20,6 +20,14 @@ from botocore.client import Config as BotoConfig
 import socket
 import threading
 import time
+# Optional URL shortener
+try:
+    import pyshorteners  # type: ignore
+    _PYSHORT_AVAILABLE = True
+except Exception:
+    pyshorteners = None  # type: ignore
+    _PYSHORT_AVAILABLE = False
+
 # Email integrations: encryption and sending
 from cryptography.fernet import Fernet
 import base64
@@ -199,6 +207,22 @@ R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE") or os.getenv("R2_PUBLIC_DOMAIN") or
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or ""
 
+# Best-effort URL shortener with timeout, falls back to original on failure
+def _shorten_url(u: str) -> str:
+    try:
+        s = str(u or "").strip()
+        if not s or not s.startswith(("http://", "https://")):
+            return s
+        if not _PYSHORT_AVAILABLE:
+            return s
+        try:
+            shortener = pyshorteners.Shortener(timeout=6)
+            short = shortener.tinyurl.short(s)
+            return str(short or s)
+        except Exception:
+            return s
+    except Exception:
+        return u
 
 def _sb_headers() -> Dict[str, str]:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
@@ -4480,7 +4504,8 @@ async def notify_submission(payload: Dict = None):
                 url = (v.get("url") or v.get("dataUrl") or "").strip()
                 if url:
                     safe = _normalize_bg_public_url(url) if url.startswith("http") else url
-                    items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></div>")
+                    link = _shorten_url(safe) if safe.startswith("http") else safe
+                    items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><a href='{link}' target='_blank' rel='noopener noreferrer'><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></a>" + (f"<div style='font-size:12px;color:#94a3b8;word-break:break-all'>{link}</div>" if link and isinstance(link, str) and link.startswith('http') else "") + "</div>")
             except Exception:
                 continue
         if items:
@@ -4897,8 +4922,9 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                                 s3 = _r2_client()
                                 s3.put_object(Bucket=R2_BUCKET, Key=key, Body=raw, ContentType=f"image/{ext}")
                                 url = _public_url_for_key(key)
+                                short = _shorten_url(url)
                                 # Store structured signature metadata
-                                signatures[fid] = {"status": "signed", "url": url, "key": key}
+                                signatures[fid] = {"status": "signed", "url": url, "shortUrl": short, "key": key}
                                 answers[fid] = signatures[fid]
                                 continue
                             except Exception:
@@ -5144,7 +5170,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                             url = (v.get("url") or v.get("dataUrl") or "").strip()
                             if url:
                                 safe = _normalize_bg_public_url(url) if url.startswith("http") else url
-                                items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></div>")
+                                link = _shorten_url(safe) if safe.startswith("http") else safe
+                                items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><a href='{link}' target='_blank' rel='noopener noreferrer'><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></a>" + (f"<div style='font-size:12px;color:#94a3b8;word-break:break-all'>{link}</div>" if link and isinstance(link, str) and link.startswith('http') else "") + "</div>")
                         except Exception:
                             continue
                     if items:

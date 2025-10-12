@@ -5099,6 +5099,82 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         if files_zip_meta:
             record["filesZip"] = files_zip_meta
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)
+        # Mirror submission to Firestore for dashboards (non-fatal on failure)
+        try:
+            if _FS_AVAILABLE:
+                fs = _fs.client()
+                # submissions/{responseId}
+                try:
+                    preview_text = ""
+                    try:
+                        # first string answer as preview
+                        for v in (answers or {}).values():
+                            if isinstance(v, str) and v.strip():
+                                preview_text = v.strip()[:140]
+                                break
+                    except Exception:
+                        preview_text = ""
+                    fs.collection("submissions").document(response_id).set({
+                        "formId": form_id,
+                        "ownerId": owner_id or "",
+                        "responseId": response_id,
+                        "submittedAt": _fs.SERVER_TIMESTAMP,
+                        "country": country_code,
+                        "lat": lat,
+                        "lng": lon,
+                        "values": answers,
+                        "preview": preview_text,
+                    }, merge=True)
+                except Exception:
+                    pass
+                # submissions_markers/{formId}.markers ArrayUnion
+                try:
+                    from google.cloud.firestore_v1 import ArrayUnion as _FSArrayUnion  # type: ignore
+                    fs.collection("submissions_markers").document(form_id).set({
+                        "markers": _FSArrayUnion([{
+                            "id": response_id,
+                            "position": [lat, lon] if (isinstance(lat, (int,float)) and isinstance(lon, (int,float))) else None,
+                            "country": country_code,
+                        }])
+                    }, merge=True)
+                except Exception:
+                    # Fallback: read-modify-write unique by id
+                    try:
+                        ref = fs.collection("submissions_markers").document(form_id)
+                        snap = ref.get()
+                        data_prev = snap.to_dict() or {}
+                        markers = data_prev.get("markers") or []
+                        try:
+                            exists = any(str(m.get("id") or "") == response_id for m in markers if isinstance(m, dict))
+                        except Exception:
+                            exists = False
+                        if not exists:
+                            item = {"id": response_id}
+                            if isinstance(lat, (int,float)) and isinstance(lon, (int,float)):
+                                item["position"] = [lat, lon]
+                            if country_code:
+                                item["country"] = country_code
+                            markers.append(item)
+                            ref.set({"markers": markers}, merge=True)
+                    except Exception:
+                        pass
+                # notifications/{ownerId}/items/*
+                try:
+                    if owner_id:
+                        items_ref = fs.collection("notifications").document(owner_id).collection("items")
+                        item_ref = items_ref.document()
+                        form_title = str(form_data.get("title") or "Form")
+                        item_ref.set({
+                            "formId": form_id,
+                            "formTitle": form_title,
+                            "preview": preview_text if 'preview_text' in locals() else "",
+                            "submittedAt": _fs.SERVER_TIMESTAMP,
+                            "read": False,
+                        })
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Expose geo hints to client response (non-breaking add-ons)
         try:
             if country_code:

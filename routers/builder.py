@@ -5099,6 +5099,16 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         if files_zip_meta:
             record["filesZip"] = files_zip_meta
         _write_json(_new_response_path(form_id, submitted_at, response_id), record)
+        # Expose geo hints to client response (non-breaking add-ons)
+        try:
+            if country_code:
+                resp["country"] = country_code  # type: ignore[index]
+            if isinstance(lat, (int, float)):
+                resp["lat"] = float(lat)  # type: ignore[index]
+            if isinstance(lon, (int, float)):
+                resp["lon"] = float(lon)  # type: ignore[index]
+        except Exception:
+            pass
         # Firestore counters: increment submissions and update lastSubmissionAt
         try:
             if _FS_AVAILABLE:
@@ -5143,6 +5153,79 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                             "submissions": new_count,
                             "lastSubmissionAt": _fs.SERVER_TIMESTAMP,
                         }, merge=True)
+
+                    # Mirror submission and lightweight analytics to Firestore (server-side)
+                    try:
+                        # submissions/{responseId}
+                        sub_payload = {
+                            "formId": form_id,
+                            "ownerId": owner_id or "",
+                            "responseId": response_id,
+                            "submittedAt": _fs.SERVER_TIMESTAMP,
+                            "country": country_code,
+                            "lat": lat,
+                            "lng": lon,
+                            "values": answers,
+                        }
+                        # derive a short preview from first text-like value
+                        try:
+                            preview = ""
+                            for v in (answers or {}).values():
+                                if isinstance(v, str) and v.strip():
+                                    preview = v.strip()[:140]
+                                    break
+                                if isinstance(v, list):
+                                    sv = next((str(x) for x in v if isinstance(x, str) and x.strip()), None)
+                                    if sv:
+                                        preview = sv.strip()[:140]
+                                        break
+                            if preview:
+                                sub_payload["preview"] = preview
+                        except Exception:
+                            pass
+                        fs.collection("submissions").document(response_id).set(sub_payload, merge=True)
+                    except Exception:
+                        # Non-fatal
+                        pass
+
+                    # submissions_markers/{formId}.markers += { id, position:[lat,lng], country }
+                    try:
+                        marker = None
+                        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                            marker = {"id": response_id, "position": [float(lat), float(lon)], "country": country_code}
+                        if marker:
+                            try:
+                                from google.cloud.firestore_v1 import ArrayUnion as _FSArrayUnion  # type: ignore
+                                fs.collection("submissions_markers").document(form_id).set({
+                                    "markers": _FSArrayUnion([marker])
+                                }, merge=True)
+                            except Exception:
+                                # Fallback read-modify-write
+                                mref = fs.collection("submissions_markers").document(form_id)
+                                snap = mref.get()
+                                data_prev = snap.to_dict() or {}
+                                arr = list(data_prev.get("markers") or [])
+                                # Avoid duplicates by id
+                                if not any((isinstance(x, dict) and str(x.get("id")) == response_id) for x in arr):
+                                    arr.append(marker)
+                                mref.set({"markers": arr}, merge=True)
+                    except Exception:
+                        pass
+
+                    # notifications/{ownerId}/items add new notification for creators
+                    try:
+                        if owner_id:
+                            form_title = str(form_data.get("title") or "Form").strip() or "Form"
+                            notif = {
+                                "formId": form_id,
+                                "formTitle": form_title,
+                                "preview": sub_payload.get("preview") if isinstance(sub_payload, dict) else None,
+                                "submittedAt": _fs.SERVER_TIMESTAMP,
+                                "read": False,
+                            }
+                            fs.collection("notifications").document(owner_id).collection("items").add(notif)
+                    except Exception:
+                        pass
                 except Exception:
                     # Non-fatal if Firestore unavailable or misconfigured
                     pass
@@ -5276,6 +5359,94 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 _airtable_append(owner_id, form_id, record)
         except Exception:
             logger.exception("airtable sync append failed form_id=%s", form_id)
+        # Server-side mirrors to Firestore for submissions, markers and notifications (no client writes)
+        try:
+            if _FS_AVAILABLE:
+                fs = _fs.client()
+                # Submissions collection: store minimal snapshot for dashboards/maps
+                try:
+                    owner_id_safe = owner_id or ""
+                except Exception:
+                    owner_id_safe = ""
+                try:
+                    # Use responseId as document id for idempotency
+                    sub_ref = fs.collection("submissions").document(response_id)
+                    # Build preview text from first string-like answer
+                    preview_text = ""
+                    try:
+                        for _k, _v in (answers or {}).items():
+                            if isinstance(_v, str) and _v.strip():
+                                preview_text = _v.strip()[:140]
+                                break
+                    except Exception:
+                        preview_text = ""
+                    sub_ref.set({
+                        "formId": form_id,
+                        "ownerId": owner_id_safe,
+                        "responseId": response_id,
+                        "submittedAt": _fs.SERVER_TIMESTAMP,
+                        "country": country_code,
+                        "lat": lat,
+                        "lng": lon,
+                        "values": answers,
+                        "preview": preview_text,
+                    }, merge=True)
+                except Exception:
+                    pass
+                # Submissions markers: append marker entry for map rendering
+                try:
+                    mr_ref = fs.collection("submissions_markers").document(form_id)
+                    markers_doc = mr_ref.get()
+                    markers = []
+                    try:
+                        if markers_doc.exists:
+                            data_doc = markers_doc.to_dict() or {}
+                            if isinstance(data_doc.get("markers"), list):
+                                markers = data_doc.get("markers")
+                    except Exception:
+                        markers = []
+                    marker_entry = {
+                        "id": response_id,
+                        "position": [lat, lon] if (isinstance(lat, (int, float)) and isinstance(lon, (int, float))) else None,
+                        "country": country_code,
+                    }
+                    # Avoid duplicates
+                    try:
+                        if not any(isinstance(m, dict) and str(m.get("id")) == response_id for m in (markers or [])):
+                            markers.append(marker_entry)
+                    except Exception:
+                        markers.append(marker_entry)
+                    mr_ref.set({"markers": markers, "updatedAt": _fs.SERVER_TIMESTAMP}, merge=True)
+                except Exception:
+                    pass
+                # Creator notifications: notifications/{ownerId}/items/*
+                try:
+                    if owner_id_safe:
+                        items_ref = fs.collection("notifications").document(owner_id_safe).collection("items").document()
+                        items_ref.set({
+                            "formId": form_id,
+                            "formTitle": str(form_data.get("title") or "Form"),
+                            "preview": (preview_text if isinstance(preview_text, str) else ""),
+                            "submittedAt": _fs.SERVER_TIMESTAMP,
+                            "read": False,
+                        }, merge=True)
+                except Exception:
+                    pass
+        except Exception:
+            # Never fail submission on Firestore mirror errors
+            pass
+
+        # Include geo hints in response for client-side use without extra roundtrips
+        try:
+            if isinstance(lat, (int, float)):
+                resp["lat"] = float(lat)
+            if isinstance(lon, (int, float)):
+                resp["lon"] = float(lon)
+            if country_code:
+                resp["country"] = country_code
+        except Exception:
+            pass
+
         # Optionally return responseId to the client
         resp["responseId"] = response_id  # type: ignore
     except Exception:

@@ -26,6 +26,9 @@ requests>=2.31.0
 rapidfuzz>=3.6.1
 python-whois>=0.8.0
 boto3>=1.34.0
+# Image MIME verification and safe re-encode
+python-magic>=0.4.27
+Pillow>=10.3.0
 # Translation providers wrapper
 deep-translator>=1.11.4
 # For encrypting tokens and SMTP credentials (Fernet)

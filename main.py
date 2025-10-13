@@ -59,6 +59,7 @@ try:
     from .routers.translate import router as translate_router  # type: ignore
     from .routers.airtable import router as airtable_router  # type: ignore
     from .routers.url_validation import router as url_validation_router  # type: ignore
+    from .routers.uploads import router as uploads_router  # type: ignore
 except Exception:
     # When running from a flat repo root: e.g. `uvicorn main:app`
     from routers.core import router as core_router  # type: ignore
@@ -71,6 +72,7 @@ except Exception:
     from routers.translate import router as translate_router  # type: ignore
     from routers.airtable import router as airtable_router  # type: ignore
     from routers.url_validation import router as url_validation_router  # type: ignore
+    from routers.uploads import router as uploads_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -234,6 +236,7 @@ app.include_router(admin_router)
 app.include_router(translate_router)
 app.include_router(airtable_router)
 app.include_router(url_validation_router)
+app.include_router(uploads_router)
 
 
 if __name__ == "__main__":

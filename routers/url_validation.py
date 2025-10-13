@@ -45,21 +45,35 @@ except Exception:
 
 router = APIRouter()
 
-# Allowlist of commonly safe/business TLDs
+# Allowlist of commonly safe / business / legitimate TLDs
 SAFE_TLDS = {
-    "com", "net", "org", "io", "co", "app", "dev", "me", "ai", "edu", "gov", "info"
+    # Commercial & General
+    "com", "net", "org", "co", "biz", "info",
+    # Tech / SaaS / Startup
+    "io", "app", "dev", "me", "ai", "cloud", "tech", "software",
+    # Geography & Corporate
+    "us", "uk", "ca", "de", "eu", "in", "jp", "fr", "es",
+    # Education / Government
+    "edu", "gov", "ac", "int",
+    # Misc Common
+    "store", "shop", "blog", "media",
 }
-# Denylist of spammy/abused TLDs
+
+# Denylist of known spammy / abused / scam-heavy TLDs
 SPAMMY_TLDS = {
     "xyz", "top", "click", "work", "loan", "zip", "men",
-    "surf", "party", "gq", "cf", "ml", "tk", "cam"
+    "surf", "party", "gq", "cf", "ml", "tk", "cam",
+    "quest", "accountant", "beauty", "monster", "win",
+    "date", "racing", "download", "buzz", "fit", "review",
+    "space", "link", "club", "cyou",
 }
 
 # Strict syntax pattern:
 # - Must start with https://
 # - Host: one or more labels of letters/digits/hyphen ending with a safe TLD
 # - Optional path/query/fragment allowed afterward
-STRICT_HTTPS_REGEX = re.compile(r"^https://([A-Za-z0-9-]+\.)+(com|net|org|io|co|app|dev|me|ai|edu|gov|info)(/|$)", re.IGNORECASE)
+SAFE_TLD_PATTERN = "|".join(sorted(SAFE_TLDS))
+STRICT_HTTPS_REGEX = re.compile(rf"^https://([A-Za-z0-9-]+\.)+({SAFE_TLD_PATTERN})(/|$)", re.IGNORECASE)
 
 # Quick "too random" label heuristic: long alnum label w/ low vowel ratio and possibly digits
 RANDOM_LABEL_RE = re.compile(r"^[a-z0-9]{8,}$", re.IGNORECASE)
@@ -79,6 +93,7 @@ class UrlCheckResponse(BaseModel):
     blocked: bool
     reasons: list[str] = []
     safe_browsing: Optional[Dict[str, Any]] = None
+    risk_score: int = 0  # 0..100, block when >= 50
 
 
 def _is_randomish_label(label: str) -> bool:
@@ -235,15 +250,26 @@ async def _validate_url_impl(url: str):
         "blocked": True,
         "reasons": [],
         "safe_browsing": None,
+        "risk_score": 0,
     }
+
+    risk = 0
 
     if not raw:
         res["reasons"].append("URL is required")
+        risk = max(risk, 100)
+        res["risk_score"] = risk
+        res["allowed"] = False
+        res["blocked"] = True
         return JSONResponse(res)
 
     # Basic regex syntax validation
     if not _basic_syntax_check(raw):
         res["reasons"].append("URL must start with https:// and use a safe TLD")
+        risk = max(risk, 80)
+        res["risk_score"] = risk
+        res["allowed"] = False
+        res["blocked"] = True
         return JSONResponse(res)
 
     proto, host, tld = _extract_parts(raw)
@@ -251,20 +277,36 @@ async def _validate_url_impl(url: str):
 
     if proto != "https":
         res["reasons"].append("Only https:// URLs are allowed")
+        risk = max(risk, 60)
+        res["risk_score"] = risk
+        res["allowed"] = False
+        res["blocked"] = True
         return JSONResponse(res)
 
     # TLD policy: allowlist and denylist
     if not tld or tld not in SAFE_TLDS:
         res["reasons"].append("TLD is not in the allowed list")
+        risk = max(risk, 60)
+        res["risk_score"] = risk
+        res["allowed"] = False
+        res["blocked"] = True
         return JSONResponse(res)
 
     if tld in SPAMMY_TLDS:
         res["reasons"].append("Disallowed domain ending (spammy TLD)")
+        risk = max(risk, 80)
+        res["risk_score"] = risk
+        res["allowed"] = False
+        res["blocked"] = True
         return JSONResponse(res)
 
     # Random/gibberish SLD detection
     if _gibberish_check(host or ""):
         res["reasons"].append("Suspicious domain pattern")
+        risk = max(risk, 65)
+        res["risk_score"] = risk
+        res["allowed"] = False
+        res["blocked"] = True
         return JSONResponse(res)
 
     # MX check on registrable domain using dnspython (best-effort)
@@ -285,6 +327,11 @@ async def _validate_url_impl(url: str):
     res["has_mx"] = (len(mx_hosts) > 0) if _DNSPY_AVAILABLE else None
     if _DNSPY_AVAILABLE and not mx_hosts:
         res["reasons"].append("No MX records found for domain")
+        risk = max(risk, 55)
+        res["risk_score"] = risk
+        # Enforce risk gate: block when score >= 50
+        res["allowed"] = False
+        res["blocked"] = True
         return JSONResponse(res)
 
     # Passed syntax checks; call Google Safe Browsing for final verdict
@@ -293,13 +340,23 @@ async def _validate_url_impl(url: str):
 
     if sb.get("malicious"):
         res["reasons"].append("URL flagged by Safe Browsing")
+        risk = max(risk, 100)
+        res["risk_score"] = risk
         res["syntax_valid"] = True
         res["allowed"] = False
         res["blocked"] = True
         return JSONResponse(res)
 
-    # All checks passed
+    # All checks passed so far
     res["syntax_valid"] = True
-    res["allowed"] = True
-    res["blocked"] = False
+
+    # Apply final risk gate (>= 50 blocks form submission)
+    res["risk_score"] = risk
+    if risk >= 50:
+        res["allowed"] = False
+        res["blocked"] = True
+    else:
+        res["allowed"] = True
+        res["blocked"] = False
+
     return JSONResponse(res)

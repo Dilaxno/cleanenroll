@@ -4655,7 +4655,7 @@ async def notify_submission(payload: Dict = None):
 # Client-triggered dashboard notification creation (no auth required)
 @router.post("/forms/{form_id}/notify-client")
 @limiter.limit("120/minute")
-async def notify_client_submission(form_id: str, payload: Dict = None):
+async def notify_client_submission(form_id: str, request: Request, payload: Dict = None):
     """
     Create a dashboard notification for a form owner. Intended to be called by the
     public form viewer after a successful submission so the dashboard updates immediately.

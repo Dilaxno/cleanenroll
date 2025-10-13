@@ -1832,7 +1832,7 @@ async def upload_session_chunk(form_id: str, session_id: str, request: Request, 
 async def list_sessions(form_id: str, request: Request):
     """
     List rrweb sessions stored in R2 for the authenticated form owner.
-    Returns { sessions: [{ sessionId, chunks, bytes }] }
+    Returns { sessions: [{ sessionId, chunks, bytes, name }] }
     """
     uid = _verify_firebase_uid(request)
     # Ownership check
@@ -1856,17 +1856,42 @@ async def list_sessions(form_id: str, request: Request):
                 if len(parts) < 4:
                     continue
                 sid = parts[3]
-                ent = sessions.setdefault(sid, {"sessionId": sid, "chunks": 0, "bytes": 0})
+                ent = sessions.setdefault(sid, {"sessionId": sid, "chunks": 0, "bytes": 0, "firstTs": None})
                 ent["chunks"] += 1
                 try:
                     ent["bytes"] += int(obj.get("Size") or 0)
                 except Exception:
                     pass
+                # Track earliest modified time across chunks to sort sessions chronologically
+                try:
+                    lm = obj.get("LastModified")
+                    # boto returns a datetime; convert to timestamp (seconds)
+                    ts = None
+                    if lm is not None:
+                        try:
+                            ts = lm.timestamp()
+                        except Exception:
+                            # Fallback: parse string
+                            from datetime import datetime
+                            ts = datetime.fromisoformat(str(lm)).timestamp()
+                    if ts is not None:
+                        ent["firstTs"] = ts if (ent.get("firstTs") is None or ts < ent.get("firstTs")) else ent.get("firstTs")
+                except Exception:
+                    pass
             if not resp.get("IsTruncated"):
                 break
             token = resp.get("NextContinuationToken")
-        items = sorted(sessions.values(), key=lambda x: x["sessionId"])  # stable order
-        return {"sessions": items}
+        # Sort by earliest chunk timestamp; fallback to lexicographic sessionId
+        items = list(sessions.values())
+        items.sort(key=lambda x: (float('inf') if x.get("firstTs") is None else x.get("firstTs"), str(x.get("sessionId") or "")))
+        # Assign sequential human-friendly names: recording001, recording002, ...
+        width = max(3, len(str(len(items))))
+        for i, it in enumerate(items, start=1):
+            try:
+                it["name"] = f"recording{str(i).zfill(width)}"
+            except Exception:
+                it["name"] = f"recording{i}"
+        return {"sessions": [{k: v for k, v in it.items() if k != "firstTs"} for it in items]}
     except HTTPException:
         raise
     except Exception as e:
@@ -4626,6 +4651,65 @@ async def notify_submission(payload: Dict = None):
         logger.exception("notify_submission send failed to=%s", to)
         raise HTTPException(status_code=500, detail=f"Failed to send: {e}")
     return {"success": True}
+
+# Client-triggered dashboard notification creation (no auth required)
+@router.post("/forms/{form_id}/notify-client")
+@limiter.limit("120/minute")
+async def notify_client_submission(form_id: str, payload: Dict = None):
+    """
+    Create a dashboard notification for a form owner. Intended to be called by the
+    public form viewer after a successful submission so the dashboard updates immediately.
+
+    Body (optional): {
+      preview?: string,          # short text preview to show in dashboard
+      responseId?: string        # response id for correlation (optional)
+    }
+    """
+    if not _FS_AVAILABLE:
+        return {"success": False, "reason": "firestore_unavailable"}
+    try:
+        path = _form_path(form_id)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="Form not found")
+        form_data = _read_json(path)
+        owner_id = str(form_data.get("userId") or "").strip()
+        if not owner_id:
+            raise HTTPException(status_code=400, detail="Missing form owner")
+        form_title = str(form_data.get("title") or "Form").strip() or "Form"
+        # Initialize Firebase Admin if necessary
+        try:
+            import firebase_admin  # type: ignore
+            from firebase_admin import credentials as _fb_credentials  # type: ignore
+            if not getattr(firebase_admin, "_apps", None):
+                cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or ""
+                try:
+                    if cred_path and os.path.exists(cred_path):
+                        cred = _fb_credentials.Certificate(cred_path)
+                    else:
+                        cred = _fb_credentials.ApplicationDefault()  # type: ignore
+                    firebase_admin.initialize_app(cred)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        fs = _fs.client()
+        items_ref = fs.collection("notifications").document(owner_id).collection("items")
+        doc = {
+            "formId": form_id,
+            "formTitle": form_title,
+            "preview": (payload or {}).get("preview") or "New submission",
+            "responseId": (payload or {}).get("responseId") or None,
+            "submittedAt": _fs.SERVER_TIMESTAMP,
+            "read": False,
+        }
+        # Use auto id for minimal contention
+        items_ref.add(doc)
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("notify_client_submission failed form_id=%s", form_id)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/forms/{form_id}/submit")
 @limiter.limit("5/minute")

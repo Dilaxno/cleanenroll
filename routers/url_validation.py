@@ -35,6 +35,14 @@ except Exception:  # pragma: no cover
     _urlreq = None  # type: ignore
     _urlerr = None  # type: ignore
 
+# Optional dnspython resolver for MX checks
+try:
+    import dns.resolver as _dns_resolver  # type: ignore
+    _DNSPY_AVAILABLE = True
+except Exception:
+    _dns_resolver = None  # type: ignore
+    _DNSPY_AVAILABLE = False
+
 router = APIRouter()
 
 # Allowlist of commonly safe/business TLDs
@@ -65,6 +73,8 @@ class UrlCheckResponse(BaseModel):
     protocol: Optional[str] = None
     hostname: Optional[str] = None
     tld: Optional[str] = None
+    has_mx: Optional[bool] = None
+    mx_hosts: Optional[list[str]] = None
     allowed: bool
     blocked: bool
     reasons: list[str] = []
@@ -131,6 +141,25 @@ def _gibberish_check(host: str) -> bool:
     except Exception:
         return False
 
+
+# MX lookup helper using dnspython
+def _mx_lookup(domain: str) -> list[str]:
+    if not _DNSPY_AVAILABLE or not domain:
+        return []
+    try:
+        answers = _dns_resolver.resolve(domain, "MX", lifetime=2.0)  # type: ignore
+        hosts: list[str] = []
+        for rdata in answers:  # type: ignore
+            try:
+                host = str(getattr(rdata, "exchange", "") or "").rstrip(".")
+                if host:
+                    hosts.append(host)
+            except Exception:
+                continue
+        hosts.sort()
+        return hosts
+    except Exception:
+        return []
 
 def _google_safe_browsing_check(url: str) -> dict:
     """Query Google Safe Browsing v4 to check if URL is malicious.
@@ -200,6 +229,8 @@ async def _validate_url_impl(url: str):
         "protocol": None,
         "hostname": None,
         "tld": None,
+        "has_mx": None,
+        "mx_hosts": [],
         "allowed": False,
         "blocked": True,
         "reasons": [],
@@ -234,6 +265,26 @@ async def _validate_url_impl(url: str):
     # Random/gibberish SLD detection
     if _gibberish_check(host or ""):
         res["reasons"].append("Suspicious domain pattern")
+        return JSONResponse(res)
+
+    # MX check on registrable domain using dnspython (best-effort)
+    mx_domain = host or ""
+    try:
+        if _TLDX_AVAILABLE and host:
+            ext = tldextract.extract(host)
+            reg = (getattr(ext, "registered_domain", "") or "").strip().lower()
+            if reg:
+                mx_domain = reg
+            elif getattr(ext, "domain", None) and getattr(ext, "suffix", None):
+                mx_domain = f"{ext.domain}.{ext.suffix}".lower()
+    except Exception:
+        pass
+
+    mx_hosts = _mx_lookup(mx_domain) if mx_domain else []
+    res["mx_hosts"] = mx_hosts
+    res["has_mx"] = (len(mx_hosts) > 0) if _DNSPY_AVAILABLE else None
+    if _DNSPY_AVAILABLE and not mx_hosts:
+        res["reasons"].append("No MX records found for domain")
         return JSONResponse(res)
 
     # Passed syntax checks; call Google Safe Browsing for final verdict

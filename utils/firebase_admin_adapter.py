@@ -4,20 +4,190 @@ This allows for a smooth transition from Firestore to PostgreSQL while keeping F
 """
 import logging
 from typing import Any, Dict, List, Optional, Callable, Union
+import os
 import firebase_admin
-from firebase_admin import auth
+from firebase_admin import auth, credentials
 
 logger = logging.getLogger(__name__)
 
 # Initialize Firebase Admin if not already initialized
-try:
-    default_app = firebase_admin.get_app()
-except ValueError:
-    # Use application default credentials
-    default_app = firebase_admin.initialize_app()
+# This is a centralized initialization to prevent multiple initializations
+def initialize_firebase_admin():
+    try:
+        return firebase_admin.get_app()
+    except ValueError:
+        # Check for credentials file
+        cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if cred_path and os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+            return firebase_admin.initialize_app(cred)
+        else:
+            # Use application default credentials
+            return firebase_admin.initialize_app()
+
+# Initialize Firebase Admin
+default_app = initialize_firebase_admin()
 
 # Export Firebase Admin auth for authentication
 admin_auth = auth
+
+# Forward declarations for circular references
+class DummyAdminCollection:
+    pass
+
+class DummyAdminDocument:
+    pass
+
+class DummyAdminDocumentSnapshot:
+    pass
+
+class DummyAdminDocumentReference:
+    pass
+
+class DummyAdminQuery:
+    pass
+
+class DummyAdminBatch:
+    pass
+
+class DummyAdminTransaction:
+    pass
+
+# Dummy document reference class
+class DummyAdminDocumentReference:
+    def __init__(self, path: str):
+        self.path = path
+        self.id = path.split('/')[-1] if '/' in path else path
+        
+    def get(self):
+        logger.warning(f"Attempted to get removed Firestore document: {self.path}")
+        return DummyAdminDocumentSnapshot(self.path, {})
+        
+    def set(self, data, merge=False):
+        logger.warning(f"Attempted to set removed Firestore document: {self.path}")
+        return self
+        
+    def update(self, data):
+        logger.warning(f"Attempted to update removed Firestore document: {self.path}")
+        return self
+        
+    def delete(self):
+        logger.warning(f"Attempted to delete removed Firestore document: {self.path}")
+        return self
+        
+    def collection(self, name: str):
+        return DummyAdminCollection(f"{self.path}/{name}")
+
+# Dummy document snapshot class
+class DummyAdminDocumentSnapshot:
+    def __init__(self, path: str, data: Dict[str, Any]):
+        self.path = path
+        self.id = path.split('/')[-1] if '/' in path else path
+        self._data = data
+        self.reference = DummyAdminDocumentReference(path)
+        
+    def exists(self):
+        return False
+        
+    def to_dict(self):
+        return {}
+        
+    def get(self, field_path):
+        return None
+
+# Dummy query class
+class DummyAdminQuery:
+    def __init__(self, collection_name: str):
+        self.collection_name = collection_name
+        
+    def where(self, field: str, op: str, value: Any):
+        return self
+        
+    def order_by(self, field: str, direction=None):
+        return self
+        
+    def limit(self, count: int):
+        return self
+        
+    def offset(self, count: int):
+        return self
+        
+    def get(self):
+        return []
+        
+    def stream(self):
+        return []
+
+# Dummy document class
+class DummyAdminDocument:
+    def __init__(self, path: str):
+        self.path = path
+        self.id = path.split('/')[-1] if '/' in path else path
+        
+    def get(self):
+        logger.warning(f"Attempted to get removed Firestore document: {self.path}")
+        return DummyAdminDocumentSnapshot(self.path, {})
+        
+    def set(self, data, merge=False):
+        logger.warning(f"Attempted to set removed Firestore document: {self.path}")
+        return self
+        
+    def update(self, data):
+        logger.warning(f"Attempted to update removed Firestore document: {self.path}")
+        return self
+        
+    def delete(self):
+        logger.warning(f"Attempted to delete removed Firestore document: {self.path}")
+        return self
+        
+    def collection(self, name: str):
+        return DummyAdminCollection(f"{self.path}/{name}")
+        
+    def collections(self):
+        logger.warning(f"Attempted to list collections in removed Firestore document: {self.path}")
+        return []
+
+# Dummy batch class
+class DummyAdminBatch:
+    def __init__(self):
+        logger.warning("Using dummy Firebase Admin Firestore batch. All operations will be no-ops.")
+        
+    def set(self, reference, data, merge=False):
+        logger.warning(f"Attempted to batch set document: {getattr(reference, 'path', 'unknown')}")
+        return self
+        
+    def update(self, reference, data):
+        logger.warning(f"Attempted to batch update document: {getattr(reference, 'path', 'unknown')}")
+        return self
+        
+    def delete(self, reference):
+        logger.warning(f"Attempted to batch delete document: {getattr(reference, 'path', 'unknown')}")
+        return self
+        
+    def commit(self):
+        logger.warning("Attempted to commit batch operations")
+        return []
+
+# Dummy transaction class
+class DummyAdminTransaction:
+    def __init__(self):
+        logger.warning("Using dummy Firebase Admin Firestore transaction. All operations will be no-ops.")
+        
+    def set(self, reference, data, merge=False):
+        logger.warning(f"Attempted to transaction set document: {getattr(reference, 'path', 'unknown')}")
+        return self
+        
+    def update(self, reference, data):
+        logger.warning(f"Attempted to transaction update document: {getattr(reference, 'path', 'unknown')}")
+        return self
+        
+    def delete(self, reference):
+        logger.warning(f"Attempted to transaction delete document: {getattr(reference, 'path', 'unknown')}")
+        return self
+        
+    def get(self, reference):
+        logger.warning(f"Attempted to transaction get document: {getattr(reference, 'path', 'unknown')}")
+        return DummyAdminDocumentSnapshot(getattr(reference, 'path', 'unknown'), {})
 
 # Dummy Firestore implementation for Firebase Admin
 class DummyAdminFirestore:
@@ -41,128 +211,39 @@ class DummyAdminFirestore:
     def transaction(self):
         return DummyAdminTransaction()
 
+# Implement DummyAdminCollection after all classes are defined
 class DummyAdminCollection:
     def __init__(self, name: str):
         self.name = name
     
     def document(self, doc_id: str = None):
         return DummyAdminDocument(f"{self.name}/{doc_id}" if doc_id else self.name)
-    
-    def where(self, field: str, op: str, value: Any):
-        return DummyAdminQuery(self.name)
-    
-    def get(self):
-        return []
-    
-    def stream(self):
-        return []
-    
-    def add(self, document_data: Dict[str, Any], document_id: Optional[str] = None):
-        logger.warning(f"Attempted write to removed Firestore collection: {self.name}")
-        return None
         
     def list_documents(self):
+        logger.warning(f"Listing documents in removed Firestore collection: {self.name}")
         return []
-
-class DummyAdminDocument:
-    def __init__(self, path: str):
-        self.path = path
-        self.id = path.split('/')[-1] if '/' in path else path
-    
-    def get(self):
-        return DummyAdminDocumentSnapshot(self.path, exists=False)
-    
-    def set(self, document_data: Dict[str, Any], merge: bool = False):
-        logger.warning(f"Attempted write to removed Firestore document: {self.path}")
-        return None
-    
-    def update(self, field_updates: Dict[str, Any]):
-        logger.warning(f"Attempted update to removed Firestore document: {self.path}")
-        return None
-    
-    def delete(self):
-        logger.warning(f"Attempted delete of removed Firestore document: {self.path}")
-        return None
-    
-    def collection(self, name: str):
-        return DummyAdminCollection(f"{self.path}/{name}")
         
-    def collections(self):
-        return []
-
-class DummyAdminDocumentSnapshot:
-    def __init__(self, path: str, exists: bool = False):
-        self.path = path
-        self.id = path.split('/')[-1] if '/' in path else path
-        self._exists = exists
-        self._data = {}
-        self.reference = DummyAdminDocument(path)
-    
-    def exists(self):
-        return self._exists
-    
-    def to_dict(self):
-        return self._data
-    
-    def get(self, field_path: str):
-        return None
-
-class DummyAdminQuery:
-    def __init__(self, collection_name: str):
-        self.collection_name = collection_name
-    
     def where(self, field: str, op: str, value: Any):
-        return self
-    
-    def order_by(self, field: str, direction: Optional[str] = None):
-        return self
-    
+        return DummyAdminQuery(self.name)
+        
+    def order_by(self, field: str, direction=None):
+        return DummyAdminQuery(self.name)
+        
     def limit(self, count: int):
-        return self
-    
+        return DummyAdminQuery(self.name)
+        
     def get(self):
         return []
-    
+        
     def stream(self):
         return []
         
-    def offset(self, count: int):
-        return self
+    def add(self, document_data, document_id=None):
+        logger.warning(f"Attempted to add document to removed Firestore collection: {self.name}")
+        return DummyAdminDocumentReference(f"{self.name}/{document_id or 'dummy-id'}")
 
-class DummyAdminBatch:
-    def __init__(self):
-        pass
-    
-    def set(self, ref, data, merge=False):
-        return self
-    
-    def update(self, ref, data):
-        return self
-    
-    def delete(self, ref):
-        return self
-    
-    def commit(self):
-        return []
-
-class DummyAdminTransaction:
-    def __init__(self):
-        pass
-    
-    def set(self, ref, data, merge=False):
-        return self
-    
-    def update(self, ref, data):
-        return self
-    
-    def delete(self, ref):
-        return self
-    
-    def get(self, ref):
-        return DummyAdminDocumentSnapshot(str(ref), exists=False)
-
-# Create a singleton instance
+# Create the singleton instance
 admin_firestore = DummyAdminFirestore()
 
-# Export for compatibility with existing imports
+# Export as 'firestore' for compatibility with existing code
 firestore = admin_firestore

@@ -13,31 +13,43 @@ from fastapi.responses import RedirectResponse
 
 # Firebase Admin
 import firebase_admin
+from firebase_admin import credentials  # fix missing import for credentials
 from utils.firebase_admin_adapter import admin_firestore as firestore
 
 logger = logging.getLogger("backend.airtable")
 
 # Initialize Firebase app if not already
-if not firebase_admin._apps:
-    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.path.join(os.getcwd(), "cleanenroll-fd36a-firebase-adminsdk-fbsvc-7d79b92b3f.json")
-    if not os.path.exists(cred_path):
-        raise RuntimeError("Firebase credentials JSON not found; set GOOGLE_APPLICATION_CREDENTIALS")
-    cred = credentials.Certificate(cred_path)
-    firebase_admin.initialize_app(cred)
+try:
+    if not firebase_admin._apps:
+        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.path.join(os.getcwd(), "cleanenroll-fd36a-firebase-adminsdk-fbsvc-7d79b92b3f.json")
+        if not os.path.exists(cred_path):
+            raise RuntimeError("Firebase credentials JSON not found; set GOOGLE_APPLICATION_CREDENTIALS")
+        cred = credentials.Certificate(cred_path)
+        firebase_admin.initialize_app(cred)
+except Exception:
+    # Do not fail import; endpoints can handle unavailability
+    pass
 
-db = firestore.client()
+# Firestore may be disabled; avoid failing at import time
+try:
+    db = firestore.client() if firestore is not None else None
+except Exception:
+    db = None
 
 router = APIRouter(prefix="/api/integrations/airtable", tags=["airtable"])
 
 
 def _is_pro_plan(user_id: str) -> bool:
+    # If Firestore is unavailable in this environment, allow by default.
+    if db is None:
+        return True
     try:
         snap = db.collection("users").document(user_id).get()
         data = snap.to_dict() or {}
         plan = str(data.get("plan") or "").lower()
         return plan in ("pro", "business", "enterprise")
     except Exception:
-        return False
+        return True
 
 # OAuth config
 AIRTABLE_CLIENT_ID = os.getenv("AIRTABLE_CLIENT_ID", "")

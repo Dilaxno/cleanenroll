@@ -84,12 +84,17 @@ class FormModel(BaseDBModel):
             raise ValueError('Form name must contain only lowercase letters, numbers, and hyphens')
         return v
     
-    @field_validator('allowed_domains', each_item=True)
+    @field_validator('allowed_domains')
     def validate_domains(cls, v):
         """Validate domain format"""
-        if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$', v):
-            raise ValueError(f'Invalid domain format: {v}')
-        return v.lower()  # Normalize to lowercase
+        if isinstance(v, list):
+            result = []
+            for item in v:
+                if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$', item):
+                    raise ValueError(f'Invalid domain format: {item}')
+                result.append(item.lower())  # Normalize to lowercase
+            return result
+        return v
 
 
 class SubmissionModel(BaseDBModel):

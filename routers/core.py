@@ -1,126 +1,4 @@
-# -----------------------------
-# User data (Neon)
-# -----------------------------
-
-@router.get("/api/user/plan")
-@limiter.limit("60/minute")
-async def get_user_plan(userId: str = Query(..., description="Firebase Auth UID")):
-    if not userId:
-        raise HTTPException(status_code=400, detail="Missing userId")
-    if async_session_maker is None:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    plan = "free"
-    async with async_session_maker() as session:
-        try:
-            from sqlalchemy import text as _text  # type: ignore
-            res = await session.execute(_text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"), {"uid": userId})
-            row = res.mappings().first()
-            if row and row.get("plan"):
-                plan = str(row["plan"]).lower()
-        except Exception:
-            # keep default
-            pass
-    return {"userId": userId, "plan": plan}
-
-
-@router.get("/api/user/info")
-@limiter.limit("60/minute")
-async def get_user_info(userId: str = Query(..., description="Firebase Auth UID")):
-    if not userId:
-        raise HTTPException(status_code=400, detail="Missing userId")
-    if async_session_maker is None:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    async with async_session_maker() as session:
-        from sqlalchemy import text as _text  # type: ignore
-        try:
-            res = await session.execute(_text(
-                """
-                SELECT uid, email, display_name, photo_url, plan,
-                       forms_count, signup_ip, signup_country,
-                       signup_geo_lat, signup_geo_lon, signup_user_agent,
-                       signup_at, created_at, updated_at
-                FROM users WHERE uid = :uid LIMIT 1
-                """
-            ), {"uid": userId})
-            row = res.mappings().first()
-            if not row:
-                raise HTTPException(status_code=404, detail="User not found")
-            data = {k: row[k] for k in row.keys()}
-            return {"user": data}
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/api/user/preferences")
-@limiter.limit("60/minute")
-async def get_user_preferences(userId: str = Query(..., description="Firebase Auth UID")):
-    if not userId:
-        raise HTTPException(status_code=400, detail="Missing userId")
-    if async_session_maker is None:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    async with async_session_maker() as session:
-        from sqlalchemy import text as _text  # type: ignore
-        res = await session.execute(_text("SELECT preferences FROM users WHERE uid = :uid LIMIT 1"), {"uid": userId})
-        row = res.mappings().first()
-        prefs = (row or {}).get("preferences") if row else None
-        # Ensure dict
-        if not isinstance(prefs, dict):
-            try:
-                import json as _json
-                prefs = _json.loads(prefs) if isinstance(prefs, str) else {}
-            except Exception:
-                prefs = {}
-        return {"preferences": prefs or {}}
-
-
-class UpdatePreferencesRequest(BaseModel):
-    preferences: dict
-
-
-@router.post("/api/user/preferences")
-@limiter.limit("30/minute")
-async def update_user_preferences(userId: str = Query(..., description="Firebase Auth UID"), req: UpdatePreferencesRequest = None):
-    if not userId:
-        raise HTTPException(status_code=400, detail="Missing userId")
-    if not isinstance(req, UpdatePreferencesRequest) or not isinstance(req.preferences, dict):
-        raise HTTPException(status_code=400, detail="Invalid preferences payload")
-    if async_session_maker is None:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    async with async_session_maker() as session:
-        from sqlalchemy import text as _text  # type: ignore
-        try:
-            import json as _json
-            payload = _json.dumps(req.preferences)
-            await session.execute(_text("UPDATE users SET preferences = CAST(:prefs AS JSONB), updated_at = NOW() WHERE uid = :uid"), {"prefs": payload, "uid": userId})
-            await session.commit()
-            return {"success": True}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-
-class MarketingOptRequest(BaseModel):
-    enabled: bool
-
-
-@router.post("/api/user/marketing")
-@limiter.limit("30/minute")
-async def set_marketing_opt_in(userId: str = Query(..., description="Firebase Auth UID"), req: MarketingOptRequest = None):
-    if not userId:
-        raise HTTPException(status_code=400, detail="Missing userId")
-    if not isinstance(req, MarketingOptRequest):
-        raise HTTPException(status_code=400, detail="Invalid payload")
-    if async_session_maker is None:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    async with async_session_maker() as session:
-        from sqlalchemy import text as _text  # type: ignore
-        try:
-            await session.execute(_text("UPDATE users SET marketing_opt_in = :en, updated_at = NOW() WHERE uid = :uid"), {"en": bool(req.enabled), "uid": userId})
-            await session.commit()
-            return {"success": True}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+# (moved user endpoints below router initialization)
 from fastapi import APIRouter, HTTPException, Request, Query, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
@@ -337,6 +215,128 @@ async def _ensure_temp_domains_loaded(force: bool = False):
     return
 
 router = APIRouter()
+
+# -----------------------------
+# User data (Neon)
+# -----------------------------
+
+@router.get("/api/user/plan")
+@limiter.limit("60/minute")
+async def get_user_plan(userId: str = Query(..., description="Firebase Auth UID")):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    plan = "free"
+    async with async_session_maker() as session:
+        try:
+            from sqlalchemy import text as _text  # type: ignore
+            res = await session.execute(_text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"), {"uid": userId})
+            row = res.mappings().first()
+            if row and row.get("plan"):
+                plan = str(row["plan"]).lower()
+        except Exception:
+            pass
+    return {"userId": userId, "plan": plan}
+
+
+@router.get("/api/user/info")
+@limiter.limit("60/minute")
+async def get_user_info(userId: str = Query(..., description="Firebase Auth UID")):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    async with async_session_maker() as session:
+        from sqlalchemy import text as _text  # type: ignore
+        try:
+            res = await session.execute(_text(
+                """
+                SELECT uid, email, display_name, photo_url, plan,
+                       forms_count, signup_ip, signup_country,
+                       signup_geo_lat, signup_geo_lon, signup_user_agent,
+                       signup_at, created_at, updated_at
+                FROM users WHERE uid = :uid LIMIT 1
+                """
+            ), {"uid": userId})
+            row = res.mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+            data = {k: row[k] for k in row.keys()}
+            return {"user": data}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/user/preferences")
+@limiter.limit("60/minute")
+async def get_user_preferences(userId: str = Query(..., description="Firebase Auth UID")):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    async with async_session_maker() as session:
+        from sqlalchemy import text as _text  # type: ignore
+        res = await session.execute(_text("SELECT preferences FROM users WHERE uid = :uid LIMIT 1"), {"uid": userId})
+        row = res.mappings().first()
+        prefs = (row or {}).get("preferences") if row else None
+        if not isinstance(prefs, dict):
+            try:
+                import json as _json
+                prefs = _json.loads(prefs) if isinstance(prefs, str) else {}
+            except Exception:
+                prefs = {}
+        return {"preferences": prefs or {}}
+
+
+class UpdatePreferencesRequest(BaseModel):
+    preferences: dict
+
+
+@router.post("/api/user/preferences")
+@limiter.limit("30/minute")
+async def update_user_preferences(userId: str = Query(..., description="Firebase Auth UID"), req: UpdatePreferencesRequest = None):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if not isinstance(req, UpdatePreferencesRequest) or not isinstance(req.preferences, dict):
+        raise HTTPException(status_code=400, detail="Invalid preferences payload")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    async with async_session_maker() as session:
+        from sqlalchemy import text as _text  # type: ignore
+        try:
+            import json as _json
+            payload = _json.dumps(req.preferences)
+            await session.execute(_text("UPDATE users SET preferences = CAST(:prefs AS JSONB), updated_at = NOW() WHERE uid = :uid"), {"prefs": payload, "uid": userId})
+            await session.commit()
+            return {"success": True}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+class MarketingOptRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/api/user/marketing")
+@limiter.limit("30/minute")
+async def set_marketing_opt_in(userId: str = Query(..., description="Firebase Auth UID"), req: MarketingOptRequest = None):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if not isinstance(req, MarketingOptRequest):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    async with async_session_maker() as session:
+        from sqlalchemy import text as _text  # type: ignore
+        try:
+            await session.execute(_text("UPDATE users SET marketing_opt_in = :en, updated_at = NOW() WHERE uid = :uid"), {"en": bool(req.enabled), "uid": userId})
+            await session.commit()
+            return {"success": True}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 class SignupCheckResponse(BaseModel):
     allowed: bool

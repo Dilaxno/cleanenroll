@@ -48,9 +48,8 @@ async def get_connection():
     """Get a SQLAlchemy async session"""
     return async_session_maker()
 
-@asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Async context manager for database sessions"""
+    """FastAPI dependency that yields an AsyncSession and manages commit/rollback/close."""
     session = async_session_maker()
     try:
         yield session
@@ -65,15 +64,19 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 @asynccontextmanager
 async def get_cursor(commit=False):
     """Async context manager that provides raw SQL execution capability"""
-    async with get_session() as session:
-        async with session.begin():
-            # This allows executing raw SQL while still using the connection pool
-            result_proxy = await session.execute(text("SELECT 1"))
-            # Create a proxy object that mimics the old cursor interface
-            cursor_proxy = SQLAlchemyCursorProxy(session)
-            yield cursor_proxy
+    async with async_session_maker() as session:
+        try:
+            async with session.begin():
+                # This allows executing raw SQL while still using the connection pool
+                await session.execute(text("SELECT 1"))
+                # Create a proxy object that mimics the old cursor interface
+                cursor_proxy = SQLAlchemyCursorProxy(session)
+                yield cursor_proxy
             if commit:
                 await session.commit()
+        except Exception as e:
+            await session.rollback()
+            raise e
 
 class SQLAlchemyCursorProxy:
     """A proxy class that mimics the psycopg2 cursor interface but uses SQLAlchemy under the hood"""

@@ -10,26 +10,47 @@ import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (do not override shell env)
+try:
+    load_dotenv()
+    from pathlib import Path
+    backend_env = Path(__file__).resolve().parents[1] / ".env"
+    if backend_env.exists():
+        load_dotenv(dotenv_path=str(backend_env), override=False)
+except Exception:
+    pass
 
-# Database connection parameters
-DB_NAME = os.getenv("POSTGRES_DB", "cleanenroll")
-DB_USER = os.getenv("POSTGRES_USER", "postgres")
-DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "Esstafa00uni@")
-DB_HOST = os.getenv("POSTGRES_HOST", "localhost")
-DB_PORT = os.getenv("POSTGRES_PORT", "5432")
+# Database connection parameters (Neon)
+DB_NAME = os.getenv("NEON_DB", os.getenv("POSTGRES_DB", "neondb"))
+DB_USER = os.getenv("NEON_USER", os.getenv("POSTGRES_USER", "neondb_owner"))
+DB_PASSWORD = os.getenv("NEON_PASSWORD", os.getenv("POSTGRES_PASSWORD", ""))
+DB_HOST = os.getenv("NEON_HOST", os.getenv("POSTGRES_HOST", "localhost"))
+DB_PORT = os.getenv("NEON_PORT", os.getenv("POSTGRES_PORT", "5432"))
+
+# SSL mode: Neon requires SSL
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
+
+# Managed DBs (Neon): skip create by default, or when DATABASE_URL is present
+DATABASE_URL = os.getenv("DATABASE_URL")
+SKIP_DB_CREATE = os.getenv("SKIP_DB_CREATE", "1" if DATABASE_URL or "neon.tech" in str(DB_HOST) else "0") == "1"
 
 def create_database():
     """Create the database if it doesn't exist"""
+    if SKIP_DB_CREATE:
+        print("Skipping database creation (managed instance or SKIP_DB_CREATE enabled)")
+        return True
     try:
         # Connect to PostgreSQL server
-        conn = psycopg2.connect(
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
+        if DATABASE_URL:
+            conn = psycopg2.connect(DATABASE_URL)
+        else:
+            conn = psycopg2.connect(
+                user=DB_USER,
+                password=DB_PASSWORD,
+                host=DB_HOST,
+                port=DB_PORT,
+                sslmode=DB_SSLMODE,
+            )
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
         
@@ -55,13 +76,17 @@ def setup_tables():
     """Create tables from schema.sql"""
     try:
         # Connect to the database
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
+        if DATABASE_URL:
+            conn = psycopg2.connect(DATABASE_URL)
+        else:
+            conn = psycopg2.connect(
+                dbname=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                host=DB_HOST,
+                port=DB_PORT,
+                sslmode=DB_SSLMODE,
+            )
         cursor = conn.cursor()
         
         # Read schema file

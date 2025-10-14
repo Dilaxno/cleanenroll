@@ -12,38 +12,63 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import text
 from sqlalchemy.engine import URL
 from dotenv import load_dotenv
+from pathlib import Path
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (do not override shell env)
+try:
+    load_dotenv()
+    backend_env = Path(__file__).resolve().parents[1] / ".env"
+    if backend_env.exists():
+        load_dotenv(dotenv_path=str(backend_env), override=False)
+except Exception:
+    pass
 
-# Database connection parameters
-DB_NAME = os.getenv("POSTGRES_DB", "cleanenroll")
-DB_USER = os.getenv("POSTGRES_USER", "postgres")
-DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "Esstafa00uni@")
-DB_HOST = os.getenv("POSTGRES_HOST", "localhost")
-DB_PORT = os.getenv("POSTGRES_PORT", "5432")
+# Database connection parameters (Neon-first)
+DATABASE_URL_ENV = os.getenv("DATABASE_URL", "")
+DB_NAME = os.getenv("NEON_DB", os.getenv("POSTGRES_DB", "neondb"))
+DB_USER = os.getenv("NEON_USER", os.getenv("POSTGRES_USER", "neondb_owner"))
+DB_PASSWORD = os.getenv("NEON_PASSWORD", os.getenv("POSTGRES_PASSWORD", ""))
+DB_HOST = os.getenv("NEON_HOST", os.getenv("POSTGRES_HOST", "localhost"))
+DB_PORT = os.getenv("NEON_PORT", os.getenv("POSTGRES_PORT", "5432"))
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 # SQLAlchemy models base class
 Base = declarative_base()
 
-# Create async engine with connection pooling (use URL.create to safely handle special chars)
-DATABASE_URL = URL.create(
-    drivername="postgresql+asyncpg",
-    username=DB_USER,
-    password=DB_PASSWORD,
-    host=DB_HOST,
-    port=int(DB_PORT) if str(DB_PORT).isdigit() else None,
-    database=DB_NAME,
-)
+# Create async engine with connection pooling
+def _normalize_asyncpg_url(dsn: str) -> str:
+    # Ensure SQLAlchemy uses asyncpg driver
+    if dsn.startswith("postgresql+asyncpg://"):
+        return dsn
+    if dsn.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + dsn[len("postgresql://"):]
+    return dsn
+
+if DATABASE_URL_ENV:
+    raw_url = _normalize_asyncpg_url(DATABASE_URL_ENV)
+    DATABASE_URL = raw_url
+else:
+    # Build from discrete env vars
+    DATABASE_URL = str(
+        URL.create(
+            drivername="postgresql+asyncpg",
+            username=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=int(DB_PORT) if str(DB_PORT).isdigit() else None,
+            database=DB_NAME,
+            query={"sslmode": DB_SSLMODE},
+        )
+    )
 
 engine = create_async_engine(
     DATABASE_URL,
-    echo=False,  # Set to True for SQL query logging
-    pool_size=5,  # Number of connections to keep open
-    max_overflow=10,  # Max number of connections to create beyond pool_size
-    pool_timeout=30,  # Seconds to wait before giving up on getting a connection
-    pool_recycle=1800,  # Recycle connections after 30 minutes
-    pool_pre_ping=True,  # Verify connections before using them
+    echo=False,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
 )
 
 # Create session factory

@@ -6,7 +6,7 @@ Migration script to transfer data from Firestore to PostgreSQL
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import firebase_admin
 from firebase_admin import credentials, firestore
 import psycopg2
@@ -14,15 +14,29 @@ import psycopg2.extras
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from both project root and backend/.env
+# backend/.env should take precedence if both exist
+try:
+    # Load root .env (if present)
+    load_dotenv()
+    # Load backend/.env explicitly
+    from pathlib import Path
+    backend_env = Path(__file__).resolve().parents[1] / ".env"
+    if backend_env.exists():
+        load_dotenv(dotenv_path=str(backend_env), override=False)
+except Exception:
+    pass
 
-# Database connection parameters
-DB_NAME = os.getenv("POSTGRES_DB", "cleanenroll")
-DB_USER = os.getenv("POSTGRES_USER", "postgres")
-DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "Esstafa00uni@")
-DB_HOST = os.getenv("POSTGRES_HOST", "localhost")
-DB_PORT = os.getenv("POSTGRES_PORT", "5432")
+# Database connection parameters (Neon)
+# Prefer full DATABASE_URL; otherwise use discrete NEON_* variables
+DB_NAME = os.getenv("NEON_DB", "neondb")
+DB_USER = os.getenv("NEON_USER", "neondb_owner")
+DB_PASSWORD = os.getenv("NEON_PASSWORD", "")
+DB_HOST = os.getenv("NEON_HOST", "localhost")
+DB_PORT = os.getenv("NEON_PORT", "5432")
+
+# SSL mode: Neon requires SSL
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 # Firebase credentials
 FIREBASE_CREDS = os.getenv("FIREBASE_CREDENTIALS", "cleanenroll-fd36a-firebase-adminsdk-fbsvc-7d79b92b3f.json")
@@ -37,15 +51,21 @@ except Exception as e:
     print(f"Error initializing Firebase: {e}")
     exit(1)
 
-# Connect to PostgreSQL
+# Connect to PostgreSQL (Neon-compatible)
 try:
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if DATABASE_URL:
+        # If provided, prefer full DSN. It may already include sslmode, etc.
+        conn = psycopg2.connect(DATABASE_URL)
+    else:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT,
+            sslmode=DB_SSLMODE,
+        )
     print("Connected to PostgreSQL successfully")
 except Exception as e:
     print(f"Error connecting to PostgreSQL: {e}")
@@ -87,13 +107,30 @@ def migrate_users():
             'updated_at': user_data.get('updatedAt', None)
         }
         
-        # Handle timestamps properly
-        for field in ['created_at', 'updated_at']:
+        # Handle timestamps properly (convert to Python datetime in UTC)
+        for field in ['signup_at', 'created_at', 'updated_at']:
             if field in fields:
-                if fields[field] and hasattr(fields[field], 'timestamp'):
-                    # Convert Firestore timestamp to Python datetime
-                    fields[field] = fields[field].timestamp()
-                elif isinstance(fields[field], dict) and '_methodName' in fields[field]:
+                val = fields[field]
+                if val is None:
+                    continue
+                if hasattr(val, 'timestamp'):
+                    # Firestore Timestamp or datetime-like -> convert to aware UTC datetime
+                    try:
+                        ts = val.timestamp()
+                        fields[field] = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    except Exception:
+                        # If it's already a datetime, ensure tz-aware UTC
+                        if isinstance(val, datetime):
+                            fields[field] = val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+                        else:
+                            fields[field] = None
+                elif isinstance(val, (int, float)):
+                    # Numeric epoch; if it looks like ms, convert accordingly
+                    ts = float(val)
+                    if ts > 1e12:  # ms
+                        ts = ts / 1000.0
+                    fields[field] = datetime.fromtimestamp(ts, tz=timezone.utc)
+                elif isinstance(val, dict) and '_methodName' in val:
                     # Handle SERVER_TIMESTAMP placeholder
                     fields[field] = None
         
@@ -108,7 +145,15 @@ def migrate_users():
             
             cursor.execute(query, values)
             migrated += 1
+            # Commit periodically to avoid large open transactions
+            if migrated % 100 == 0:
+                conn.commit()
         except Exception as e:
+            # Rollback this failed insert so the transaction is usable for subsequent records
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             print(f"Error migrating user {user_id}: {e}")
     
     conn.commit()
@@ -153,27 +198,29 @@ def migrate_forms():
             'updated_at': form_data.get('updatedAt', None)
         }
         
-        # Convert Firestore timestamps to datetime objects
+        # Convert Firestore timestamps to datetime objects (UTC)
         for field in ['created_at', 'updated_at']:
             if field in fields and fields[field]:
-                if hasattr(fields[field], 'timestamp'):
-                    # Convert Firestore timestamp to Python datetime
-                    fields[field] = datetime.fromtimestamp(fields[field].timestamp())
-                elif isinstance(fields[field], dict) and '_methodName' in fields[field]:
-                    # Handle SERVER_TIMESTAMP placeholder
+                val = fields[field]
+                if hasattr(val, 'timestamp'):
+                    fields[field] = datetime.fromtimestamp(val.timestamp(), tz=timezone.utc)
+                elif isinstance(val, dict) and '_methodName' in val:
                     fields[field] = None
-                elif isinstance(fields[field], (int, float)):
-                    # Handle numeric timestamps (milliseconds since epoch)
-                    fields[field] = datetime.fromtimestamp(fields[field] / 1000.0)
+                elif isinstance(val, (int, float)):
+                    ts = float(val)
+                    if ts > 1e12:
+                        ts /= 1000.0
+                    fields[field] = datetime.fromtimestamp(ts, tz=timezone.utc)
         
         # Skip forms without user_id or with user_id not in the users table
         if not fields['user_id']:
             print(f"Skipping form {form_id} without user_id")
             continue
             
-        # Check if user exists in the database
-        cursor.execute("SELECT uid FROM users WHERE uid = %s", (fields['user_id'],))
-        if cursor.rowcount == 0:
+        # Check if user exists in the database (reliably)
+        cursor.execute("SELECT 1 FROM users WHERE uid = %s", (fields['user_id'],))
+        user_exists = cursor.fetchone()
+        if not user_exists:
             print(f"Error migrating form {form_id}: user_id {fields['user_id']} not found in users table")
             continue
         
@@ -268,9 +315,18 @@ def migrate_form_submissions(form_id, form_owner_id):
             'submitted_at': submission_data.get('submittedAt', None)
         }
         
-        # Convert Firestore timestamps to datetime objects
-        if fields['submitted_at'] and hasattr(fields['submitted_at'], 'timestamp'):
-            fields['submitted_at'] = fields['submitted_at']
+        # Convert Firestore timestamps to datetime objects (UTC)
+        if fields['submitted_at']:
+            val = fields['submitted_at']
+            if hasattr(val, 'timestamp'):
+                fields['submitted_at'] = datetime.fromtimestamp(val.timestamp(), tz=timezone.utc)
+            elif isinstance(val, (int, float)):
+                ts = float(val)
+                if ts > 1e12:
+                    ts /= 1000.0
+                fields['submitted_at'] = datetime.fromtimestamp(ts, tz=timezone.utc)
+            elif isinstance(val, dict) and '_methodName' in val:
+                fields['submitted_at'] = None
         
         # Insert submission into PostgreSQL
         try:
@@ -313,9 +369,18 @@ def migrate_form_analytics(form_id):
             'created_at': event_data.get('createdAt', None)
         }
         
-        # Convert Firestore timestamps to datetime objects
-        if fields['created_at'] and hasattr(fields['created_at'], 'timestamp'):
-            fields['created_at'] = fields['created_at']
+        # Convert Firestore timestamps to datetime objects (UTC)
+        if fields['created_at']:
+            val = fields['created_at']
+            if hasattr(val, 'timestamp'):
+                fields['created_at'] = datetime.fromtimestamp(val.timestamp(), tz=timezone.utc)
+            elif isinstance(val, (int, float)):
+                ts = float(val)
+                if ts > 1e12:
+                    ts /= 1000.0
+                fields['created_at'] = datetime.fromtimestamp(ts, tz=timezone.utc)
+            elif isinstance(val, dict) and '_methodName' in val:
+                fields['created_at'] = None
         
         # Insert analytics event into PostgreSQL
         try:
@@ -479,9 +544,18 @@ def migrate_form_sessions(form_id):
                     'created_at': chunk_data.get('createdAt', None)
                 }
                 
-                # Convert Firestore timestamps to datetime objects
-                if chunk_fields['created_at'] and hasattr(chunk_fields['created_at'], 'timestamp'):
-                    chunk_fields['created_at'] = chunk_fields['created_at']
+                # Convert Firestore timestamps to datetime objects (UTC)
+                if chunk_fields['created_at']:
+                    val = chunk_fields['created_at']
+                    if hasattr(val, 'timestamp'):
+                        chunk_fields['created_at'] = datetime.fromtimestamp(val.timestamp(), tz=timezone.utc)
+                    elif isinstance(val, (int, float)):
+                        ts = float(val)
+                        if ts > 1e12:
+                            ts /= 1000.0
+                        chunk_fields['created_at'] = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    elif isinstance(val, dict) and '_methodName' in val:
+                        chunk_fields['created_at'] = None
                 
                 # Insert chunk into PostgreSQL
                 try:
@@ -553,6 +627,11 @@ def migrate_notifications():
                 cursor.execute(query, values)
                 migrated += 1
             except Exception as e:
+                # Rollback so we can continue with next notifications
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 print(f"Error migrating notification {notification_id} for user {user_id}: {e}")
         
         total_migrated += migrated

@@ -44,6 +44,9 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 # --- Firebase bootstrap
 
 def _ensure_firebase_initialized():
+    # Optional feature flag to disable Firestore access entirely (e.g., after migrating to Neon)
+    if str(os.getenv("FIRESTORE_DISABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+        raise HTTPException(status_code=503, detail="Firestore is disabled on this environment")
     if not _FB_AVAILABLE:
         raise HTTPException(status_code=500, detail="Firebase Admin SDK not available on server.")
     if not firebase_admin._apps:  # type: ignore

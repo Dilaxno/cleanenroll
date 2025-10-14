@@ -5,9 +5,9 @@ Forms API router using PostgreSQL database
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
-from ..services.forms_service import FormsService
-from ..services.submissions_service import SubmissionsService
-from ..auth.auth_utils import get_current_user
+from services.forms_service import FormsService
+from services.submissions_service import SubmissionsService
+from auth.auth_utils import get_current_user
 
 router = APIRouter(prefix="/api/forms", tags=["forms"])
 

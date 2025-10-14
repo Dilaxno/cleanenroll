@@ -5,8 +5,8 @@ Submissions API router using PostgreSQL database
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
-from ..services.submissions_service import SubmissionsService
-from ..auth.auth_utils import get_current_user, get_request_metadata
+from services.submissions_service import SubmissionsService
+from auth.auth_utils import get_current_user, get_request_metadata
 
 router = APIRouter(prefix="/api/submissions", tags=["submissions"])
 

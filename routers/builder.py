@@ -51,7 +51,7 @@ except Exception:
 
 # Email sender (Resend preferred)
 try:
-    from ..utils.email import render_email, send_email_html  # type: ignore
+    from utils.email import render_email, send_email_html  # type: ignore
 except Exception:
     from utils.email import render_email, send_email_html  # type: ignore
 
@@ -1517,7 +1517,7 @@ def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[floa
 
 # Use the shared limiter instance configured in utils.limiter (supports both package and flat runs)
 try:
-    from ..utils.limiter import limiter  # type: ignore
+    from utils.limiter import limiter  # type: ignore
 except Exception:
     from utils.limiter import limiter  # type: ignore
 
@@ -5402,7 +5402,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         try:
             # try import via package-aware path first
             try:
-                from .google_sheets import try_append_submission_for_form  # type: ignore
+                from routers.google_sheets import try_append_submission_for_form  # type: ignore
             except Exception:
                 from routers.google_sheets import try_append_submission_for_form  # type: ignore
             owner_id = str(form_data.get("userId") or "").strip() or None
@@ -5413,7 +5413,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         # Attempt Airtable append if syncing is enabled for this form
         try:
             try:
-                from .airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
             except Exception:
                 from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
             owner_id = str(form_data.get("userId") or "").strip() or None
@@ -5424,7 +5424,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         # Attempt Slack notification if configured
         try:
             try:
-                from .slack import try_notify_slack_for_form  # type: ignore
+                from routers.slack import try_notify_slack_for_form  # type: ignore
             except Exception:
                 from routers.slack import try_notify_slack_for_form  # type: ignore
             owner_id = str(form_data.get("userId") or "").strip() or None
@@ -5511,7 +5511,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         # Attempt Airtable append if syncing is enabled for this form
         try:
             try:
-                from .airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
             except Exception:
                 from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
             owner_id = str(form_data.get("userId") or "").strip() or None

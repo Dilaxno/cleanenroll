@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 # Email utils for notifications
 try:
-    from ..utils.email import render_email, send_email_html  # type: ignore
+    from utils.email import render_email, send_email_html  # type: ignore
 except Exception:
     from utils.email import render_email, send_email_html  # type: ignore
 

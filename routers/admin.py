@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 # Rate limiter
 try:
-    from ..utils.limiter import limiter, forwarded_for_ip  # type: ignore
+    from utils.limiter import limiter, forwarded_for_ip  # type: ignore
 except Exception:  # pragma: no cover
     from utils.limiter import limiter, forwarded_for_ip  # type: ignore
 

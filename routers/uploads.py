@@ -6,13 +6,13 @@ import logging
 
 # Rate limiter (shared)
 try:
-    from ..utils.limiter import limiter  # type: ignore
+    from utils.limiter import limiter  # type: ignore
 except Exception:  # pragma: no cover
     from utils.limiter import limiter  # type: ignore
 
 # Reuse R2 client and URL helpers from builder router to keep config in one place
 try:
-    from .builder import _r2_client, _public_url_for_key, R2_BUCKET  # type: ignore
+    from routers.builder import _r2_client, _public_url_for_key, R2_BUCKET  # type: ignore
 except Exception:  # pragma: no cover
     from routers.builder import _r2_client, _public_url_for_key, R2_BUCKET  # type: ignore
 

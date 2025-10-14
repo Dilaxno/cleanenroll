@@ -38,7 +38,7 @@ except Exception:
 
 # Import reputation helper functions from builder router (Spamhaus/WHOIS/SPF/DMARC/DKIM)
 try:
-    from .builder import _spamhaus_listed, _domain_age_days, _has_spf, _has_dmarc, _has_any_dkim  # type: ignore
+    from routers.builder import _spamhaus_listed, _domain_age_days, _has_spf, _has_dmarc, _has_any_dkim  # type: ignore
     _REPUTATION_HELPERS_AVAILABLE = True
 except Exception:
     _spamhaus_listed = None  # type: ignore
@@ -50,7 +50,7 @@ except Exception:
 
 # Geo helpers (IP -> country/lat/lon)
 try:
-    from .builder import _geo_from_ip  # type: ignore
+    from routers.builder import _geo_from_ip  # type: ignore
     _GEO_HELPERS_AVAILABLE = True
 except Exception:
     _geo_from_ip = None  # type: ignore
@@ -66,9 +66,9 @@ except Exception:
 
 # Rate limiter shared instance
 try:
-    from ..utils.limiter import limiter  # type: ignore
-    from ..utils.limiter import forwarded_for_ip as _ip_from_req  # type: ignore
-    from ..utils.limiter import can_signup_ip as _can_signup_ip, record_signup_ip as _record_signup_ip  # type: ignore
+    from utils.limiter import limiter  # type: ignore
+    from utils.limiter import forwarded_for_ip as _ip_from_req  # type: ignore
+    from utils.limiter import can_signup_ip as _can_signup_ip, record_signup_ip as _record_signup_ip  # type: ignore
 except Exception:
     from utils.limiter import limiter  # type: ignore
     from utils.limiter import forwarded_for_ip as _ip_from_req  # type: ignore
@@ -97,7 +97,7 @@ def _mx_lookup(domain: str) -> list[str]:
 # Email + Firebase Admin
 try:
     # When running as a package (e.g., backend.*)
-    from ..utils.email import render_email, send_email_html  # type: ignore
+    from utils.email import render_email, send_email_html  # type: ignore
 except Exception:
     # When running flat from repo root
     from utils.email import render_email, send_email_html  # type: ignore

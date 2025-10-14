@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 # Optional imports with fallbacks
 try:
-    from ..utils.limiter import limiter  # type: ignore
+    from utils.limiter import limiter  # type: ignore
 except Exception:
     try:
         from utils.limiter import limiter  # type: ignore

@@ -5,9 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.database import get_session
-from ..services.forms_service_async import AsyncFormsService
-from ..models.base import FormModel
+from db.database import get_session
+from services.forms_service_async import AsyncFormsService
+from models.base import FormModel
 
 router = APIRouter(prefix="/api/forms", tags=["forms"])
 

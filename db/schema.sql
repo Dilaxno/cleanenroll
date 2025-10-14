@@ -148,3 +148,14 @@ CREATE TABLE notifications (
 
 -- Create index on user_id for faster queries
 CREATE INDEX idx_notifications_user_id ON notifications(user_id);
+
+-- Webhook idempotency (dedupe by provider webhook id)
+CREATE TABLE webhooks_idempotency (
+    webhook_id VARCHAR(255) PRIMARY KEY,
+    received_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    event_type VARCHAR(100),
+    user_uid VARCHAR(128),
+    customer_email VARCHAR(255),
+    payment_id VARCHAR(255),
+    product_id VARCHAR(255)
+);

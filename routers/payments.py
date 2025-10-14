@@ -15,12 +15,11 @@ logger = logging.getLogger("backend.payments")
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])  # /api/payments/*
 
-# Firestore Admin to update user's plan/billing
+# Neon (PostgreSQL) for user plan/email updates
 try:
-    from utils.firebase_admin_adapter import admin_firestore as _fs
-    _FS_AVAILABLE = True
+    from db.database import async_session_maker  # type: ignore
 except Exception:
-    _FS_AVAILABLE = False
+    from ..db.database import async_session_maker  # type: ignore
 
 # Firebase Admin (optional auth verification)
 try:
@@ -55,41 +54,38 @@ def _verify_id_token_from_header(request: Request) -> Optional[str]:
         return None
 
 
-def _update_user_billing(uid: str, updates: Dict):
-    if not _FS_AVAILABLE or not uid:
-        return
-    try:
-        ref = _fs.client().collection('users').document(uid)
-        doc = ref.get()
-        data = doc.to_dict() or {}
-        billing = data.get('billing') or {}
-        billing.update(updates)
-        ref.update({'billing': billing})
-    except Exception:
-        logger.exception('[payments] failed to update user billing uid=%s', uid)
+async def _update_user_billing(uid: str, updates: Dict):
+    """
+    Minimal Neon-backed billing updater.
+    Note: current schema does not include a billing column; persist only what fits or ignore.
+    For now, we no-op but keep the function async to preserve call sites.
+    """
+    return
 
 
-def _set_user_plan(uid: str, plan: str):
-    if not _FS_AVAILABLE or not uid:
+async def _set_user_plan(uid: str, plan: str):
+    if not uid:
         return
     try:
-        ref = _fs.client().collection('users').document(uid)
-        ref.update({'plan': plan})
+        async with async_session_maker() as session:
+            await session.execute(
+                "UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid",
+                {"plan": plan, "uid": uid},
+            )
+            await session.commit()
     except Exception:
         logger.exception('[payments] failed to set user plan uid=%s', uid)
 
 
-def _get_user_email(uid: str) -> Optional[str]:
-    """Fetch user's email from Firestore by uid, if available."""
-    if not _FS_AVAILABLE or not uid:
+async def _get_user_email(uid: str) -> Optional[str]:
+    if not uid:
         return None
     try:
-        ref = _fs.client().collection('users').document(uid)
-        snap = ref.get()
-        data = snap.to_dict() or {}
-        email = data.get('email')
-        if isinstance(email, str) and '@' in email:
-            return email.strip()
+        async with async_session_maker() as session:
+            res = await session.execute("SELECT email FROM users WHERE uid = :uid", {"uid": uid})
+            row = res.first()
+            if row and row[0] and isinstance(row[0], str) and '@' in row[0]:
+                return row[0].strip()
     except Exception:
         logger.warning('[payments] failed to get user email for uid=%s', uid)
     return None

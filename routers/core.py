@@ -102,6 +102,10 @@ except Exception:
     # When running flat from repo root
     from utils.email import render_email, send_email_html  # type: ignore
 try:
+    from db.database import async_session_maker  # type: ignore
+except Exception:
+    from ..db.database import async_session_maker  # type: ignore
+try:
     import firebase_admin
     from utils.firebase_admin_adapter import admin_auth, admin_firestore
     _FB_AVAILABLE = True
@@ -453,18 +457,31 @@ async def signup_enrich(request: Request):
     except Exception:
         country, lat, lon = None, None, None
 
-    # Best-effort write to Firestore
+    # Persist signup metadata to Neon (users table), best-effort
     try:
-        fs = admin_firestore.client()
-        updates = {
-            "signupIp": ip or None,
-            "signupCountry": (str(country).upper() if isinstance(country, str) and country else None),
-            "signupGeoLat": lat,
-            "signupGeoLon": lon,
-            "signupUserAgent": (request.headers.get("user-agent") or None),
-            "signupAtServer": admin_firestore.SERVER_TIMESTAMP,
-        }
-        fs.collection("users").document(uid).set(updates, merge=True)
+        async with async_session_maker() as session:
+            await session.execute(
+                """
+                UPDATE users
+                SET signup_ip = :ip,
+                    signup_country = :country,
+                    signup_geo_lat = :lat,
+                    signup_geo_lon = :lon,
+                    signup_user_agent = :ua,
+                    signup_at = NOW(),
+                    updated_at = NOW()
+                WHERE uid = :uid
+                """,
+                {
+                    "ip": ip or None,
+                    "country": (str(country).upper() if isinstance(country, str) and country else None),
+                    "lat": lat,
+                    "lon": lon,
+                    "ua": (request.headers.get("user-agent") or None),
+                    "uid": uid,
+                },
+            )
+            await session.commit()
     except Exception:
         # Do not fail the request on storage errors
         pass
@@ -1869,8 +1886,9 @@ async def health():
 @router.post("/api/payments/dodo/webhook/")
 async def dodo_webhook(request: Request):
     """Handle Dodo Payments webhook events.
-    On payment.succeeded, upgrade user's plan to 'pro' in Firestore.
-    Mapping priority: metadata.user_id -> customer.email -> ignore.
+    When subscription is active/renewed or a payment succeeds, set user's plan to 'pro' in Neon.
+    When subscription is cancelled, set plan to 'free'.
+    UID resolution priority: metadata.user_uid -> query_params.user_uid -> lookup by customer email in Neon.
     """
     # Read raw body (for signature verification if needed later)
     try:
@@ -1932,6 +1950,20 @@ async def dodo_webhook(request: Request):
         logger.warning("[dodo-webhook] signature verification failed")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
+    # Idempotency: check if webhook-id already processed
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                "SELECT webhook_id FROM webhooks_idempotency WHERE webhook_id = :wid",
+                {"wid": webhook_id},
+            )
+            if res.first():
+                logger.info("[dodo-webhook] duplicate webhook-id=%s already processed; skipping", webhook_id)
+                return {"status": "ok", "duplicate": True}
+    except Exception:
+        # Do not block on idempotency storage issues
+        logger.exception("[dodo-webhook] idempotency pre-check failed")
+
     # Parse JSON after verification
     try:
         payload = json.loads(raw_text)
@@ -1961,7 +1993,7 @@ async def dodo_webhook(request: Request):
     }
     if event_type not in handled_events:
         logger.info("[dodo-webhook] ignoring event_type=%s", event_type)
-        return {"status": "ignored", "event_type": event_type}
+        return {"status": "ok", "event_type": event_type}
 
     data = payload.get("data", {}) or {}
     metadata = (
@@ -2065,70 +2097,26 @@ async def dodo_webhook(request: Request):
     product_id = data.get("product_id") or (data.get("product") or {}).get("product_id")
     payment_id = data.get("payment_id") or data.get("id") or payload.get("id")
 
-    # Initialize Firebase Admin and Firestore; implement idempotency using webhook-id
-    try:
-        _ensure_firebase_initialized()
-        # Skip if Firestore removed/disabled
-        if admin_firestore is None:
-            return JSONResponse({"status": "ok", "note": "Firestore disabled; skipping user doc update"})
-        fs = admin_firestore.client()
-        # Idempotency: if we've already seen this webhook-id and successfully updated user, acknowledge and return
-        try:
-            seen_ref = fs.collection("webhooks").document(webhook_id)
-            seen_snap = seen_ref.get()
-            if seen_snap.exists:
-                seen_data = seen_snap.to_dict()
-                if seen_data.get("updatedUser"):
-                    logger.info("[dodo-webhook] duplicate webhook-id=%s already processed successfully; skipping", webhook_id)
-                    return {"status": "ok", "duplicate": True}
-                else:
-                    logger.warning("[dodo-webhook] duplicate webhook-id=%s exists but user not updated; retrying", webhook_id)
-            # Mark as seen (no user-specific info yet)
-            seen_ref.set({
-                "receivedAt": admin_firestore.SERVER_TIMESTAMP,
-                "event_type": event_type,
-                "verified": True,
-            }, merge=False)
-            logger.debug("[dodo-webhook] idempotency recorded webhook-id=%s", webhook_id)
-        except Exception as e:
-            # Log but continue; idempotency failures should not block processing
-            logger.exception("[webhook] idempotency record error")
-    except HTTPException as e:
-        # Fail explicitly on server misconfiguration
-        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
-
-    # Resolve UID (try metadata/query_params, then fallback via customer email)
+    # Resolve UID (try metadata/query_params, then fallback via Neon select by email)
     resolved_uid = None
     if user_id:
         logger.info("[dodo-webhook] uid found in metadata/query_params")
         resolved_uid = user_id
     else:
-        # Fallback: try mapping by customer email using Firebase Admin
-        if customer_email and _FB_AVAILABLE:
+        # Fallback: try mapping by customer email using Neon
+        if customer_email:
             try:
-                user_rec = admin_auth.get_user_by_email(customer_email)
-                resolved_uid = user_rec.uid
-                logger.info("[dodo-webhook] resolved uid via customer_email")
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        "SELECT uid FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1",
+                        {"email": customer_email},
+                    )
+                    row = res.first()
+                    if row and row[0]:
+                        resolved_uid = row[0]
+                        logger.info("[dodo-webhook] resolved uid via Neon by email")
             except Exception:
-                logger.warning("[dodo-webhook] could not resolve uid by email via Firebase Auth; trying Firestore lookup")
-        # Secondary fallback: lookup Firestore users collection by email
-        if not resolved_uid and customer_email and admin_firestore is not None:
-            try:
-                fs = admin_firestore.client()
-                if _FSFieldFilter is not None:
-                    q = fs.collection("users").where(filter=_FSFieldFilter("email", "==", customer_email)).limit(1)
-                else:
-                    # Fallback to positional-args where() if FieldFilter unavailable
-                    q = fs.collection("users").where("email", "==", customer_email).limit(1)
-                docs = list(q.stream())
-                if docs:
-                    resolved_uid = docs[0].id
-                    logger.info("[dodo-webhook] resolved uid via Firestore email match")
-            except Exception:
-                logger.warning("[dodo-webhook] Firestore email lookup failed")
-        if not resolved_uid:
-            logger.warning("[dodo-webhook] missing uid in metadata/query_params and could not resolve by email; acknowledging without mapping")
-            return {"status": "ok", "mapped": False, "reason": "uid_not_resolved"}
+                resolved_uid = None
 
     # Determine plan baseline (override to free for terminal cancellation states)
     plan = (
@@ -2136,62 +2124,43 @@ async def dodo_webhook(request: Request):
         or (query_params.get("plan") if isinstance(query_params, dict) else None)
         or "pro"
     )
-    plan_update = plan
+    new_plan = plan
     if event_type in ("subscription.cancelled", "subscription.expired", "subscription.failed"):
-        plan_update = "free"
+        new_plan = "free"
 
-    # Update Firestore user doc
+    # Update user plan in Neon if we have a uid and a planned change
     try:
-        if admin_firestore is None:
-            raise RuntimeError("Firestore client unavailable")
-        fs = admin_firestore.client()
-        user_ref = fs.collection("users").document(resolved_uid)
-        # Map key subscription fields
-        next_billing_at = data.get("next_billing_date") or data.get("next_billing_at")
-        cancel_at_period_end = bool(data.get("cancel_at_next_billing_date") or data.get("cancel_at_period_end"))
-        status = (data.get("status") or "").lower() or (
-            "active" if event_type in ("subscription.active", "subscription.renewed", "payment.succeeded") else
-            "cancelled" if event_type == "subscription.cancelled" else
-            "on_hold" if event_type == "subscription.on_hold" else
-            "failed" if event_type == "subscription.failed" else
-            "expired" if event_type == "subscription.expired" else ""
-        )
-        update = {
-            "plan": plan_update,
-            "planUpdatedAt": admin_firestore.SERVER_TIMESTAMP,
-            "planSource": "dodo",
-            "nextBillingAt": next_billing_at,
-            "cancelAtPeriodEnd": cancel_at_period_end,
-            "planStatus": status,
-            "planDetails": {
-                "payment_provider": "dodo",
-                "event_type": event_type,
-                "payment_id": payment_id,
-                "subscription_id": subscription_id,
-                "product_id": product_id,
-                "requested_plan": plan,
-            },
-        }
-        logger.info("[dodo-webhook] updating Firestore: users/%s -> %s", resolved_uid, plan)
-        user_ref.set(update, merge=True)
-        # Enrich idempotency record with mapping info
-        try:
-            fs.collection("webhooks").document(webhook_id).set({
-                "uid": resolved_uid,
-                "payment_id": payment_id,
-                "subscription_id": subscription_id,
-                "product_id": product_id,
-                "updatedUser": True,
-            }, merge=True)
-        except Exception as e:
-            logger.exception("[dodo-webhook] failed to enrich idempotency record")
-        logger.info("[dodo-webhook] upgraded user %s to pro via Dodo payment %s", resolved_uid, payment_id)
-        return {"status": "ok", "mapped": True, "uid": resolved_uid}
-    except Exception as e:
-        logger.exception("[dodo-webhook] failed to update user plan")
-        raise HTTPException(status_code=500, detail="Failed to update user plan")
+        if resolved_uid and new_plan:
+            async with async_session_maker() as session:
+                await session.execute(
+                    "UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid",
+                    {"plan": new_plan, "uid": resolved_uid},
+                )
+                # Record idempotency only after a successful plan update
+                try:
+                    await session.execute(
+                        """
+                        INSERT INTO webhooks_idempotency (webhook_id, event_type, user_uid, customer_email, payment_id, product_id)
+                        VALUES (:wid, :evt, :uid, :email, :pay, :prod)
+                        ON CONFLICT (webhook_id) DO NOTHING
+                        """,
+                        {
+                            "wid": webhook_id,
+                            "evt": event_type,
+                            "uid": resolved_uid,
+                            "email": customer_email,
+                            "pay": payment_id,
+                            "prod": product_id,
+                        },
+                    )
+                except Exception:
+                    logger.exception("[dodo-webhook] idempotency record insert failed")
+                await session.commit()
+            logger.info("[dodo-webhook] updated plan=%s for uid=%s via Neon", new_plan, resolved_uid)
+    except Exception:
+        logger.exception("[dodo-webhook] failed to update user plan in Neon")
 
-    
+    return {"status": "ok", "uid": resolved_uid, "plan": new_plan, "event_type": event_type}
 # CORS preflight for webhook path variants
 @router.options("/api/payments/dodo/webhook")
 @router.options("/api/payments/dodo/webhook/")

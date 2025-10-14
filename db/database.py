@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import text
 from sqlalchemy.engine import URL
+from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -37,18 +38,30 @@ Base = declarative_base()
 
 # Create async engine with connection pooling
 def _normalize_asyncpg_url(dsn: str) -> str:
-    # Ensure SQLAlchemy uses asyncpg driver
+    """Convert a libpq-style DSN to asyncpg driver and strip libpq-only query params.
+
+    asyncpg.connect() does not accept libpq params like sslmode or channel_binding
+    as keyword arguments. SQLAlchemy will forward URL query params to asyncpg, which
+    causes TypeError. To avoid this, drop the query component entirely and use
+    connect_args={"ssl": True} to enforce TLS.
+    """
     if dsn.startswith("postgresql+asyncpg://"):
-        return dsn
+        # Strip query component if present
+        parsed = urlparse(dsn)
+        cleaned = parsed._replace(query="")
+        return urlunparse(cleaned)
     if dsn.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + dsn[len("postgresql://"):]
+        # Swap scheme and strip query
+        parsed = urlparse(dsn)
+        cleaned = parsed._replace(scheme="postgresql+asyncpg", query="")
+        return urlunparse(cleaned)
     return dsn
 
 if DATABASE_URL_ENV:
     raw_url = _normalize_asyncpg_url(DATABASE_URL_ENV)
     DATABASE_URL = raw_url
 else:
-    # Build from discrete env vars
+    # Build from discrete env vars (no libpq query params)
     DATABASE_URL = str(
         URL.create(
             drivername="postgresql+asyncpg",
@@ -57,7 +70,6 @@ else:
             host=DB_HOST,
             port=int(DB_PORT) if str(DB_PORT).isdigit() else None,
             database=DB_NAME,
-            query={"sslmode": DB_SSLMODE},
         )
     )
 
@@ -69,6 +81,7 @@ engine = create_async_engine(
     pool_timeout=30,
     pool_recycle=1800,
     pool_pre_ping=True,
+    connect_args={"ssl": True},
 )
 
 # Create session factory

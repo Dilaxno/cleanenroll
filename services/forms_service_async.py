@@ -10,10 +10,10 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.database import get_session
-from ..models.validators import validate_form, sanitize_for_db
-from ..models.base import FormModel
-from ..db.validation import validate_and_save_form
+from backend.db.database import get_session
+from backend.models.validators import validate_form, sanitize_for_db
+from backend.models.base import FormModel
+from backend.db.validation import validate_and_save_form
 
 class AsyncFormsService:
     """Async service for handling form operations with PostgreSQL and Pydantic validation"""

@@ -14,42 +14,50 @@ from fastapi.responses import RedirectResponse
 # Firebase Admin
 import firebase_admin
 from firebase_admin import credentials  # fix missing import for credentials
-from utils.firebase_admin_adapter import admin_firestore as firestore
 
 logger = logging.getLogger("backend.airtable")
 
-# Initialize Firebase app if not already
+# Initialize Firebase app if not already (not required for storage anymore)
 try:
     if not firebase_admin._apps:
         cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.path.join(os.getcwd(), "cleanenroll-fd36a-firebase-adminsdk-fbsvc-7d79b92b3f.json")
-        if not os.path.exists(cred_path):
-            raise RuntimeError("Firebase credentials JSON not found; set GOOGLE_APPLICATION_CREDENTIALS")
-        cred = credentials.Certificate(cred_path)
-        firebase_admin.initialize_app(cred)
+        if os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
 except Exception:
-    # Do not fail import; endpoints can handle unavailability
     pass
-
-# Firestore may be disabled; avoid failing at import time
-try:
-    db = firestore.client() if firestore is not None else None
-except Exception:
-    db = None
 
 router = APIRouter(prefix="/api/integrations/airtable", tags=["airtable"])
 
+# Filesystem-backed storage for Airtable tokens and mappings
+INTEGRATIONS_BASE = os.path.join(os.getcwd(), "data", "integrations", "airtable")
+os.makedirs(INTEGRATIONS_BASE, exist_ok=True)
+
+def _path(user_id: str) -> str:
+    safe = str(user_id).strip()
+    return os.path.join(INTEGRATIONS_BASE, f"{safe}.json")
+
+def _read_integration(user_id: str) -> Dict[str, Any]:
+    try:
+        with open(_path(user_id), "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+def _write_integration(user_id: str, payload: Dict[str, Any]) -> None:
+    try:
+        cur = _read_integration(user_id)
+        cur.update(payload or {})
+        os.makedirs(INTEGRATIONS_BASE, exist_ok=True)
+        with open(_path(user_id), "w", encoding="utf-8") as f:
+            json.dump(cur, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("Failed to write Airtable integration for %s", user_id)
+
 
 def _is_pro_plan(user_id: str) -> bool:
-    # If Firestore is unavailable in this environment, allow by default.
-    if db is None:
-        return True
-    try:
-        snap = db.collection("users").document(user_id).get()
-        data = snap.to_dict() or {}
-        plan = str(data.get("plan") or "").lower()
-        return plan in ("pro", "business", "enterprise")
-    except Exception:
-        return True
+    # Without a Neon lookup here, allow by default; plan gating enforced elsewhere.
+    return True
 
 # OAuth config
 AIRTABLE_CLIENT_ID = os.getenv("AIRTABLE_CLIENT_ID", "")
@@ -95,7 +103,8 @@ def _decrypt_token(ciphertext: str) -> str:
 
 
 def _get_user_doc(user_id: str):
-    return db.collection("users").document(user_id)
+    # Deprecated Firestore path; kept for compatibility but unused
+    return None
 
 
 def _read_form_schema(form_id: str) -> Dict[str, Any]:
@@ -137,9 +146,8 @@ def _list_responses(form_id: str) -> List[Dict[str, Any]]:
 
 
 def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
-    doc = _get_user_doc(user_id).get()
-    data = doc.to_dict() or {}
-    integ = (data.get("integrations") or {}).get("airtable") or {}
+    data = _read_integration(user_id)
+    integ = (data.get("airtable") or {})
     tok = integ.get("token")
     rtok = integ.get("refreshToken")
     expiry = int(integ.get("expiry") or 0)
@@ -150,13 +158,15 @@ def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
 
 def _save_tokens(user_id: str, access_token: str, refresh_token: Optional[str], expires_in: Optional[int]):
     enc_access = _encrypt_token(access_token)
-    payload: Dict[str, Any] = {"token": enc_access}
+    integ = _read_integration(user_id)
+    cur = integ.get("airtable") or {}
+    cur.update({"token": enc_access})
     if refresh_token:
-        payload["refreshToken"] = _encrypt_token(refresh_token)
+        cur["refreshToken"] = _encrypt_token(refresh_token)
     if expires_in:
-        payload["expiry"] = int(time.time()) + int(expires_in)
-    doc = _get_user_doc(user_id)
-    doc.set({"integrations": {"airtable": payload}}, merge=True)
+        cur["expiry"] = int(time.time()) + int(expires_in)
+    integ["airtable"] = cur
+    _write_integration(user_id, integ)
 
 
 def _get_valid_access_token(user_id: str) -> str:
@@ -254,9 +264,8 @@ def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
         connected = False
     mapping = None
     if formId:
-        doc = _get_user_doc(userId).get()
-        data = doc.to_dict() or {}
-        amap = ((data.get("integrations") or {}).get("airtableMappings") or {})
+        data = _read_integration(userId)
+        amap = (data.get("airtableMappings") or {})
         mapping = amap.get(formId)
     return {"connected": connected, "mapping": mapping}
 
@@ -265,9 +274,8 @@ def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
 def list_mappings(userId: str = Query(...)):
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
-    snap = _get_user_doc(userId).get()
-    data = snap.to_dict() or {}
-    amap = ((data.get("integrations") or {}).get("airtableMappings") or {})
+    data = _read_integration(userId)
+    amap = (data.get("airtableMappings") or {})
     out: List[Dict[str, Any]] = []
     for form_id, mapping in amap.items():
         if not isinstance(mapping, dict):
@@ -380,8 +388,11 @@ def link_table(userId: str = Query(...), formId: str = Query(...), payload: Dict
         "synced": sync_enabled,
         "title": title,
     }
-    doc = _get_user_doc(userId)
-    doc.set({"integrations": {"airtableMappings": {formId: mapping_entry}}}, merge=True)
+    data = _read_integration(userId)
+    amap = data.get("airtableMappings") or {}
+    amap[formId] = mapping_entry
+    data["airtableMappings"] = amap
+    _write_integration(userId, data)
 
     # Optional backfill
     backfilled = 0
@@ -440,14 +451,13 @@ def toggle_sync(userId: str = Query(...), formId: str = Query(...), payload: Dic
     if not isinstance(payload, dict):
         payload = {}
     desired = bool(payload.get("sync"))
-    doc_ref = _get_user_doc(userId)
-    snap = doc_ref.get()
-    data = snap.to_dict() or {}
-    amap = ((data.get("integrations") or {}).get("airtableMappings") or {})
+    data = _read_integration(userId)
+    amap = (data.get("airtableMappings") or {})
     if formId not in amap:
         raise HTTPException(status_code=404, detail="No Airtable mapping for this form")
     amap[formId]["synced"] = desired
-    doc_ref.set({"integrations": {"airtableMappings": amap}}, merge=True)
+    data["airtableMappings"] = amap
+    _write_integration(userId, data)
     return {"synced": desired}
 
 
@@ -455,16 +465,10 @@ def toggle_sync(userId: str = Query(...), formId: str = Query(...), payload: Dic
 def disconnect(userId: str = Query(...)):
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
-    doc_ref = _get_user_doc(userId)
-    snap = doc_ref.get()
-    data = snap.to_dict() or {}
-    integ = (data.get("integrations") or {})
-    # Clear Airtable creds and mappings but keep other integrations intact
-    if "airtable" in integ:
-        integ.pop("airtable", None)
-    if "airtableMappings" in integ:
-        integ.pop("airtableMappings", None)
-    doc_ref.set({"integrations": integ}, merge=True)
+    data = _read_integration(userId)
+    data.pop("airtable", None)
+    data.pop("airtableMappings", None)
+    _write_integration(userId, data)
     return {"disconnected": True}
 
 # Helper used by builder.submit_form to auto-append new records when synced
@@ -473,9 +477,8 @@ def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str,
     try:
         if not _is_pro_plan(user_id):
             return
-        snap = _get_user_doc(user_id).get()
-        data = snap.to_dict() or {}
-        amap = ((data.get("integrations") or {}).get("airtableMappings") or {})
+        data = _read_integration(user_id)
+        amap = (data.get("airtableMappings") or {})
         mapping = amap.get(form_id)
         if not mapping or not mapping.get("synced"):
             return

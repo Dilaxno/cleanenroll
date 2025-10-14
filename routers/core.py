@@ -1,4 +1,57 @@
-from fastapi import APIRouter, HTTPException, Request, Body
+# -----------------------------
+# User data (Neon)
+# -----------------------------
+
+@router.get("/api/user/plan")
+@limiter.limit("60/minute")
+async def get_user_plan(userId: str = Query(..., description="Firebase Auth UID")):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    plan = "free"
+    async with async_session_maker() as session:
+        try:
+            from sqlalchemy import text as _text  # type: ignore
+            res = await session.execute(_text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"), {"uid": userId})
+            row = res.mappings().first()
+            if row and row.get("plan"):
+                plan = str(row["plan"]).lower()
+        except Exception:
+            # keep default
+            pass
+    return {"userId": userId, "plan": plan}
+
+
+@router.get("/api/user/info")
+@limiter.limit("60/minute")
+async def get_user_info(userId: str = Query(..., description="Firebase Auth UID")):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    async with async_session_maker() as session:
+        from sqlalchemy import text as _text  # type: ignore
+        try:
+            res = await session.execute(_text(
+                """
+                SELECT uid, email, display_name, photo_url, plan,
+                       forms_count, signup_ip, signup_country,
+                       signup_geo_lat, signup_geo_lon, signup_user_agent,
+                       signup_at, created_at, updated_at
+                FROM users WHERE uid = :uid LIMIT 1
+                """
+            ), {"uid": userId})
+            row = res.mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+            data = {k: row[k] for k in row.keys()}
+            return {"user": data}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+from fastapi import APIRouter, HTTPException, Request, Query, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -74,6 +127,11 @@ except Exception:
     from utils.limiter import forwarded_for_ip as _ip_from_req  # type: ignore
     from utils.limiter import can_signup_ip as _can_signup_ip, record_signup_ip as _record_signup_ip  # type: ignore
 
+try:
+    from db.database import async_session_maker
+except Exception:
+    async_session_maker = None  # type: ignore
+    from ..db.database import async_session_maker  # type: ignore
 
 def _mx_lookup(domain: str) -> list[str]:
     """Return list of MX hosts for a domain using dnspython; empty if none or on error."""
@@ -101,10 +159,6 @@ try:
 except Exception:
     # When running flat from repo root
     from utils.email import render_email, send_email_html  # type: ignore
-try:
-    from db.database import async_session_maker  # type: ignore
-except Exception:
-    from ..db.database import async_session_maker  # type: ignore
 try:
     import firebase_admin
     from utils.firebase_admin_adapter import admin_auth, admin_firestore
@@ -826,7 +880,7 @@ async def verify_confirm(token: str):
         if not email:
             return {"status": "invalid"}
 
-        # Try to mark verified in Firebase Auth and Firestore
+        # Try to mark verified in Firebase Auth
         try:
             _ensure_firebase_initialized()
         except HTTPException:
@@ -838,22 +892,8 @@ async def verify_confirm(token: str):
                     user = admin_auth.get_user_by_email(email)
                     if not getattr(user, "email_verified", False):
                         admin_auth.update_user(user.uid, email_verified=True)
-                        logger.info("Email verified via token for %s", _mask_email(email))
                 except Exception:
-                    logger.warning("Failed to update Firebase Auth emailVerified for %s", _mask_email(email))
-        except Exception:
-            pass
-        try:
-            if admin_firestore is not None:
-                fs = admin_firestore.client()
-                # Update users collection doc if present
-                q = fs.collection("users").where("email", "==", email).limit(1)
-                docs = list(q.stream())
-                if docs:
-                    fs.collection("users").document(docs[0].id).set({
-                        "emailVerified": True,
-                        "emailVerifiedAt": admin_firestore.SERVER_TIMESTAMP,
-                    }, merge=True)
+                    pass
         except Exception:
             pass
         return {"status": "ok"}

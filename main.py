@@ -72,6 +72,7 @@ from routers.mailchimp import router as mailchimp_router  # type: ignore
 from routers.google_sheets import router as google_sheets_router  # type: ignore
 from routers.slack import router as slack_router  # type: ignore
 from routers.admin import router as admin_router  # type: ignore
+from routers.health import router as health_router  # type: ignore
 from routers.translate import router as translate_router  # type: ignore
 from routers.airtable import router as airtable_router  # type: ignore
 from routers.url_validation import router as url_validation_router  # type: ignore
@@ -237,6 +238,7 @@ app.include_router(mailchimp_router)
 app.include_router(google_sheets_router)
 app.include_router(slack_router)
 app.include_router(admin_router)
+app.include_router(health_router)
 app.include_router(translate_router)
 app.include_router(airtable_router)
 app.include_router(url_validation_router)

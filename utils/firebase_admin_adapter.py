@@ -1,35 +1,53 @@
 """
 Firebase Admin adapter module that provides a dummy Firestore implementation.
 This allows for a smooth transition from Firestore to PostgreSQL while keeping Firebase Authentication.
+
+When FIRESTORE_DISABLED is set (1/true/yes/on), this module will NOT initialize
+the Firebase Admin SDK and will only expose dummy Firestore/auth objects to ensure
+no external network calls are made to Google APIs.
 """
 import logging
 from typing import Any, Dict, List, Optional, Callable, Union
 import os
-import firebase_admin
-from firebase_admin import auth, credentials
+try:
+    import firebase_admin  # type: ignore
+    from firebase_admin import auth, credentials  # type: ignore
+except Exception:  # pragma: no cover
+    firebase_admin = None  # type: ignore
+    auth = None  # type: ignore
+    credentials = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
-# Initialize Firebase Admin if not already initialized
+# Initialize Firebase Admin if not disabled
 # This is a centralized initialization to prevent multiple initializations
 def initialize_firebase_admin():
+    # Honor FIRESTORE_DISABLED: skip any initialization / network calls
+    if str(os.environ.get('FIRESTORE_DISABLED', '0')).strip().lower() in {"1", "true", "yes", "on"}:
+        return None
+    if firebase_admin is None or credentials is None:
+        return None
     try:
         return firebase_admin.get_app()
-    except ValueError:
+    except Exception:
         # Check for credentials file
-        cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-        if cred_path and os.path.exists(cred_path):
-            cred = credentials.Certificate(cred_path)
-            return firebase_admin.initialize_app(cred)
-        else:
-            # Use application default credentials
-            return firebase_admin.initialize_app()
+        try:
+            cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+            if cred_path and os.path.exists(cred_path):
+                cred = credentials.Certificate(cred_path)
+                return firebase_admin.initialize_app(cred)
+            else:
+                # Use application default credentials
+                return firebase_admin.initialize_app()
+        except Exception:
+            # If initialization fails, return None and rely on dummy objects below
+            return None
 
-# Initialize Firebase Admin
+# Initialize Firebase Admin (may be None when disabled)
 default_app = initialize_firebase_admin()
 
-# Export Firebase Admin auth for authentication
-admin_auth = auth
+# Export Firebase Admin auth for authentication (None when disabled)
+admin_auth = auth if default_app is not None and auth is not None else None
 
 # Forward declarations for circular references
 class DummyAdminCollection:
@@ -242,8 +260,6 @@ class DummyAdminCollection:
         logger.warning(f"Attempted to add document to removed Firestore collection: {self.name}")
         return DummyAdminDocumentReference(f"{self.name}/{document_id or 'dummy-id'}")
 
-# Create the singleton instance
-admin_firestore = DummyAdminFirestore()
-
-# Export as 'firestore' for compatibility with existing code
-firestore = admin_firestore
+# Do not expose any Firestore client; remove Firestore entirely from runtime
+admin_firestore = None
+firestore = None

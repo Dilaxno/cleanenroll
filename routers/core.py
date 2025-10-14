@@ -213,7 +213,10 @@ async def _ensure_temp_domains_loaded(force: bool = False):
             return
         if admin_firestore is None:
             return
-        fs = admin_firestore.client()
+        # Skip Firestore writes when removed/disabled
+    if admin_firestore is None:
+        return {"status": "ok"}
+    fs = admin_firestore.client()
         stream = fs.collection("temporary-domains").stream()
         s: set[str] = set()
         for doc in stream:
@@ -450,8 +453,9 @@ async def signup_enrich(request: Request):
         _ensure_firebase_initialized()
     except HTTPException as e:
         raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
-    if not (_FB_AVAILABLE and admin_auth is not None and admin_firestore is not None):
-        raise HTTPException(status_code=500, detail="Firebase Admin unavailable")
+    # Only require Firebase Auth; Firestore is optional/removed
+    if not (_FB_AVAILABLE and admin_auth is not None):
+        raise HTTPException(status_code=500, detail="Firebase Auth unavailable")
 
     # Verify token -> uid
     try:
@@ -873,8 +877,8 @@ async def sync_disposable_domains(strict: bool = True):
         _ensure_firebase_initialized()
     except HTTPException as e:
         raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
-    if admin_firestore is None:
-        raise HTTPException(status_code=500, detail="Firestore client unavailable")
+    # Firestore is disabled/removed; skip this operation
+    raise HTTPException(status_code=503, detail="Firestore is disabled on this environment")
 
     # Fetch upstream lists
     try:
@@ -2089,8 +2093,9 @@ async def dodo_webhook(request: Request):
     # Initialize Firebase Admin and Firestore; implement idempotency using webhook-id
     try:
         _ensure_firebase_initialized()
+        # Skip if Firestore removed/disabled
         if admin_firestore is None:
-            raise RuntimeError("Firestore client unavailable")
+            return JSONResponse({"status": "ok", "note": "Firestore disabled; skipping user doc update"})
         fs = admin_firestore.client()
         # Idempotency: if we've already seen this webhook-id and successfully updated user, acknowledge and return
         try:

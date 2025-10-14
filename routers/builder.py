@@ -2195,6 +2195,10 @@ def _store_email_integration(uid: str, patch: Dict[str, Any]) -> None:
         except Exception:
             # Fallback to Firestore
             pass
+    # Honor FIRESTORE_DISABLED: do not use Firestore on this environment
+    if str(os.getenv("FIRESTORE_DISABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+        # Silently no-op when disabled
+        return
     # Firestore fallback
     if not _FS_AVAILABLE:
         raise HTTPException(status_code=500, detail="Firestore not available on server")
@@ -2214,6 +2218,9 @@ def _get_email_integration(uid: str) -> Dict[str, Any]:
                 return rows[0] or {}
         except Exception:
             pass
+    # Honor FIRESTORE_DISABLED: do not use Firestore on this environment
+    if str(os.getenv("FIRESTORE_DISABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+        return {}
     # Firestore
     if not _FS_AVAILABLE:
         return {}

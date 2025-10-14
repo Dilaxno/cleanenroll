@@ -3334,10 +3334,8 @@ def _write_cloudflare_credentials_file(token: str) -> str:
 
 @router.post("/dns/cloudflare/connect")
 async def cloudflare_connect(request: Request, payload: Dict = None):
-    """
-    Store Cloudflare API token for the current authenticated user.
-    Body: { apiToken: string }
-    """
+    # Store Cloudflare API token for the current authenticated user.
+    # Body: { apiToken: string }
     uid = _verify_firebase_uid(request)
     if not isinstance(payload, dict) or not str(payload.get("apiToken") or "").strip():
         raise HTTPException(status_code=400, detail="Missing apiToken")
@@ -3348,9 +3346,7 @@ async def cloudflare_connect(request: Request, payload: Dict = None):
 
 @router.get("/dns/cloudflare/zones")
 async def cloudflare_list_zones(request: Request):
-    """
-    List Cloudflare zones for the connected account.
-    """
+    # List Cloudflare zones for the connected account.
     uid = _verify_firebase_uid(request)
     token = _get_cloudflare_token(uid)
     url = "https://api.cloudflare.com/client/v4/zones"

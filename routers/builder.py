@@ -3374,10 +3374,8 @@ async def cloudflare_list_zones(request: Request):
 
 @router.post("/dns/cloudflare/zones/{zone_id}/records")
 async def cloudflare_create_record(request: Request, zone_id: str, payload: Dict = None):
-    """
-    Create a DNS record in a Cloudflare zone.
-    Body: { type: "CNAME"|"TXT"|..., name: string, content: string, ttl?: number, proxied?: bool }
-    """
+    # Create a DNS record in a Cloudflare zone.
+    # Body: { type: "CNAME"|"TXT"|..., name: string, content: string, ttl?: number, proxied?: bool }
     uid = _verify_firebase_uid(request)
     token = _get_cloudflare_token(uid)
     body = payload or {}
@@ -3405,10 +3403,8 @@ async def cloudflare_create_record(request: Request, zone_id: str, payload: Dict
 
 @router.post("/dns/cloudflare/connect-domain")
 async def cloudflare_connect_domain(request: Request, payload: Dict = None):
-    """
-    Automatically connect a custom domain for a form using Cloudflare.
-    Body: { formId: string, zoneId: string, subdomain: string }
-    """
+    # Automatically connect a custom domain for a form using Cloudflare.
+    # Body: { formId: string, zoneId: string, subdomain: string }
     # Steps:
     # - Create CNAME record: subdomain.zone -> CUSTOM_DOMAIN_TARGET
     # - Verify domain in builder store

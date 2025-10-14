@@ -3406,13 +3406,15 @@ async def cloudflare_create_record(request: Request, zone_id: str, payload: Dict
 @router.post("/dns/cloudflare/connect-domain")
 async def cloudflare_connect_domain(request: Request, payload: Dict = None):
     """
-    Automatically connect a custom domain for a form using Cloudflare:
-      Body: { formId: string, zoneId: string, subdomain: string }
-      - Creates CNAME record: subdomain.zone -> CUSTOM_DOMAIN_TARGET
-      - Verifies domain in builder store
-      - Writes Cloudflare credentials ini for DNS-01
-      - Issues certificate (DNS-01) or falls back to on-demand TLS
+    Automatically connect a custom domain for a form using Cloudflare.
+    Body: { formId: string, zoneId: string, subdomain: string }
     """
+    # Steps:
+    # - Create CNAME record: subdomain.zone -> CUSTOM_DOMAIN_TARGET
+    # - Verify domain in builder store
+    # - Write Cloudflare credentials ini for DNS DNS-01 challenge
+    # - Issue certificate via DNS challenge or fall back to on-demand TLS
+
     uid = _verify_firebase_uid(request)
     body = payload or {}
     form_id = (body.get("formId") or "").strip()

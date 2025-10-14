@@ -5,11 +5,11 @@ from typing import Dict, Any, Type, TypeVar, Optional, Union, Callable, Awaitabl
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.validators import (
+from models.validators import (
     validate_user, validate_form, validate_submission, validate_analytics,
     sanitize_for_db
 )
-from ..models.base import UserModel, FormModel, SubmissionModel, AnalyticsModel
+from models.base import UserModel, FormModel, SubmissionModel, AnalyticsModel
 
 async def validate_and_execute(
     data: Dict[str, Any],

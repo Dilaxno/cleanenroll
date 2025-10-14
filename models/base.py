@@ -109,7 +109,7 @@ class SubmissionModel(BaseDBModel):
     user_agent: Optional[str] = None
     submitted_at: Optional[datetime] = None
     
-    @validator('data')
+    @field_validator('data')
     def sanitize_submission_data(cls, v):
         """Sanitize all string values in submission data"""
         if not isinstance(v, dict):

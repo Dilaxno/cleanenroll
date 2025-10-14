@@ -470,18 +470,4 @@ async def migrate_firestore_submissions(
     raise HTTPException(status_code=404, detail="Endpoint removed")
 
 
-# Firestore Explorer Admin APIs removed
-                try:
-                    r = _resolve_doc_ref(fs, p)
-                    refs.append(r)
-                    batch.delete(r)
-                except Exception:
-                    continue
-            if refs:
-                batch.commit()
-                total += len(refs)
-        return {"deleted": total}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Firestore Explorer Admin APIs removed (intentionally not implemented)

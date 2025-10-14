@@ -1526,49 +1526,21 @@ router = APIRouter(prefix="/api/integrations/airtable", tags=["airtable"])
 @router.get("/user/plan")
 @limiter.limit("120/minute")
 async def get_user_plan(request: Request, userId: str = Query(...)):
+    """Return the plan for a given user.
+    Uses Supabase when configured, otherwise falls back to Firestore.
+    Response: { "plan": "free" | "pro" | "business" | "enterprise" }
     """
-{{ ... }}
-        form_data = _read_json(path)
-        owner_id = str(form_data.get("userId") or "").strip()
-        if not owner_id:
-            raise HTTPException(status_code=400, detail="Missing form owner")
-        form_title = str(form_data.get("title") or "Form").strip() or "Form"
-        # Initialize Neon
-        async with async_session_maker() as session:
-            # Write to submissions table
-            session.execute("INSERT INTO submissions (form_id, form_title, response_id, submitted_at) VALUES (:form_id, :form_title, :response_id, :submitted_at)",
-                            {"form_id": form_id, "form_title": form_title, "response_id": response_id, "submitted_at": submitted_at})
-            # Write to notifications table
-            session.execute("INSERT INTO notifications (form_id, form_title, response_id, submitted_at) VALUES (:form_id, :form_title, :response_id, :submitted_at)",
-                            {"form_id": form_id, "form_title": form_title, "response_id": response_id, "submitted_at": submitted_at})
-{{ ... }}
-                try:
-                    if cred_path and os.path.exists(cred_path):
-                        cred = _fb_credentials.Certificate(cred_path)
-                    else:
-                        cred = _fb_credentials.ApplicationDefault()  # type: ignore
-                    firebase_admin.initialize_app(cred)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        fs = _fs.client()
-        items_ref = fs.collection("notifications").document(owner_id).collection("items")
-        doc = {
-            "formId": form_id,
-            "formTitle": form_title,
-            "preview": (payload or {}).get("preview") or "New submission",
-            "responseId": (payload or {}).get("responseId") or None,
-            "submittedAt": _fs.SERVER_TIMESTAMP,
-            "read": False,
-        }
-        # Use auto id for minimal contention
-        items_ref.add(doc)
-        return {"success": True}
+    try:
+        uid = str(userId or "").strip()
+        if not uid:
+            raise HTTPException(status_code=400, detail="Missing userId")
+        is_pro = _is_pro_plan(uid)
+        # We only know if the user is on a paid tier or not; return a simple mapping
+        return {"plan": "pro" if is_pro else "free"}
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("notify_client_submission failed form_id=%s", form_id)
+        logger.exception("get_user_plan failed userId=%s", userId)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/forms/{form_id}/submit")

@@ -3,7 +3,7 @@ Base Pydantic models for data validation and sanitization
 """
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Union
-from pydantic import BaseModel, Field, EmailStr, validator, AnyHttpUrl
+from pydantic import BaseModel, Field, EmailStr, field_validator, AnyHttpUrl
 import re
 import bleach
 
@@ -11,10 +11,10 @@ import bleach
 class BaseDBModel(BaseModel):
     """Base model with common validation and sanitization methods"""
     
-    @validator('*', pre=True)
-    def sanitize_strings(cls, v, field):
+    @field_validator('*', mode='before')
+    def sanitize_strings(cls, v, info):
         """Sanitize string inputs to prevent XSS attacks"""
-        if isinstance(v, str) and field.type_ == str:
+        if isinstance(v, str) and info.field_name:
             # Use bleach to sanitize HTML content
             return bleach.clean(v.strip(), strip=True)
         return v
@@ -37,14 +37,14 @@ class UserModel(BaseDBModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
-    @validator('uid')
+    @field_validator('uid')
     def validate_uid(cls, v):
         """Validate Firebase UID format"""
         if not re.match(r'^[a-zA-Z0-9]{28}$', v):
             raise ValueError('Invalid Firebase UID format')
         return v
     
-    @validator('display_name')
+    @field_validator('display_name')
     def validate_display_name(cls, v):
         """Validate and sanitize display name"""
         if v is None:
@@ -76,7 +76,7 @@ class FormModel(BaseDBModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
-    @validator('name')
+    @field_validator('name')
     def validate_form_name(cls, v):
         """Validate form name (used in URLs)"""
         # Ensure name is URL-friendly
@@ -84,7 +84,7 @@ class FormModel(BaseDBModel):
             raise ValueError('Form name must contain only lowercase letters, numbers, and hyphens')
         return v
     
-    @validator('allowed_domains', each_item=True)
+    @field_validator('allowed_domains', each_item=True)
     def validate_domains(cls, v):
         """Validate domain format"""
         if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$', v):

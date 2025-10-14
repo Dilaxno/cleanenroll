@@ -203,35 +203,10 @@ def _istempmail_disposable_status(email: str, domain: str) -> bool | None:
 
 async def _ensure_temp_domains_loaded(force: bool = False):
     """
-    Load 'temporary-domains' collection into an in-memory set for fast lookups.
-    The document ID or 'domain' field is used as the domain string.
+    Firestore has been removed; this loader is now a no-op.
+    Left in place to avoid breaking call sites.
     """
-    global TEMP_DOMAINS_CACHE, TEMP_DOMAINS_LOADED_AT
-    try:
-        import time as _time
-        if not force and TEMP_DOMAINS_LOADED_AT and (_time.time() - TEMP_DOMAINS_LOADED_AT) < TEMP_DOMAINS_TTL_SECONDS:
-            return
-        if admin_firestore is None:
-            return
-        # Skip Firestore writes when removed/disabled
-    if admin_firestore is None:
-        return {"status": "ok"}
-    fs = admin_firestore.client()
-        stream = fs.collection("temporary-domains").stream()
-        s: set[str] = set()
-        for doc in stream:
-            try:
-                data = doc.to_dict() or {}
-                dom = (str(data.get("domain") or doc.id or "")).strip().lower()
-                if dom:
-                    s.add(dom)
-            except Exception:
-                continue
-        TEMP_DOMAINS_CACHE = s
-        TEMP_DOMAINS_LOADED_AT = _time.time()
-    except Exception:
-        # Keep cache as-is on failure
-        pass
+    return
 
 router = APIRouter()
 

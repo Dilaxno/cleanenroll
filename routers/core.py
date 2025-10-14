@@ -222,7 +222,7 @@ router = APIRouter()
 
 @router.get("/api/user/plan")
 @limiter.limit("60/minute")
-async def get_user_plan(userId: str = Query(..., description="Firebase Auth UID")):
+async def get_user_plan(request: Request, userId: str = Query(..., description="Firebase Auth UID")):
     if not userId:
         raise HTTPException(status_code=400, detail="Missing userId")
     if async_session_maker is None:
@@ -242,7 +242,7 @@ async def get_user_plan(userId: str = Query(..., description="Firebase Auth UID"
 
 @router.get("/api/user/info")
 @limiter.limit("60/minute")
-async def get_user_info(userId: str = Query(..., description="Firebase Auth UID")):
+async def get_user_info(request: Request, userId: str = Query(..., description="Firebase Auth UID")):
     if not userId:
         raise HTTPException(status_code=400, detail="Missing userId")
     if async_session_maker is None:
@@ -272,7 +272,7 @@ async def get_user_info(userId: str = Query(..., description="Firebase Auth UID"
 
 @router.get("/api/user/preferences")
 @limiter.limit("60/minute")
-async def get_user_preferences(userId: str = Query(..., description="Firebase Auth UID")):
+async def get_user_preferences(request: Request, userId: str = Query(..., description="Firebase Auth UID")):
     if not userId:
         raise HTTPException(status_code=400, detail="Missing userId")
     if async_session_maker is None:
@@ -297,7 +297,7 @@ class UpdatePreferencesRequest(BaseModel):
 
 @router.post("/api/user/preferences")
 @limiter.limit("30/minute")
-async def update_user_preferences(userId: str = Query(..., description="Firebase Auth UID"), req: UpdatePreferencesRequest = None):
+async def update_user_preferences(request: Request, userId: str = Query(..., description="Firebase Auth UID"), req: UpdatePreferencesRequest = None):
     if not userId:
         raise HTTPException(status_code=400, detail="Missing userId")
     if not isinstance(req, UpdatePreferencesRequest) or not isinstance(req.preferences, dict):
@@ -322,7 +322,7 @@ class MarketingOptRequest(BaseModel):
 
 @router.post("/api/user/marketing")
 @limiter.limit("30/minute")
-async def set_marketing_opt_in(userId: str = Query(..., description="Firebase Auth UID"), req: MarketingOptRequest = None):
+async def set_marketing_opt_in(request: Request, userId: str = Query(..., description="Firebase Auth UID"), req: MarketingOptRequest = None):
     if not userId:
         raise HTTPException(status_code=400, detail="Missing userId")
     if not isinstance(req, MarketingOptRequest):

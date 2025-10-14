@@ -63,21 +63,22 @@ try:
 except Exception as e:
     logging.error(f"Failed to connect to PostgreSQL database: {e}")
     
+# Import routers using absolute imports to avoid relative import issues
 try:
-    # When running as a package: e.g. `uvicorn backend.main:app` or `python -m backend.main`
-    from .routers.core import router as core_router  # type: ignore
-    from .routers.builder import router as builder_router  # type: ignore
-    from .routers.payments import router as payments_router  # type: ignore
-    from .routers.mailchimp import router as mailchimp_router  # type: ignore
-    from .routers.google_sheets import router as google_sheets_router  # type: ignore
-    from .routers.slack import router as slack_router  # type: ignore
-    from .routers.admin import router as admin_router  # type: ignore
-    from .routers.translate import router as translate_router  # type: ignore
-    from .routers.airtable import router as airtable_router  # type: ignore
-    from .routers.url_validation import router as url_validation_router  # type: ignore
-    from .routers.uploads import router as uploads_router  # type: ignore
-    from .routers.forms_validated import router as forms_validated_router  # type: ignore
-except Exception:
+    # First try importing as if we're in the backend package
+    from backend.routers.core import router as core_router  # type: ignore
+    from backend.routers.builder import router as builder_router  # type: ignore
+    from backend.routers.payments import router as payments_router  # type: ignore
+    from backend.routers.mailchimp import router as mailchimp_router  # type: ignore
+    from backend.routers.google_sheets import router as google_sheets_router  # type: ignore
+    from backend.routers.slack import router as slack_router  # type: ignore
+    from backend.routers.admin import router as admin_router  # type: ignore
+    from backend.routers.translate import router as translate_router  # type: ignore
+    from backend.routers.airtable import router as airtable_router  # type: ignore
+    from backend.routers.url_validation import router as url_validation_router  # type: ignore
+    from backend.routers.uploads import router as uploads_router  # type: ignore
+    from backend.routers.forms_validated import router as forms_validated_router  # type: ignore
+except ImportError:
     # When running from a flat repo root: e.g. `uvicorn main:app`
     from routers.core import router as core_router  # type: ignore
     from routers.builder import router as builder_router  # type: ignore

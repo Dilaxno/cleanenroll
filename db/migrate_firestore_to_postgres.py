@@ -6,6 +6,7 @@ Migration script to transfer data from Firestore to PostgreSQL
 import os
 import json
 import time
+from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
 import psycopg2
@@ -86,10 +87,15 @@ def migrate_users():
             'updated_at': user_data.get('updatedAt', None)
         }
         
-        # Convert Firestore timestamps to datetime objects
-        for field in ['signup_at', 'created_at', 'updated_at']:
-            if isinstance(fields[field], firestore.SERVER_TIMESTAMP):
-                fields[field] = fields[field].datetime
+        # Handle timestamps properly
+        for field in ['created_at', 'updated_at']:
+            if field in fields:
+                if fields[field] and hasattr(fields[field], 'timestamp'):
+                    # Convert Firestore timestamp to Python datetime
+                    fields[field] = fields[field].timestamp()
+                elif isinstance(fields[field], dict) and '_methodName' in fields[field]:
+                    # Handle SERVER_TIMESTAMP placeholder
+                    fields[field] = None
         
         # Insert user into PostgreSQL
         try:
@@ -149,13 +155,32 @@ def migrate_forms():
         
         # Convert Firestore timestamps to datetime objects
         for field in ['created_at', 'updated_at']:
-            if isinstance(fields[field], firestore.SERVER_TIMESTAMP):
-                fields[field] = fields[field].datetime
+            if field in fields and fields[field]:
+                if hasattr(fields[field], 'timestamp'):
+                    # Convert Firestore timestamp to Python datetime
+                    fields[field] = datetime.fromtimestamp(fields[field].timestamp())
+                elif isinstance(fields[field], dict) and '_methodName' in fields[field]:
+                    # Handle SERVER_TIMESTAMP placeholder
+                    fields[field] = None
+                elif isinstance(fields[field], (int, float)):
+                    # Handle numeric timestamps (milliseconds since epoch)
+                    fields[field] = datetime.fromtimestamp(fields[field] / 1000.0)
         
-        # Skip forms without user_id
+        # Skip forms without user_id or with user_id not in the users table
         if not fields['user_id']:
             print(f"Skipping form {form_id} without user_id")
             continue
+            
+        # Check if user exists in the database
+        cursor.execute("SELECT uid FROM users WHERE uid = %s", (fields['user_id'],))
+        if cursor.rowcount == 0:
+            print(f"Error migrating form {form_id}: user_id {fields['user_id']} not found in users table")
+            continue
+        
+        # Convert any dictionary fields to JSON strings
+        for key, value in fields.items():
+            if isinstance(value, dict):
+                fields[key] = json.dumps(value)
         
         # Insert form into PostgreSQL
         try:
@@ -167,27 +192,53 @@ def migrate_forms():
             query += ", ".join([f"{col} = EXCLUDED.{col}" for col in fields.keys() if col != 'id'])
             
             cursor.execute(query, values)
+            conn.commit()  # Commit after each successful form insertion
             migrated += 1
             
-            # Migrate form submissions
-            migrate_form_submissions(form_id, fields['user_id'])
+            # Migrate form submissions in separate transactions
+            try:
+                migrate_form_submissions(form_id, fields['user_id'])
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"Error migrating submissions for form {form_id}: {e}")
             
-            # Migrate form analytics
-            migrate_form_analytics(form_id)
+            # Migrate form analytics in separate transactions
+            try:
+                migrate_form_analytics(form_id)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"Error migrating analytics for form {form_id}: {e}")
             
-            # Migrate form versions
-            migrate_form_versions(form_id)
+            # Migrate form versions in separate transactions
+            try:
+                migrate_form_versions(form_id)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"Error migrating versions for form {form_id}: {e}")
             
-            # Migrate form abandons
-            migrate_form_abandons(form_id)
+            # Migrate form abandons in separate transactions
+            try:
+                migrate_form_abandons(form_id)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"Error migrating abandons for form {form_id}: {e}")
             
-            # Migrate form sessions
-            migrate_form_sessions(form_id)
+            # Migrate form sessions in separate transactions
+            try:
+                migrate_form_sessions(form_id)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"Error migrating sessions for form {form_id}: {e}")
             
         except Exception as e:
+            conn.rollback()
             print(f"Error migrating form {form_id}: {e}")
     
-    conn.commit()
     print(f"Migrated {migrated} forms")
     return migrated
 
@@ -218,8 +269,8 @@ def migrate_form_submissions(form_id, form_owner_id):
         }
         
         # Convert Firestore timestamps to datetime objects
-        if isinstance(fields['submitted_at'], firestore.SERVER_TIMESTAMP):
-            fields['submitted_at'] = fields['submitted_at'].datetime
+        if fields['submitted_at'] and hasattr(fields['submitted_at'], 'timestamp'):
+            fields['submitted_at'] = fields['submitted_at']
         
         # Insert submission into PostgreSQL
         try:
@@ -263,8 +314,8 @@ def migrate_form_analytics(form_id):
         }
         
         # Convert Firestore timestamps to datetime objects
-        if isinstance(fields['created_at'], firestore.SERVER_TIMESTAMP):
-            fields['created_at'] = fields['created_at'].datetime
+        if fields['created_at'] and hasattr(fields['created_at'], 'timestamp'):
+            fields['created_at'] = fields['created_at']
         
         # Insert analytics event into PostgreSQL
         try:
@@ -305,8 +356,8 @@ def migrate_form_versions(form_id):
         }
         
         # Convert Firestore timestamps to datetime objects
-        if isinstance(fields['created_at'], firestore.SERVER_TIMESTAMP):
-            fields['created_at'] = fields['created_at'].datetime
+        if fields['created_at'] and hasattr(fields['created_at'], 'timestamp'):
+            fields['created_at'] = fields['created_at']
         
         # Insert version into PostgreSQL
         try:
@@ -349,8 +400,8 @@ def migrate_form_abandons(form_id):
         }
         
         # Convert Firestore timestamps to datetime objects
-        if isinstance(fields['created_at'], firestore.SERVER_TIMESTAMP):
-            fields['created_at'] = fields['created_at'].datetime
+        if fields['created_at'] and hasattr(fields['created_at'], 'timestamp'):
+            fields['created_at'] = fields['created_at']
         
         # Insert abandon into PostgreSQL
         try:
@@ -395,8 +446,8 @@ def migrate_form_sessions(form_id):
         }
         
         # Convert Firestore timestamps to datetime objects
-        if isinstance(fields['created_at'], firestore.SERVER_TIMESTAMP):
-            fields['created_at'] = fields['created_at'].datetime
+        if fields['created_at'] and hasattr(fields['created_at'], 'timestamp'):
+            fields['created_at'] = fields['created_at']
         
         # Insert session into PostgreSQL
         try:
@@ -429,8 +480,8 @@ def migrate_form_sessions(form_id):
                 }
                 
                 # Convert Firestore timestamps to datetime objects
-                if isinstance(chunk_fields['created_at'], firestore.SERVER_TIMESTAMP):
-                    chunk_fields['created_at'] = chunk_fields['created_at'].datetime
+                if chunk_fields['created_at'] and hasattr(chunk_fields['created_at'], 'timestamp'):
+                    chunk_fields['created_at'] = chunk_fields['created_at']
                 
                 # Insert chunk into PostgreSQL
                 try:
@@ -487,8 +538,8 @@ def migrate_notifications():
             }
             
             # Convert Firestore timestamps to datetime objects
-            if isinstance(fields['created_at'], firestore.SERVER_TIMESTAMP):
-                fields['created_at'] = fields['created_at'].datetime
+            if fields['created_at'] and hasattr(fields['created_at'], 'timestamp'):
+                fields['created_at'] = fields['created_at']
             
             # Insert notification into PostgreSQL
             try:

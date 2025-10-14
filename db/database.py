@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import text
+from sqlalchemy.engine import URL
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -25,8 +26,15 @@ DB_PORT = os.getenv("POSTGRES_PORT", "5432")
 # SQLAlchemy models base class
 Base = declarative_base()
 
-# Create async engine with connection pooling
-DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+# Create async engine with connection pooling (use URL.create to safely handle special chars)
+DATABASE_URL = URL.create(
+    drivername="postgresql+asyncpg",
+    username=DB_USER,
+    password=DB_PASSWORD,
+    host=DB_HOST,
+    port=int(DB_PORT) if str(DB_PORT).isdigit() else None,
+    database=DB_NAME,
+)
 
 engine = create_async_engine(
     DATABASE_URL,

@@ -34,6 +34,12 @@ class DummyAdminFirestore:
     def document(self, path: str):
         logger.warning(f"Accessing removed Firestore document: {path}")
         return DummyAdminDocument(path)
+        
+    def batch(self):
+        return DummyAdminBatch()
+        
+    def transaction(self):
+        return DummyAdminTransaction()
 
 class DummyAdminCollection:
     def __init__(self, name: str):
@@ -54,6 +60,9 @@ class DummyAdminCollection:
     def add(self, document_data: Dict[str, Any], document_id: Optional[str] = None):
         logger.warning(f"Attempted write to removed Firestore collection: {self.name}")
         return None
+        
+    def list_documents(self):
+        return []
 
 class DummyAdminDocument:
     def __init__(self, path: str):
@@ -77,6 +86,9 @@ class DummyAdminDocument:
     
     def collection(self, name: str):
         return DummyAdminCollection(f"{self.path}/{name}")
+        
+    def collections(self):
+        return []
 
 class DummyAdminDocumentSnapshot:
     def __init__(self, path: str, exists: bool = False):
@@ -84,6 +96,7 @@ class DummyAdminDocumentSnapshot:
         self.id = path.split('/')[-1] if '/' in path else path
         self._exists = exists
         self._data = {}
+        self.reference = DummyAdminDocument(path)
     
     def exists(self):
         return self._exists
@@ -112,6 +125,41 @@ class DummyAdminQuery:
     
     def stream(self):
         return []
+        
+    def offset(self, count: int):
+        return self
+
+class DummyAdminBatch:
+    def __init__(self):
+        pass
+    
+    def set(self, ref, data, merge=False):
+        return self
+    
+    def update(self, ref, data):
+        return self
+    
+    def delete(self, ref):
+        return self
+    
+    def commit(self):
+        return []
+
+class DummyAdminTransaction:
+    def __init__(self):
+        pass
+    
+    def set(self, ref, data, merge=False):
+        return self
+    
+    def update(self, ref, data):
+        return self
+    
+    def delete(self, ref):
+        return self
+    
+    def get(self, ref):
+        return DummyAdminDocumentSnapshot(str(ref), exists=False)
 
 # Create a singleton instance
 admin_firestore = DummyAdminFirestore()

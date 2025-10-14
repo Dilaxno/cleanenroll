@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/payments", tags=["payments"])  # /api/payments/*
 
 # Firestore Admin to update user's plan/billing
 try:
-    from firebase_admin import firestore as _fs
+    from utils.firebase_admin_adapter import admin_firestore as _fs
     _FS_AVAILABLE = True
 except Exception:
     _FS_AVAILABLE = False

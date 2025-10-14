@@ -13,7 +13,7 @@ from fastapi.responses import RedirectResponse
 
 # Firebase Admin
 import firebase_admin
-from firebase_admin import credentials, firestore
+from utils.firebase_admin_adapter import admin_firestore as firestore
 
 logger = logging.getLogger("backend.airtable")
 

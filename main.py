@@ -48,6 +48,22 @@ setup_logging()
 
 # Routers: support both package-relative and flat repo imports
 try:
+    # Initialize PostgreSQL connection
+    try:
+        # When running as a package
+        from .db.database import get_connection  # type: ignore
+    except Exception:
+        # When running flat from repo root
+        from db.database import get_connection  # type: ignore
+    
+    # Test database connection
+    conn = get_connection()
+    conn.close()
+    logging.info("PostgreSQL database connection successful")
+except Exception as e:
+    logging.error(f"Failed to connect to PostgreSQL database: {e}")
+    
+try:
     # When running as a package: e.g. `uvicorn backend.main:app` or `python -m backend.main`
     from .routers.core import router as core_router  # type: ignore
     from .routers.builder import router as builder_router  # type: ignore
@@ -60,6 +76,7 @@ try:
     from .routers.airtable import router as airtable_router  # type: ignore
     from .routers.url_validation import router as url_validation_router  # type: ignore
     from .routers.uploads import router as uploads_router  # type: ignore
+    from .routers.forms_validated import router as forms_validated_router  # type: ignore
 except Exception:
     # When running from a flat repo root: e.g. `uvicorn main:app`
     from routers.core import router as core_router  # type: ignore
@@ -73,6 +90,7 @@ except Exception:
     from routers.airtable import router as airtable_router  # type: ignore
     from routers.url_validation import router as url_validation_router  # type: ignore
     from routers.uploads import router as uploads_router  # type: ignore
+    from routers.forms_validated import router as forms_validated_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -237,6 +255,7 @@ app.include_router(translate_router)
 app.include_router(airtable_router)
 app.include_router(url_validation_router)
 app.include_router(uploads_router)
+app.include_router(forms_validated_router, prefix="/api/v1")
 
 
 if __name__ == "__main__":

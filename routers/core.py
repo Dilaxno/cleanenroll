@@ -103,7 +103,7 @@ except Exception:
     from utils.email import render_email, send_email_html  # type: ignore
 try:
     import firebase_admin
-    from firebase_admin import auth as admin_auth, credentials as admin_credentials, firestore as admin_firestore
+    from utils.firebase_admin_adapter import admin_auth, admin_firestore
     _FB_AVAILABLE = True
 except Exception:
     firebase_admin = None  # type: ignore

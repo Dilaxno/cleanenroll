@@ -21,7 +21,7 @@ try:
     import firebase_admin  # type: ignore
     from firebase_admin import auth as admin_auth  # type: ignore
     from firebase_admin import credentials as admin_credentials  # type: ignore
-    from firebase_admin import firestore as admin_firestore  # type: ignore
+    from utils.firebase_admin_adapter import admin_firestore  # type: ignore
     _FB_AVAILABLE = True
 except Exception:  # pragma: no cover
     firebase_admin = None  # type: ignore

@@ -96,7 +96,7 @@ except Exception:
 # Firestore plan check (to gate Pro features on server)
 try:
     import firebase_admin  # type: ignore
-    from firebase_admin import firestore as _fs  # type: ignore
+    from utils.firebase_admin_adapter import admin_firestore as _fs  # type: ignore
     _FS_AVAILABLE = True
 except Exception:
     _FS_AVAILABLE = False

@@ -9,7 +9,7 @@ from db.database import get_session
 from services.forms_service_async import AsyncFormsService
 from models.base import FormModel
 
-router = APIRouter(prefix="/api/forms", tags=["forms"])
+router = APIRouter(prefix="/forms", tags=["forms"])
 
 @router.get("/")
 async def get_forms(

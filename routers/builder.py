@@ -2897,13 +2897,12 @@ async def delete_responses_batch(form_id: str, request: Request, payload: Dict =
 
 @router.get("/forms/{form_id}/analytics/countries")
 async def get_countries_analytics(form_id: str, from_ts: Optional[str] = Query(default=None, alias="from"), to_ts: Optional[str] = Query(default=None, alias="to")):
-    """
-    Return aggregated submission counts by country for a form.
-    Optional query params:
-      - from (ISO datetime): include days >= this date
-      - to (ISO datetime): include days <= this date
-    When no range is provided, returns the all-time totals.
-    """
+    # Return aggregated submission counts by country for a form.
+    # Optional query params:
+    #   - from (ISO datetime): include days >= this date
+    #   - to (ISO datetime): include days <= this date
+    # When no range is provided, returns the all-time totals.
+
     data = _load_analytics_countries(form_id)
     if not from_ts and not to_ts:
         return {"countries": data.get("total") or {}}

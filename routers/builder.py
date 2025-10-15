@@ -1593,7 +1593,7 @@ async def public_get_form(form_id: str):
 
 @router.post("/forms/{form_id}/view")
 @limiter.limit("600/minute")
-async def increment_form_view(form_id: str):
+async def increment_form_view(form_id: str, request: Request):
     """Increment a form's view count in Neon (PostgreSQL)."""
     try:
         async with async_session_maker() as session:

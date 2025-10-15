@@ -886,6 +886,57 @@ def _ensure_symlink(src: str, dst: str):
             raise
 
 
+@router.post("/forms/{form_id}/theme/submit-button")
+@limiter.limit("120/minute")
+async def update_theme_submit_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist submit button style (label, color, textColor) to Neon forms.theme.submitButton."""
+    payload = payload or {}
+    label = str(payload.get("label") or "").strip()
+    color = str(payload.get("color") or "").strip() or None
+    text_color = str(payload.get("textColor") or "").strip() or None
+
+    def _is_hex(c: Optional[str]) -> bool:
+        try:
+            if not c:
+                return False
+            s = c.strip()
+            if not s.startswith("#"):
+                return False
+            h = s[1:]
+            return len(h) in (3, 6) and all(ch in "0123456789abcdefABCDEF" for ch in h)
+        except Exception:
+            return False
+
+    # Basic validation for colors (hex allowed)
+    if color and not _is_hex(color):
+        raise HTTPException(status_code=400, detail="Invalid color hex")
+    if text_color and not _is_hex(text_color):
+        raise HTTPException(status_code=400, detail="Invalid textColor hex")
+
+    submit_button = {k: v for k, v in {
+        "label": label or None,
+        "color": color,
+        "textColor": text_color,
+    }.items() if v is not None}
+
+    async with async_session_maker() as session:
+        # Ensure theme exists; then upsert submitButton node
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = COALESCE(theme, '{}'::jsonb)
+                           || jsonb_build_object('submitButton', to_jsonb(:btn::json))::jsonb,
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "btn": json.dumps(submit_button or {})},
+        )
+        await session.commit()
+    return {"ok": True, "submitButton": submit_button}
+
+
 def _shell(cmd) -> subprocess.CompletedProcess:
     """Run a command safely without invoking a shell.
     Accepts either a string (split via shlex) or a sequence of args.
@@ -1694,6 +1745,38 @@ async def presign_form_bg(request: Request, payload: Dict[str, Any] | None = Non
         raise
     except Exception as e:
         logger.exception("presign_form_bg failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create upload URL")
+
+@router.post("/uploads/submissions/presign")
+@limiter.limit("60/minute")
+async def presign_submission_file(request: Request, payload: Dict[str, Any] | None = None):
+    """Create a presigned URL to upload a submission attachment to R2 and return its public URL.
+
+    Body: { formId?: string, fieldId?: string, filename: string, contentType: string }
+    """
+    payload = payload or {}
+    form_id = str(payload.get('formId') or '').strip()
+    field_id = str(payload.get('fieldId') or '').strip()
+    filename = str(payload.get('filename') or 'file.bin')
+    content_type = str(payload.get('contentType') or 'application/octet-stream')
+    ext = _ext_from_name_and_type(filename, content_type)
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", os.path.splitext(filename)[0] or 'file')
+    uid = _create_id()
+    # Organize under submissions/{formId or unknown}/
+    owner = form_id if form_id else 'unknown'
+    # Include field id when available to help later auditing
+    suffix = f"_{field_id}" if field_id else ""
+    key = f"submissions/{owner}/{uid}{suffix}{ext}"
+    try:
+        s3 = _r2_client()
+        params = {"Bucket": R2_BUCKET, "Key": key, "ContentType": content_type}
+        upload_url = s3.generate_presigned_url('put_object', Params=params, ExpiresIn=900)
+        public_url = _public_url_for_key(key)
+        return {"uploadUrl": upload_url, "publicUrl": public_url, "headers": {"Content-Type": content_type}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("presign_submission_file failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to create upload URL")
 
 @router.post("/uploads/media/presign")
@@ -2872,6 +2955,45 @@ async def renew_now():
 async def renew_health():
     """Simple health check for Caddy mode."""
     return {"enabled": True, "mode": "caddy", "message": "Caddy auto-renews certificates internally."}
+
+@router.post("/forms/{form_id}/sessions/{session_id}/upload")
+async def upload_session_chunk(form_id: str, session_id: str, payload: Dict):
+    """Accept rrweb session chunk uploads from the frontend and store in Neon.
+
+    Body: { idx: number, data: string(JSON) }
+    """
+    try:
+        idx_raw = (payload or {}).get("idx")
+        data_raw = (payload or {}).get("data")
+        if idx_raw is None:
+            raise HTTPException(status_code=400, detail="Missing idx")
+        try:
+            idx = int(idx_raw)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid idx")
+        data = str(data_raw or "")
+        if not data:
+            # allow empty arrays but enforce string type
+            data = "[]"
+        async with async_session_maker() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO form_sessions (form_id, session_id, idx, data)
+                    VALUES (:fid, :sid, :idx, :data)
+                    ON CONFLICT (form_id, session_id, idx)
+                    DO UPDATE SET data = EXCLUDED.data, created_at = NOW()
+                    """
+                ),
+                {"fid": form_id, "sid": session_id, "idx": idx, "data": data},
+            )
+            await session.commit()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("session upload failed form_id=%s session_id=%s", form_id, session_id)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
 @router.get("/forms/{form_id}/responses")
 async def list_responses(

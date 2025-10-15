@@ -2245,10 +2245,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                                 continue
                             fid2 = str(f.get("id"))
                             av2 = answers.get(fid2)
-                            if isinstance(av2, list):
-                                srcs = av2
-                            else:
-                                srcs = [av2] if av2 is not None else []
+                            srcs = av2 if isinstance(av2, list) else ([av2] if av2 is not None else [])
                             for idx, v2 in enumerate(srcs):
                                 url2 = None
                                 if isinstance(v2, str):
@@ -2259,6 +2256,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                                     continue
                                 zf.writestr(f"{fid2}_{idx+1}.txt", url2)
                                 added += 1
+                        except Exception:
+                            continue
                 if added > 0:
                     data_bytes = buf.getvalue()
                     key = f"submissions/{form_id}/{response_id}_files.zip"

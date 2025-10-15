@@ -886,55 +886,7 @@ def _ensure_symlink(src: str, dst: str):
             raise
 
 
-@router.post("/forms/{form_id}/theme/submit-button")
-@limiter.limit("120/minute")
-async def update_theme_submit_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
-    """Persist submit button style (label, color, textColor) to Neon forms.theme.submitButton."""
-    payload = payload or {}
-    label = str(payload.get("label") or "").strip()
-    color = str(payload.get("color") or "").strip() or None
-    text_color = str(payload.get("textColor") or "").strip() or None
-
-    def _is_hex(c: Optional[str]) -> bool:
-        try:
-            if not c:
-                return False
-            s = c.strip()
-            if not s.startswith("#"):
-                return False
-            h = s[1:]
-            return len(h) in (3, 6) and all(ch in "0123456789abcdefABCDEF" for ch in h)
-        except Exception:
-            return False
-
-    # Basic validation for colors (hex allowed)
-    if color and not _is_hex(color):
-        raise HTTPException(status_code=400, detail="Invalid color hex")
-    if text_color and not _is_hex(text_color):
-        raise HTTPException(status_code=400, detail="Invalid textColor hex")
-
-    submit_button = {k: v for k, v in {
-        "label": label or None,
-        "color": color,
-        "textColor": text_color,
-    }.items() if v is not None}
-
-    async with async_session_maker() as session:
-        # Ensure theme exists; then upsert submitButton node
-        await session.execute(
-            text(
-                """
-                UPDATE forms
-                SET theme = COALESCE(theme, '{}'::jsonb)
-                           || jsonb_build_object('submitButton', to_jsonb(:btn::json))::jsonb,
-                    updated_at = NOW()
-                WHERE id = :fid
-                """
-            ),
-            {"fid": form_id, "btn": json.dumps(submit_button or {})},
-        )
-        await session.commit()
-    return {"ok": True, "submitButton": submit_button}
+ 
 
 
 def _shell(cmd) -> subprocess.CompletedProcess:

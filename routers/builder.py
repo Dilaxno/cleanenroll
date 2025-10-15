@@ -1521,11 +1521,21 @@ async def public_get_form(form_id: str):
                 theme = data.get("theme") or {}
                 btn = (data.get("submitButton") or theme.get("submitButton") or {})
                 primary = (theme.get("primaryColor") if isinstance(theme, dict) else None) or "#4f46e5"
-                data["submitButton"] = {
+                computed_btn = {
                     "label": (btn.get("label") if isinstance(btn, dict) else None) or "Submit",
                     "color": (btn.get("color") if isinstance(btn, dict) else None) or primary,
                     "textColor": (btn.get("textColor") if isinstance(btn, dict) else None) or "#ffffff",
                 }
+                data["submitButton"] = computed_btn
+                # Also ensure theme.submitButton exists for clients that only read theme
+                try:
+                    if not isinstance(theme, dict):
+                        theme = {}
+                    theme = dict(theme)
+                    theme["submitButton"] = computed_btn
+                    data["theme"] = theme
+                except Exception:
+                    pass
             except Exception:
                 # Best-effort; leave as-is on error
                 pass
@@ -1894,6 +1904,53 @@ async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str
         )
         await session.commit()
     return {"ok": True, "publicUrl": url}
+
+@router.post("/forms/{form_id}/theme/submit-button")
+@limiter.limit("120/minute")
+async def update_theme_submit_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist submit button style (label, color, textColor) to Neon in forms.theme.submitButton."""
+    payload = payload or {}
+    label = str(payload.get("label") or "").strip()
+    color = str(payload.get("color") or "").strip() or None
+    text_color = str(payload.get("textColor") or "").strip() or None
+
+    def _is_hex(c: Optional[str]) -> bool:
+        try:
+            if not c:
+                return False
+            s = c.strip()
+            if not s.startswith("#"):
+                return False
+            h = s[1:]
+            return len(h) in (3, 6) and all(ch in "0123456789abcdefABCDEF" for ch in h)
+        except Exception:
+            return False
+
+    if color and not _is_hex(color):
+        raise HTTPException(status_code=400, detail="Invalid color hex")
+    if text_color and not _is_hex(text_color):
+        raise HTTPException(status_code=400, detail="Invalid textColor hex")
+
+    submit_button = {k: v for k, v in {
+        "label": label or None,
+        "color": color,
+        "textColor": text_color,
+    }.items() if v is not None}
+
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButton}', to_jsonb(:btn::json), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "btn": json.dumps(submit_button or {})},
+        )
+        await session.commit()
+    return {"ok": True, "submitButton": submit_button}
 
 async def _ensure_submissions_indexes(session):
     """Create helpful indexes for submissions table if missing (best-effort)."""

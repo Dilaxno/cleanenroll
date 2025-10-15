@@ -1593,6 +1593,109 @@ async def get_user_plan(request: Request, userId: str = Query(...)):
         logger.exception("get_user_plan failed userId=%s", userId)
         raise HTTPException(status_code=500, detail=str(e))
 
+# -----------------------------
+# Email integration status (Neon persistence)
+# -----------------------------
+
+async def _ensure_email_integrations_table(session):
+    try:
+        await session.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS email_integrations (
+                uid TEXT PRIMARY KEY,
+                google_connected BOOLEAN DEFAULT FALSE,
+                microsoft_connected BOOLEAN DEFAULT FALSE,
+                smtp_enabled BOOLEAN DEFAULT FALSE,
+                smtp_host TEXT,
+                smtp_port INTEGER,
+                smtp_username TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """
+        ))
+    except Exception:
+        # Best-effort; subsequent queries may fail if DDL is not permitted
+        pass
+
+@router.get("/email/integration/status")
+@limiter.limit("120/minute")
+async def get_email_integration_status(userId: Optional[str] = Query(default=None)):
+    """Return email integration status for a user from Neon.
+    Response: { google: bool, microsoft: bool, smtp: bool }
+    """
+    try:
+        if not userId:
+            # No user provided; return safe defaults
+            return {"google": False, "microsoft": False, "smtp": False}
+        async with async_session_maker() as session:
+            await _ensure_email_integrations_table(session)
+            res = await session.execute(
+                text("""
+                    SELECT google_connected, microsoft_connected, smtp_enabled
+                    FROM email_integrations
+                    WHERE uid = :uid
+                    LIMIT 1
+                """),
+                {"uid": userId}
+            )
+            row = res.mappings().first()
+            if not row:
+                return {"google": False, "microsoft": False, "smtp": False}
+            return {
+                "google": bool(row.get("google_connected")) if row.get("google_connected") is not None else False,
+                "microsoft": bool(row.get("microsoft_connected")) if row.get("microsoft_connected") is not None else False,
+                "smtp": bool(row.get("smtp_enabled")) if row.get("smtp_enabled") is not None else False,
+            }
+    except Exception:
+        # Do not leak errors; default to all false
+        return {"google": False, "microsoft": False, "smtp": False}
+
+@router.post("/email/smtp/save")
+@limiter.limit("30/minute")
+async def save_smtp_settings(payload: Dict[str, Any] | None = None, userId: Optional[str] = Query(default=None)):
+    """Save SMTP settings status for a user in Neon and mark SMTP as enabled.
+    Expects JSON body: { host, port, username, password } (password not persisted).
+    Returns: { success: true }
+    """
+    try:
+        if not userId:
+            raise HTTPException(status_code=400, detail="Missing userId")
+        payload = payload or {}
+        host = str(payload.get("host") or "").strip()
+        try:
+            port = int(payload.get("port")) if payload.get("port") is not None else 0
+        except Exception:
+            port = 0
+        username = str(payload.get("username") or "").strip()
+        # Basic validation aligned with frontend
+        if not host or port not in (465, 587) or not username:
+            raise HTTPException(status_code=400, detail="Enter SMTP host, port (465/587), username and password")
+        async with async_session_maker() as session:
+            await _ensure_email_integrations_table(session)
+            # Upsert status and metadata; do not store password server-side in this endpoint
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO email_integrations (uid, smtp_enabled, smtp_host, smtp_port, smtp_username, updated_at)
+                    VALUES (:uid, TRUE, :host, :port, :username, NOW())
+                    ON CONFLICT (uid) DO UPDATE SET
+                        smtp_enabled = EXCLUDED.smtp_enabled,
+                        smtp_host = EXCLUDED.smtp_host,
+                        smtp_port = EXCLUDED.smtp_port,
+                        smtp_username = EXCLUDED.smtp_username,
+                        updated_at = NOW()
+                    """
+                ),
+                {"uid": userId, "host": host, "port": port, "username": username}
+            )
+            return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("save_smtp_settings failed uid=%s", userId)
+        raise HTTPException(status_code=500, detail="Failed to save SMTP settings")
+
 @router.post("/forms/{form_id}/submit")
 @limiter.limit("5/minute")
 async def submit_form(form_id: str, request: Request, payload: Dict = None):

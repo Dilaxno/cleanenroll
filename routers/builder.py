@@ -498,6 +498,11 @@ class HeadingStyle(BaseModel):
     level: Literal[1,2,3,4,5,6] = 1
 
 
+class RedirectConfig(BaseModel):
+    enabled: bool = False
+    url: Optional[str] = None
+
+
 class FormConfig(BaseModel):
     id: Optional[str] = None
     userId: Optional[str] = None

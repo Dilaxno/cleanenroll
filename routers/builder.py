@@ -1591,6 +1591,27 @@ async def public_get_form(form_id: str):
         # Avoid leaking internals; treat as not found for public endpoint
         raise HTTPException(status_code=404, detail="Form not found")
 
+@router.post("/forms/{form_id}/view")
+@limiter.limit("600/minute")
+async def increment_form_view(form_id: str):
+    """Increment a form's view count in Neon (PostgreSQL)."""
+    try:
+        async with async_session_maker() as session:
+            await session.execute(
+                text("""
+                    UPDATE forms
+                    SET views = COALESCE(views, 0) + 1,
+                        updated_at = NOW()
+                    WHERE id = :fid
+                """),
+                {"fid": form_id}
+            )
+            await session.commit()
+        return {"ok": True}
+    except Exception:
+        # Do not leak internals; return ok=false to avoid breaking the client
+        return {"ok": False}
+
 @router.get("/user/plan")
 @limiter.limit("120/minute")
 async def get_user_plan(request: Request, userId: str = Query(...)):

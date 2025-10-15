@@ -33,6 +33,21 @@ except Exception:
 
 import urllib.request
 import urllib.error
+import time
+try:
+    from standardwebhooks import Webhook  # type: ignore
+    _STDWEBHOOKS_AVAILABLE = True
+except Exception:
+    Webhook = None  # type: ignore
+    _STDWEBHOOKS_AVAILABLE = False
+
+# Firestore (optional) for subscription_id resolution in cancel/resume flows
+try:
+    from utils.firebase_admin_adapter import admin_firestore as _fs  # type: ignore
+    _FS_AVAILABLE = True
+except Exception:
+    _fs = None  # type: ignore
+    _FS_AVAILABLE = False
 
 
 def _verify_id_token_from_header(request: Request) -> Optional[str]:
@@ -106,6 +121,30 @@ def _send_billing_email(to_email: str, subject: str, intro: str, content_html: O
         send_email_html(to_email, subject, html, from_addr='billing@cleanenroll.com')
     except Exception:
         logger.exception('[payments] failed to send billing email to %s', to_email)
+
+
+def _forward_dodo_event(event_type: str, uid: str) -> None:
+    """Optional best-effort forwarder for internal auditing/bridging.
+    Configure DODO_FORWARD_WEBHOOK_URL to enable. No-ops when unset.
+    """
+    url = os.getenv('DODO_FORWARD_WEBHOOK_URL') or ''
+    if not url:
+        return
+    try:
+        body = {
+            'type': event_type,
+            'data': {'metadata': {'user_uid': uid}},
+        }
+        req = urllib.request.Request(
+            url=url,
+            data=json.dumps(body).encode('utf-8'),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=10):  # type: ignore
+            pass
+    except Exception:
+        logger.warning('[payments] forward_dodo_event failed', exc_info=True)
 
 
 @router.post("/dodo/checkout")
@@ -392,6 +431,97 @@ async def create_dodo_dynamic_session(request: Request, payload: Dict):
         logger.exception("[dodo-session] request failed")
         raise HTTPException(status_code=502, detail="Checkout provider error")
 
+async def _process_dodo_event(payload: Dict):
+    """Apply Dodo event to local state (plan/billing) and send emails.
+    Expects a dict payload like the provider's JSON body.
+    """
+    try:
+        event_type = str(payload.get('type') or payload.get('event') or '').strip().lower()
+        data = payload.get('data') or payload.get('object') or {}
+        meta = data.get('metadata') or {}
+        uid = meta.get('user_uid') or meta.get('uid') or data.get('user_uid') or ''
+        next_billing = data.get('current_period_end') or data.get('next_billing_at') or data.get('renews_at')
+        price_amount = data.get('amount') or data.get('price') or None
+        currency = (data.get('currency') or 'USD').upper()
+        # Payment method details (if present)
+        payment_method = data.get('payment_method') or data.get('paymentMethod') or {}
+
+        # Normalize timestamp from seconds or ISO
+        def normalize_ts(v):
+            if not v:
+                return None
+            try:
+                if isinstance(v, (int, float)):
+                    return int(v) * 1000  # ms for frontend convenience
+                s = str(v)
+                from datetime import datetime
+                return datetime.fromisoformat(s.replace('Z','+00:00')).isoformat()
+            except Exception:
+                return v
+
+        if event_type == 'subscription.cancelled':
+            # Immediately set plan to free and clear billing flags
+            if uid:
+                await _set_user_plan(uid, 'free')
+                await _update_user_billing(uid, {
+                    'nextBillingAt': None,
+                    'cancelAtPeriodEnd': False,
+                    'status': 'cancelled',
+                })
+                # Notify user about cancellation (best-effort)
+                try:
+                    email = await _get_user_email(uid)
+                    if email:
+                        portal = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL') or (os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/billing/portal')
+                        subject = 'Your CleanEnroll subscription was canceled'
+                        intro = 'Your subscription has been canceled. You will no longer be charged.'
+                        _send_billing_email(email, subject, intro, cta_label='Manage Billing', cta_url=portal)
+                except Exception:
+                    logger.exception('[payments] failed to send cancellation email for uid=%s', uid)
+        elif event_type in ('subscription.renewed', 'subscription.created', 'invoice.paid'):
+            if uid:
+                await _set_user_plan(uid, 'pro')
+                # Best-effort payment identifier extraction (depends on provider payload)
+                payment_id = (
+                    data.get('payment_id')
+                    or data.get('invoice_id')
+                    or data.get('id')
+                    or (data.get('payment') or {}).get('id')
+                    or (data.get('invoice') or {}).get('id')
+                )
+                await _update_user_billing(uid, {
+                    'nextBillingAt': normalize_ts(next_billing),
+                    'cancelAtPeriodEnd': False,
+                    'currency': currency,
+                    'price': price_amount if isinstance(price_amount, (int, float)) else None,
+                    'status': 'active',
+                    'paymentMethod': payment_method if isinstance(payment_method, dict) else None,
+                    **({'lastPaymentId': payment_id} if payment_id else {}),
+                })
+                # Notify user about successful upgrade/renewal (best-effort)
+                try:
+                    email = await _get_user_email(uid)
+                    if email:
+                        portal = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL') or (os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/billing/portal')
+                        subject = 'Your CleanEnroll subscription is active'
+                        intro = 'Your plan has been upgraded/renewed successfully.'
+                        extra = ''
+                        if isinstance(price_amount, (int, float)) and currency:
+                            try:
+                                amt = float(price_amount) / (100.0 if price_amount and price_amount > 50 else 1.0)
+                                extra = f"<p style='margin:0;color:#c7c7c7'>Amount: <strong>{amt:.2f} {currency}</strong></p>"
+                            except Exception:
+                                extra = ''
+                        _send_billing_email(email, subject, intro, content_html=extra, cta_label='Manage Billing', cta_url=portal)
+                except Exception:
+                    logger.exception('[payments] failed to send upgrade/renewal email for uid=%s', uid)
+        else:
+            logger.info('[dodo-webhook] unhandled event type=%s', event_type)
+        return { 'received': True }
+    except Exception:
+        logger.exception('[dodo-webhook] error handling event')
+        raise HTTPException(status_code=400, detail='Webhook handling failed')
+
 @router.post('/dodo/cancel')
 async def dodo_cancel_or_resume(request: Request, payload: Dict):
     """Request cancel/resume/cancel-now for a Dodo subscription.
@@ -533,10 +663,10 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
 
     # cancel_now flow: emit local cancellation side-effects after provider success
     try:
-        await dodo_webhook({
+        await _process_dodo_event({
             'type': 'subscription.cancelled',
             'data': {'metadata': {'user_uid': uid}}
-        }, request)
+        })
         try:
             _forward_dodo_event('subscription.cancelled', uid)  # optional best-effort forwarder if present
         except Exception:
@@ -549,93 +679,59 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
 
 @router.post('/dodo/webhook')
 async def dodo_webhook(payload: Dict, request: Request):
-    """Handle Dodo Payments webhook events.
-    Expected event types include: subscription.cancelled, subscription.renewed, subscription.created
-    We update Firestore billing and plan accordingly.
-    """
+    """Handle Dodo Payments webhook events with signature verification (Standard Webhooks)."""
+    # Read raw body for signature verification
+    raw_body = await request.body()
+    raw_text = raw_body.decode('utf-8', errors='replace') if isinstance(raw_body, (bytes, bytearray)) else str(raw_body or '')
+
+    # Verify Standard Webhooks signature
+    headers = request.headers
+    webhook_id = headers.get('webhook-id')
+    webhook_sig = (
+        headers.get('webhook-signature')
+        or headers.get('dodo-signature')
+        or headers.get('x-dodo-signature')
+        or headers.get('signature')
+    )
+    webhook_ts = headers.get('webhook-timestamp') or headers.get('webhook-time') or headers.get('timestamp')
+    secret = os.getenv('DODO_WEBHOOK_SECRET') or os.getenv('DODO_PAYMENTS_WEBHOOK_KEY')
+
+    if not (webhook_id and webhook_sig and webhook_ts and secret):
+        raise HTTPException(status_code=401, detail='Invalid webhook signature')
+
     try:
-        event_type = str(payload.get('type') or payload.get('event') or '').strip().lower()
-        data = payload.get('data') or payload.get('object') or {}
-        meta = data.get('metadata') or {}
-        uid = meta.get('user_uid') or meta.get('uid') or data.get('user_uid') or ''
-        next_billing = data.get('current_period_end') or data.get('next_billing_at') or data.get('renews_at')
-        price_amount = data.get('amount') or data.get('price') or None
-        currency = (data.get('currency') or 'USD').upper()
-        # Payment method details (if present)
-        payment_method = data.get('payment_method') or data.get('paymentMethod') or {}
+        ts = int(str(webhook_ts))
+        now = int(time.time())
+        tolerance = int(os.getenv('DODO_WEBHOOK_TOLERANCE', '300'))
+        if abs(now - ts) > tolerance:
+            raise HTTPException(status_code=401, detail='Webhook timestamp outside tolerance')
+    except ValueError:
+        raise HTTPException(status_code=401, detail='Invalid webhook timestamp')
 
-        # Normalize timestamp from seconds or ISO
-        def normalize_ts(v):
-            if not v:
-                return None
-            try:
-                if isinstance(v, (int, float)):
-                    return int(v) * 1000  # ms for frontend convenience
-                s = str(v)
-                from datetime import datetime
-                return datetime.fromisoformat(s.replace('Z','+00:00')).isoformat()
-            except Exception:
-                return v
+    if not _STDWEBHOOKS_AVAILABLE:
+        logger.error('[dodo-webhook] standardwebhooks library is not available on server')
+        raise HTTPException(status_code=500, detail='Webhook verification library unavailable')
 
-        if event_type == 'subscription.cancelled':
-            # Immediately set plan to free and clear billing flags
-            if uid:
-                _set_user_plan(uid, 'free')
-                _update_user_billing(uid, {
-                    'nextBillingAt': None,
-                    'cancelAtPeriodEnd': False,
-                    'status': 'cancelled',
-                })
-                # Notify user about cancellation (best-effort)
-                try:
-                    email = _get_user_email(uid)
-                    if email:
-                        portal = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL') or (os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/billing/portal')
-                        subject = 'Your CleanEnroll subscription was canceled'
-                        intro = 'Your subscription has been canceled. You will no longer be charged.'
-                        _send_billing_email(email, subject, intro, cta_label='Manage Billing', cta_url=portal)
-                except Exception:
-                    logger.exception('[payments] failed to send cancellation email for uid=%s', uid)
-        elif event_type in ('subscription.renewed', 'subscription.created', 'invoice.paid'):
-            if uid:
-                _set_user_plan(uid, 'pro')
-                # Best-effort payment identifier extraction (depends on provider payload)
-                payment_id = (
-                    data.get('payment_id')
-                    or data.get('invoice_id')
-                    or data.get('id')
-                    or (data.get('payment') or {}).get('id')
-                    or (data.get('invoice') or {}).get('id')
-                )
-                _update_user_billing(uid, {
-                    'nextBillingAt': normalize_ts(next_billing),
-                    'cancelAtPeriodEnd': False,
-                    'currency': currency,
-                    'price': price_amount if isinstance(price_amount, (int, float)) else None,
-                    'status': 'active',
-                    'paymentMethod': payment_method if isinstance(payment_method, dict) else None,
-                    **({'lastPaymentId': payment_id} if payment_id else {}),
-                })
-                # Notify user about successful upgrade/renewal (best-effort)
-                try:
-                    email = _get_user_email(uid)
-                    if email:
-                        portal = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL') or (os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/billing/portal')
-                        subject = 'Your CleanEnroll subscription is active'
-                        intro = 'Your plan has been upgraded/renewed successfully.'
-                        extra = ''
-                        if isinstance(price_amount, (int, float)) and currency:
-                            try:
-                                amt = float(price_amount) / (100.0 if price_amount and price_amount > 50 else 1.0)
-                                extra = f"<p style='margin:0;color:#c7c7c7'>Amount: <strong>{amt:.2f} {currency}</strong></p>"
-                            except Exception:
-                                extra = ''
-                        _send_billing_email(email, subject, intro, content_html=extra, cta_label='Manage Billing', cta_url=portal)
-                except Exception:
-                    logger.exception('[payments] failed to send upgrade/renewal email for uid=%s', uid)
-        else:
-            logger.info('[dodo-webhook] unhandled event type=%s', event_type)
-        return { 'received': True }
+    try:
+        wh = Webhook(secret)
+        std_headers = {
+            'webhook-id': webhook_id,
+            'webhook-signature': webhook_sig,
+            'webhook-timestamp': str(webhook_ts),
+        }
+        wh.verify(raw_text, std_headers)
+        logger.info('[dodo-webhook] signature verified via standardwebhooks')
     except Exception:
-        logger.exception('[dodo-webhook] error handling event')
-        raise HTTPException(status_code=400, detail='Webhook handling failed')
+        logger.warning('[dodo-webhook] signature verification failed')
+        raise HTTPException(status_code=401, detail='Invalid webhook signature')
+
+    # Parse payload from raw_text to ensure signature matches content
+    try:
+        parsed = json.loads(raw_text) if raw_text else {}
+        if isinstance(parsed, dict):
+            payload = parsed
+    except Exception:
+        payload = payload or {}
+
+    # Process event
+    return await _process_dodo_event(payload)

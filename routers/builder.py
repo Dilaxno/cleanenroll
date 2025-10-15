@@ -12,6 +12,7 @@ import urllib.request
 import re
 import shutil
 import subprocess
+import shlex
 import requests
 import zipfile
 import io
@@ -334,7 +335,13 @@ def _normalize_bg_public_url(u: Optional[str]) -> Optional[str]:
         return u
 
 def _analytics_countries_path(form_id: str) -> str:
-    return os.path.join(ANALYTICS_BASE_DIR, form_id, "countries.json")
+    # Sanitize form_id and ensure path remains within analytics base directory
+    safe_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(form_id or ""))
+    base = os.path.abspath(ANALYTICS_BASE_DIR)
+    path = os.path.normpath(os.path.join(ANALYTICS_BASE_DIR, safe_id, "countries.json"))
+    if os.path.commonpath([base, os.path.abspath(path)]) != base:
+        raise HTTPException(status_code=400, detail="Invalid form id")
+    return path
 
 def _load_analytics_countries(form_id: str) -> Dict:
     path = _analytics_countries_path(form_id)
@@ -392,12 +399,22 @@ _WORLD_COUNTRIES_FILE = os.path.join(WORLD_GEO_DIR, "world-countries.geo.json")
 
 
 def _form_path(form_id: str) -> str:
-    return os.path.join(BACKING_DIR, f"{form_id}.json")
+    # Sanitize form_id and ensure the resulting file stays within BACKING_DIR
+    safe_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(form_id or ""))
+    base = os.path.abspath(BACKING_DIR)
+    path = os.path.normpath(os.path.join(BACKING_DIR, f"{safe_id}.json"))
+    if os.path.commonpath([base, os.path.abspath(path)]) != base:
+        raise HTTPException(status_code=400, detail="Invalid form id")
+    return path
 
 
 def _responses_dir(form_id: str) -> str:
-    """Directory where responses for a given form are stored."""
-    d = os.path.join(RESPONSES_BASE_DIR, form_id)
+    """Directory where responses for a given form are stored (path-safe)."""
+    safe_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(form_id or ""))
+    base = os.path.abspath(RESPONSES_BASE_DIR)
+    d = os.path.normpath(os.path.join(RESPONSES_BASE_DIR, safe_id))
+    if os.path.commonpath([base, os.path.abspath(d)]) != base:
+        raise HTTPException(status_code=400, detail="Invalid form id")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -984,8 +1001,28 @@ def _ensure_symlink(src: str, dst: str):
             raise
 
 
-def _shell(cmd: str) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+def _shell(cmd) -> subprocess.CompletedProcess:
+    """Run a command safely without invoking a shell.
+    Accepts either a string (split via shlex) or a sequence of args.
+    """
+    try:
+        if isinstance(cmd, str):
+            args = shlex.split(cmd)
+        else:
+            args = list(cmd)
+        return subprocess.run(args, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    except Exception as e:
+        # Return a CompletedProcess-like object on failure for callers expecting .stdout/.returncode
+        try:
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout=str(e))
+        except Exception:
+            # Fallback minimal object
+            class _CP:
+                def __init__(self, s):
+                    self.args = cmd
+                    self.returncode = 1
+                    self.stdout = s
+            return _CP(str(e))
 
 
 def _nginx_test_and_reload() -> str:
@@ -1029,12 +1066,18 @@ def _cert_status_for_domain(primary_domain: str) -> Dict[str, Any]:
     if not os.path.exists(cert_path):
         return {"exists": False, "domain": primary_domain}
     try:
-        # Gather fields
-        out_subject = _shell(f"openssl x509 -in {cert_path} -noout -subject").stdout or ""
-        out_issuer  = _shell(f"openssl x509 -in {cert_path} -noout -issuer").stdout or ""
-        out_enddate = _shell(f"openssl x509 -in {cert_path} -noout -enddate").stdout or ""
-        out_start   = _shell(f"openssl x509 -in {cert_path} -noout -startdate").stdout or ""
-        out_san     = _shell(f"openssl x509 -in {cert_path} -noout -ext subjectAltName").stdout or ""
+        # Gather fields using safe subprocess (no shell)
+        def _run_ssl(args):
+            try:
+                cp = subprocess.run(args, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=15)
+                return cp.stdout or ""
+            except Exception:
+                return ""
+        out_subject = _run_ssl(["openssl", "x509", "-in", cert_path, "-noout", "-subject"])
+        out_issuer  = _run_ssl(["openssl", "x509", "-in", cert_path, "-noout", "-issuer"])
+        out_enddate = _run_ssl(["openssl", "x509", "-in", cert_path, "-noout", "-enddate"])
+        out_start   = _run_ssl(["openssl", "x509", "-in", cert_path, "-noout", "-startdate"])
+        out_san     = _run_ssl(["openssl", "x509", "-in", cert_path, "-noout", "-ext", "subjectAltName"])
 
         def _val(line: str) -> str:
             return (line.strip().split("=", 1)[-1] if "=" in line else line.strip())

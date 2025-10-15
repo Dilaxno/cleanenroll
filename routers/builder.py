@@ -1782,7 +1782,7 @@ async def presign_media(request: Request, payload: Dict[str, Any] | None = None)
 
 @router.post("/forms/{form_id}/theme/page-bg")
 @limiter.limit("120/minute")
-async def update_theme_page_bg(form_id: str, payload: Dict[str, Any] | None = None):
+async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
     """Persist page background image URL to Neon forms.theme.pageBackgroundImage."""
     url = str((payload or {}).get('publicUrl') or (payload or {}).get('url') or '').strip()
     if not url:
@@ -1804,7 +1804,7 @@ async def update_theme_page_bg(form_id: str, payload: Dict[str, Any] | None = No
 
 @router.post("/forms/{form_id}/theme/split-image")
 @limiter.limit("120/minute")
-async def update_theme_split_image(form_id: str, payload: Dict[str, Any] | None = None):
+async def update_theme_split_image(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
     """Persist split view image URL to Neon forms.theme.splitImageUrl."""
     url = str((payload or {}).get('publicUrl') or (payload or {}).get('url') or '').strip()
     if not url:

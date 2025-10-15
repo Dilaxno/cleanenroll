@@ -1662,6 +1662,68 @@ async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = 
 # Upload presign endpoints for R2 + theme updates persisted to Neon
 # -----------------------------
 
+@router.post("/forms/{form_id}/notify-client")
+@limiter.limit("60/minute")
+async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] | None = None):
+    """Send a client notification email for a form.
+
+    Body: { to: string, subject?: string, html?: string, text?: string }
+    If subject/html are omitted, falls back to form auto-reply config.
+    """
+    payload = payload or {}
+    to_raw = str(payload.get("to") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    html = str(payload.get("html") or "").strip()
+    text_fallback = str(payload.get("text") or "").strip()
+
+    if not to_raw:
+        raise HTTPException(status_code=400, detail="Missing recipient 'to'")
+    # Validate email format
+    try:
+        _validate_email(to_raw, allow_smtputf8=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+
+    # If subject/html not provided, attempt to load from form auto-reply config
+    if not subject or not html:
+        try:
+            async with async_session_maker() as session:
+                res = await session.execute(
+                    text(
+                        """
+                        SELECT title, auto_reply_enabled, auto_reply_subject, auto_reply_message_html
+                        FROM forms
+                        WHERE id = :fid
+                        LIMIT 1
+                        """
+                    ),
+                    {"fid": form_id},
+                )
+                row = res.mappings().first()
+                if row and bool(row.get("auto_reply_enabled")):
+                    if not subject:
+                        subject = str(row.get("auto_reply_subject") or "Thank you for your submission").strip()
+                    if not html:
+                        html = str(row.get("auto_reply_message_html") or "").strip()
+        except Exception:
+            # best-effort; continue
+            pass
+
+    if not subject:
+        subject = "Notification"
+    if not html:
+        if text_fallback:
+            html = f"<pre style=\"font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace\">{text_fallback}</pre>"
+        else:
+            html = "<p>Thank you.</p>"
+
+    try:
+        send_email_html(to_raw, subject, html)
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("notify_client failed form_id=%s to=%s", form_id, to_raw)
+        raise HTTPException(status_code=500, detail=f"Failed to send: {e}")
+
 def _ext_from_name_and_type(filename: Optional[str], content_type: Optional[str]) -> str:
     try:
         name = str(filename or '').lower()

@@ -285,32 +285,36 @@ def _normalize_bg_public_url(u: Optional[str]) -> Optional[str]:
  
 
 
-def _analytics_increment_country(form_id: str, country_iso2: Optional[str], submitted_at_iso: str) -> None:
+async def _analytics_increment_country(session, form_id: str, country_iso2: Optional[str], submitted_at_iso: str) -> None:
+    """Increment Neon-backed per-day country counters.
+    Uses INSERT ... ON CONFLICT to atomically increment the counter.
+    """
     if not country_iso2:
         return
     try:
         iso = str(country_iso2 or "").strip().upper()
         if not iso:
             return
-        day_key = (submitted_at_iso or "").strip()
+        # Derive day (UTC) from submitted_at_iso
+        s = (submitted_at_iso or "").strip()
         try:
-            if day_key.endswith("Z"):
-                day_key = day_key[:-1] + "+00:00"
-            dt = datetime.fromisoformat(day_key)
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
             day_key = dt.date().isoformat()
         except Exception:
             day_key = (submitted_at_iso or "")[:10]
-        data = _load_analytics_countries(form_id)
-        total = data.get("total") or {}
-        daily = data.get("daily") or {}
-        total[iso] = int(total.get(iso, 0)) + 1
-        day_bucket = daily.get(day_key) or {}
-        day_bucket[iso] = int(day_bucket.get(iso, 0)) + 1
-        daily[day_key] = day_bucket
-        data["total"] = total
-        data["daily"] = daily
-        data["updatedAt"] = datetime.utcnow().isoformat()
-        _save_analytics_countries(form_id, data)
+        await session.execute(
+            text(
+                """
+                INSERT INTO form_countries_analytics (form_id, day, country_iso2, count)
+                VALUES (:fid, :day, :iso, 1)
+                ON CONFLICT (form_id, day, country_iso2)
+                DO UPDATE SET count = form_countries_analytics.count + 1
+                """
+            ),
+            {"fid": form_id, "day": day_key, "iso": iso},
+        )
     except Exception:
         logger.exception("analytics countries increment error form_id=%s", form_id)
 
@@ -339,6 +343,26 @@ def _write_json(path: str, data: Dict):
 def _read_json(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# Temporary stubs for countries analytics storage (migrated away from filesystem)
+def _load_analytics_countries(form_id: str) -> Dict[str, Any]:
+    """Return countries analytics structure for a form.
+    Structure: { "total": {ISO2: count}, "daily": {YYYY-MM-DD: {ISO2: count}}, "updatedAt": iso }
+    Currently returns an empty structure as a safe default. Neon-backed implementation TODO.
+    """
+    try:
+        return {"total": {}, "daily": {}, "updatedAt": datetime.utcnow().isoformat()}
+    except Exception:
+        return {"total": {}, "daily": {}}
+
+
+def _save_analytics_countries(form_id: str, data: Dict[str, Any]) -> None:
+    """Persist countries analytics. No-op placeholder while migrating to Neon."""
+    try:
+        return None
+    except Exception:
+        return None
 
 
 # Models aligned with the front-end builder
@@ -1671,13 +1695,46 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
     If subject/html are omitted, falls back to form auto-reply config.
     """
     payload = payload or {}
-    to_raw = str(payload.get("to") or "").strip()
+    # Accept several ways to specify recipient
+    to_raw = str(payload.get("to") or payload.get("email") or "").strip()
     subject = str(payload.get("subject") or "").strip()
     html = str(payload.get("html") or "").strip()
     text_fallback = str(payload.get("text") or "").strip()
+    values = payload.get("values") if isinstance(payload.get("values"), dict) else None
+    field_id = str(payload.get("fieldId") or "").strip()
 
+    # If direct recipient not provided, try to derive from submission values using fieldId or form config
     if not to_raw:
-        raise HTTPException(status_code=400, detail="Missing recipient 'to'")
+        try:
+            if values and (field_id and field_id in values):
+                cand = values.get(field_id)
+                if isinstance(cand, list):
+                    cand = cand[0] if cand else ""
+                to_raw = str(cand or "").strip()
+            if not to_raw and values:
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text(
+                            """
+                            SELECT auto_reply_email_field_id
+                            FROM forms
+                            WHERE id = :fid
+                            LIMIT 1
+                            """
+                        ),
+                        {"fid": form_id},
+                    )
+                    row = res.mappings().first()
+                    auto_field = (row or {}).get("auto_reply_email_field_id")
+                    if auto_field and auto_field in values:
+                        cand = values.get(auto_field)
+                        if isinstance(cand, list):
+                            cand = cand[0] if cand else ""
+                        to_raw = str(cand or "").strip()
+        except Exception:
+            pass
+    if not to_raw:
+        raise HTTPException(status_code=400, detail="Missing recipient. Provide 'to' or 'email', or include { values, fieldId } or configure auto-reply email field on the form.")
     # Validate email format
     try:
         _validate_email(to_raw, allow_smtputf8=True)
@@ -3189,6 +3246,70 @@ async def list_responses(
 # -----------------------------
 # Supabase-backed: Analytics events, Notifications, Abandons
 # -----------------------------
+
+@router.get("/forms/{form_id}/analytics/countries")
+async def analytics_countries(form_id: str, from_ts: Optional[str] = Query(default=None, alias="from"), to_ts: Optional[str] = Query(default=None, alias="to")):
+    """Aggregate country counts for a form from Neon.
+    Optional query params:
+      - from: ISO datetime or YYYY-MM-DD (inclusive)
+      - to: ISO datetime or YYYY-MM-DD (inclusive)
+    Returns: { countries: { ISO2: count } }
+    """
+    def _to_date(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        try:
+            x = str(s).strip()
+            if x.endswith("Z"):
+                x = x[:-1] + "+00:00"
+            dt = datetime.fromisoformat(x)
+            return dt
+        except Exception:
+            try:
+                return datetime.fromisoformat(str(s)[:10] + "T00:00:00+00:00")
+            except Exception:
+                return None
+
+    start = _to_date(from_ts)
+    end = _to_date(to_ts)
+    async with async_session_maker() as session:
+        if start is None and end is None:
+            sql = text(
+                """
+                SELECT country_iso2, SUM(count) AS cnt
+                FROM form_countries_analytics
+                WHERE form_id = :fid
+                GROUP BY country_iso2
+                ORDER BY cnt DESC
+                """
+            )
+            params = {"fid": form_id}
+        else:
+            sql = text(
+                """
+                SELECT country_iso2, SUM(count) AS cnt
+                FROM form_countries_analytics
+                WHERE form_id = :fid
+                  AND (:start::date IS NULL OR day >= :start::date)
+                  AND (:end::date   IS NULL OR day <= :end::date)
+                GROUP BY country_iso2
+                ORDER BY cnt DESC
+                """
+            )
+            params = {"fid": form_id, "start": (start.date().isoformat() if start else None), "end": (end.date().isoformat() if end else None)}
+
+        res = await session.execute(sql, params)
+        rows = res.mappings().all()
+        agg: Dict[str, int] = {}
+        for r in rows:
+            try:
+                iso = str(r.get("country_iso2") or "").upper()
+                cnt = int(r.get("cnt") or 0)
+                if iso:
+                    agg[iso] = cnt
+            except Exception:
+                continue
+        return {"countries": agg}
 
 # Supabase configuration (REST/PostgREST)
 SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_REST_URL") or ""

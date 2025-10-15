@@ -503,6 +503,65 @@ class RedirectConfig(BaseModel):
     url: Optional[str] = None
 
 
+class FieldSchema(BaseModel):
+    # Common core props
+    id: Optional[str] = None
+    label: str = "Untitled"
+    type: str = "text"
+    required: bool = False
+    placeholder: Optional[str] = None
+
+    # Choice fields
+    options: Optional[List[str]] = None
+    maxSelections: Optional[int] = None
+
+    # Step (for multi-step forms)
+    step: Optional[int] = None
+
+    # Text constraints
+    maxLength: Optional[int] = None
+
+    # File upload constraints
+    accept: Optional[str] = None
+    multiple: Optional[bool] = None
+
+    # Phone input
+    phoneAllowedCountry: Optional[str] = None
+
+    # Price input
+    currency: Optional[str] = None
+    minPrice: Optional[float] = None
+    maxPrice: Optional[float] = None
+
+    # Rating inputs
+    max: Optional[int] = None
+    emojiLabels: Optional[List[str]] = None
+
+    # Linear scale
+    minScale: Optional[int] = None
+    maxScale: Optional[int] = None
+    lowLabel: Optional[str] = None
+    highLabel: Optional[str] = None
+
+    # Password config
+    passwordMinLength: Optional[int] = None
+    passwordRequireUppercase: Optional[bool] = None
+    passwordRequireLowercase: Optional[bool] = None
+    passwordRequireNumber: Optional[bool] = None
+    passwordRequireSpecial: Optional[bool] = None
+
+    # Full-name config
+    fullNameRequireTwoWords: Optional[bool] = None
+    fullNameDisplayMode: Optional[str] = None  # 'single' | 'split'
+    firstNameLabel: Optional[str] = None
+    lastNameLabel: Optional[str] = None
+    firstNamePlaceholder: Optional[str] = None
+    lastNamePlaceholder: Optional[str] = None
+
+    # Media display (non-interactive)
+    mediaUrl: Optional[str] = None
+    caption: Optional[str] = None
+
 class FormConfig(BaseModel):
     id: Optional[str] = None
     userId: Optional[str] = None

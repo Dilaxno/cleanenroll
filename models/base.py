@@ -68,7 +68,7 @@ class FormModel(BaseDBModel):
     views: int = 0
     submissions: int = 0
     submission_limit: int = 0
-    fields: Dict[str, Any] = Field(default_factory=dict)
+    fields: Union[Dict[str, Any], List[Any]] = Field(default_factory=dict)
     theme: Dict[str, Any] = Field(default_factory=dict)
     branding: Dict[str, Any] = Field(default_factory=dict)
     allowed_domains: List[str] = Field(default_factory=list)
@@ -86,13 +86,32 @@ class FormModel(BaseDBModel):
     
     @field_validator('allowed_domains')
     def validate_domains(cls, v):
-        """Validate domain format"""
+        """Validate domain or IP format"""
         if isinstance(v, list):
             result = []
-            for item in v:
-                if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$', item):
-                    raise ValueError(f'Invalid domain format: {item}')
-                result.append(item.lower())  # Normalize to lowercase
+            for raw in v:
+                item = (raw or "").strip().lower()
+                if not item:
+                    continue
+                # Allow localhost and common localhost domain
+                if item in ("localhost", "localhost.localdomain"):
+                    result.append("localhost")
+                    continue
+                # Allow IPv4 addresses
+                if re.fullmatch(r'(?:\d{1,3}\.){3}\d{1,3}', item):
+                    try:
+                        parts = [int(p) for p in item.split('.')]
+                        if all(0 <= p <= 255 for p in parts):
+                            result.append(item)
+                            continue
+                        else:
+                            raise ValueError
+                    except Exception:
+                        raise ValueError(f'Invalid IPv4 address: {raw}')
+                # Standard domain pattern (labels 1-63 chars, letters/digits/hyphens, at least one dot)
+                if not re.fullmatch(r'[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+', item):
+                    raise ValueError(f'Invalid domain format: {raw}')
+                result.append(item)
             return result
         return v
 

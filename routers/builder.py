@@ -1549,7 +1549,7 @@ router = APIRouter(prefix="/api/builder", tags=["builder"])
 # Public endpoint to fetch Geoapify API key from server env for the frontend
 @router.get("/geoapify/key")
 @limiter.limit("120/minute")
-async def get_geoapify_key():
+async def get_geoapify_key(request: Request):
     """Return the Geoapify API key from backend environment.
     The frontend uses this to call Geoapify directly from the client.
     """

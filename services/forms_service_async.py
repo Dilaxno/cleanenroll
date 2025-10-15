@@ -98,8 +98,8 @@ class AsyncFormsService:
         Raises:
             HTTPException: If validation fails
         """
-        # Generate UUID for the form
-        if 'id' not in form_data:
+        # Generate UUID for the form (handle missing or null/empty id)
+        if not form_data.get('id'):
             form_data['id'] = str(uuid.uuid4())
             
         # Check if name already exists for this user

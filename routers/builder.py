@@ -2230,7 +2230,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         meta = {"status": "signed", "value": str(val)}
                         signatures[fid] = meta
                     except Exception:
-                    continue
+                        continue
             # Build a small ZIP manifest of file URLs (best-effort)
             files_zip_meta = None
             try:

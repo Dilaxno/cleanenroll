@@ -172,6 +172,33 @@ class AsyncFormsService:
         for json_field in ['fields', 'theme', 'branding', 'allowed_domains']:
             if json_field in validated_data and not isinstance(validated_data[json_field], str):
                 validated_data[json_field] = json.dumps(validated_data[json_field])
+
+        # Idempotency: if a key is provided, acquire an advisory transaction lock and check for an existing row
+        ikey = validated_data.get('idempotency_key')
+        if ikey:
+            try:
+                # Serialize concurrent creates with the same idempotency key
+                await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": str(ikey)})
+                # Return existing row when present (no duplicate insert)
+                existing = await session.execute(
+                    text("""
+                        SELECT * FROM forms
+                        WHERE idempotency_key = :k AND user_id = :uid
+                        LIMIT 1
+                    """),
+                    {"k": str(ikey), "uid": str(user_id)}
+                )
+                row = existing.mappings().first()
+                if row:
+                    # Release the lock early by rolling back this read-only txn (no writes yet)
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    return dict(row)
+            except Exception:
+                # On lock/lookup issues, fall through to normal insert
+                pass
         
         # Build the query dynamically based on the validated data
         columns = ', '.join(validated_data.keys())
@@ -186,7 +213,7 @@ class AsyncFormsService:
         result = await session.execute(query, validated_data)
         await session.commit()
         
-        # Update user's forms count
+        # Update user's forms count only on successful insert
         await AsyncFormsService.increment_user_forms_count(session, user_id)
         
         # Return the created form

@@ -1564,7 +1564,7 @@ except Exception:
     from utils.limiter import limiter  # type: ignore
     from db.database import async_session_maker  # type: ignore
 
-router = APIRouter(prefix="/api/integrations/airtable", tags=["airtable"])
+router = APIRouter(prefix="/api/builder", tags=["builder"])
 
 @router.get("/user/plan")
 @limiter.limit("120/minute")

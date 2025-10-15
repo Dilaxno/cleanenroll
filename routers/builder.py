@@ -1565,8 +1565,26 @@ async def public_get_form(form_id: str):
             row = res.mappings().first()
             if not row or not bool(row.get("is_published")):
                 raise HTTPException(status_code=404, detail="Form not found")
-            # Return the form row as JSON
-            return dict(row)
+            # Enrich response with subtitle alias and submitButton defaults
+            data = dict(row)
+            try:
+                if not data.get("subtitle") and data.get("description"):
+                    data["subtitle"] = data.get("description")
+            except Exception:
+                pass
+            try:
+                theme = data.get("theme") or {}
+                btn = (data.get("submitButton") or theme.get("submitButton") or {})
+                primary = (theme.get("primaryColor") if isinstance(theme, dict) else None) or "#4f46e5"
+                data["submitButton"] = {
+                    "label": (btn.get("label") if isinstance(btn, dict) else None) or "Submit",
+                    "color": (btn.get("color") if isinstance(btn, dict) else None) or primary,
+                    "textColor": (btn.get("textColor") if isinstance(btn, dict) else None) or "#ffffff",
+                }
+            except Exception:
+                # Best-effort; leave as-is on error
+                pass
+            return data
     except HTTPException:
         raise
     except Exception:
@@ -1697,6 +1715,114 @@ async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = 
     except Exception as e:
         logger.exception("save_smtp_settings failed uid=%s", userId)
         raise HTTPException(status_code=500, detail="Failed to save SMTP settings")
+
+# -----------------------------
+# Upload presign endpoints for R2 + theme updates persisted to Neon
+# -----------------------------
+
+def _ext_from_name_and_type(filename: Optional[str], content_type: Optional[str]) -> str:
+    try:
+        name = str(filename or '').lower()
+        if name.endswith('.png'): return '.png'
+        if name.endswith('.jpg') or name.endswith('.jpeg'): return '.jpg'
+        if name.endswith('.webp'): return '.webp'
+        if name.endswith('.gif'): return '.gif'
+        ct = str(content_type or '').lower()
+        if 'png' in ct: return '.png'
+        if 'jpeg' in ct or 'jpg' in ct: return '.jpg'
+        if 'webp' in ct: return '.webp'
+        if 'gif' in ct: return '.gif'
+        return '.png'
+    except Exception:
+        return '.png'
+
+@router.post("/uploads/form-bg/presign")
+@limiter.limit("30/minute")
+async def presign_form_bg(request: Request, payload: Dict[str, Any] | None = None):
+    """Create a presigned URL to upload a page background image to R2 and return its public URL."""
+    payload = payload or {}
+    filename = str(payload.get('filename') or 'background.png')
+    content_type = str(payload.get('contentType') or 'image/png')
+    ext = _ext_from_name_and_type(filename, content_type)
+    key = f"backgrounds/{uuid.uuid4().hex}{ext}"
+    try:
+        s3 = _r2_client()
+        params = {"Bucket": R2_BUCKET, "Key": key, "ContentType": content_type}
+        upload_url = s3.generate_presigned_url('put_object', Params=params, ExpiresIn=900)
+        public_url = _public_url_for_key(key)
+        return {"uploadUrl": upload_url, "publicUrl": public_url, "headers": {"Content-Type": content_type}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("presign_form_bg failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create upload URL")
+
+@router.post("/uploads/media/presign")
+@limiter.limit("30/minute")
+async def presign_media(request: Request, payload: Dict[str, Any] | None = None):
+    """Create a presigned URL to upload a media asset (image/video) and return its public URL."""
+    payload = payload or {}
+    filename = str(payload.get('filename') or 'media.bin')
+    content_type = str(payload.get('contentType') or 'application/octet-stream')
+    kind = (payload.get('kind') or '').strip().lower()
+    folder = 'media/images' if kind == 'image' else ('media/videos' if kind == 'video' else 'media/files')
+    ext = _ext_from_name_and_type(filename, content_type)
+    key = f"{folder}/{uuid.uuid4().hex}{ext}"
+    try:
+        s3 = _r2_client()
+        params = {"Bucket": R2_BUCKET, "Key": key, "ContentType": content_type}
+        upload_url = s3.generate_presigned_url('put_object', Params=params, ExpiresIn=900)
+        public_url = _public_url_for_key(key)
+        return {"uploadUrl": upload_url, "publicUrl": public_url, "headers": {"Content-Type": content_type}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("presign_media failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create upload URL")
+
+@router.post("/forms/{form_id}/theme/page-bg")
+@limiter.limit("120/minute")
+async def update_theme_page_bg(form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist page background image URL to Neon forms.theme.pageBackgroundImage."""
+    url = str((payload or {}).get('publicUrl') or (payload or {}).get('url') or '').strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing publicUrl")
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{pageBackgroundImage}', to_jsonb(:url::text), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "url": url}
+        )
+        await session.commit()
+    return {"ok": True, "publicUrl": url}
+
+@router.post("/forms/{form_id}/theme/split-image")
+@limiter.limit("120/minute")
+async def update_theme_split_image(form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist split view image URL to Neon forms.theme.splitImageUrl."""
+    url = str((payload or {}).get('publicUrl') or (payload or {}).get('url') or '').strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing publicUrl")
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{splitImageUrl}', to_jsonb(:url::text), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "url": url}
+        )
+        await session.commit()
+    return {"ok": True, "publicUrl": url}
 
 @router.post("/forms/{form_id}/submit")
 @limiter.limit("5/minute")

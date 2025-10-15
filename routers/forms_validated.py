@@ -97,3 +97,18 @@ async def update_form(
         )
         
     return form
+
+@router.delete("/{form_id}")
+async def delete_form(
+    form_id: str,
+    user_id: str,
+    session: AsyncSession = Depends(get_session)
+):
+    """Permanently delete a form owned by user_id from Neon (PostgreSQL)."""
+    ok = await AsyncFormsService.delete_form(session, form_id, user_id)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Form not found or you don't have permission to delete it"
+        )
+    return {"success": True}

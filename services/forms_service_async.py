@@ -80,8 +80,47 @@ class AsyncFormsService:
             SET forms_count = forms_count + 1 
             WHERE uid = :user_id
         """)
-        
         await session.execute(query, {"user_id": user_id})
+
+    @staticmethod
+    async def decrement_user_forms_count(session: AsyncSession, user_id: str) -> None:
+        """Decrement the user's forms count (never below zero)"""
+        query = text("""
+            UPDATE users 
+            SET forms_count = GREATEST(forms_count - 1, 0)
+            WHERE uid = :user_id
+        """)
+        await session.execute(query, {"user_id": user_id})
+
+    @staticmethod
+    async def delete_form(session: AsyncSession, form_id: str, user_id: str) -> bool:
+        """Delete a form owned by user_id and cascade related data via FK. Returns True if deleted."""
+        # Verify exists and ownership
+        existing = await AsyncFormsService.get_form_by_id(session, form_id, user_id)
+        if not existing:
+            return False
+        # Delete the form and decrement user's forms_count in a single transaction
+        try:
+            res = await session.execute(text(
+                """
+                DELETE FROM forms 
+                WHERE id = :form_id AND user_id = :user_id
+                RETURNING id
+                """
+            ), {"form_id": form_id, "user_id": user_id})
+            row = res.mappings().first()
+            if not row:
+                await session.rollback()
+                return False
+            await AsyncFormsService.decrement_user_forms_count(session, user_id)
+            await session.commit()
+            return True
+        except Exception:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            return False
     
     @staticmethod
     async def create_form(session: AsyncSession, form_data: Dict[str, Any]) -> Dict[str, Any]:

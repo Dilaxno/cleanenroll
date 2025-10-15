@@ -1620,7 +1620,7 @@ async def _ensure_email_integrations_table(session):
 
 @router.get("/email/integration/status")
 @limiter.limit("120/minute")
-async def get_email_integration_status(userId: Optional[str] = Query(default=None)):
+async def get_email_integration_status(request: Request, userId: Optional[str] = Query(default=None)):
     """Return email integration status for a user from Neon.
     Response: { google: bool, microsoft: bool, smtp: bool }
     """
@@ -1630,6 +1630,7 @@ async def get_email_integration_status(userId: Optional[str] = Query(default=Non
             return {"google": False, "microsoft": False, "smtp": False}
         async with async_session_maker() as session:
             await _ensure_email_integrations_table(session)
+            await session.commit()
             res = await session.execute(
                 text("""
                     SELECT google_connected, microsoft_connected, smtp_enabled
@@ -1653,7 +1654,7 @@ async def get_email_integration_status(userId: Optional[str] = Query(default=Non
 
 @router.post("/email/smtp/save")
 @limiter.limit("30/minute")
-async def save_smtp_settings(payload: Dict[str, Any] | None = None, userId: Optional[str] = Query(default=None)):
+async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = None, userId: Optional[str] = Query(default=None)):
     """Save SMTP settings status for a user in Neon and mark SMTP as enabled.
     Expects JSON body: { host, port, username, password } (password not persisted).
     Returns: { success: true }
@@ -1689,6 +1690,7 @@ async def save_smtp_settings(payload: Dict[str, Any] | None = None, userId: Opti
                 ),
                 {"uid": userId, "host": host, "port": port, "username": username}
             )
+            await session.commit()
             return {"success": True}
     except HTTPException:
         raise

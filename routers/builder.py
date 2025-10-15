@@ -1952,6 +1952,64 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
         await session.commit()
     return {"ok": True, "submitButton": submit_button}
 
+@router.post("/forms/{form_id}/auto-reply/config")
+@limiter.limit("60/minute")
+async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[str, Any] | None = None):
+    """Update auto-reply configuration on a form.
+    Body: { enabled?: bool, emailFieldId?: string, subject?: string, messageHtml?: string }
+    Requires Firebase auth and form ownership.
+    """
+    # Auth
+    try:
+        uid = _verify_firebase_uid(request)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    payload = payload or {}
+    enabled = payload.get("enabled")
+    email_field_id = payload.get("emailFieldId")
+    subject = payload.get("subject")
+    message_html = payload.get("messageHtml")
+
+    sets = []
+    params: Dict[str, Any] = {"fid": form_id}
+    if isinstance(enabled, bool):
+        sets.append("auto_reply_enabled = :enabled")
+        params["enabled"] = enabled
+    if isinstance(email_field_id, str):
+        sets.append("auto_reply_email_field_id = :efid")
+        params["efid"] = email_field_id.strip()
+    if isinstance(subject, str):
+        sets.append("auto_reply_subject = :subj")
+        params["subj"] = subject.strip()
+    if isinstance(message_html, str):
+        sets.append("auto_reply_message_html = :html")
+        params["html"] = message_html
+    if not sets:
+        return {"success": True, "updated": 0}
+
+    async with async_session_maker() as session:
+        # Ownership check
+        res = await session.execute(
+            text("SELECT user_id, owner_id FROM forms WHERE id = :fid LIMIT 1"),
+            {"fid": form_id},
+        )
+        row = res.mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Form not found")
+        form_user = (row.get("user_id") or "").strip()
+        form_owner = (row.get("owner_id") or "").strip()
+        if uid not in (form_user, form_owner):
+            if form_user or form_owner:
+                raise HTTPException(status_code=403, detail="Forbidden")
+
+        set_sql = ", ".join(sets) + ", updated_at = NOW()"
+        await session.execute(
+            text(f"UPDATE forms SET {set_sql} WHERE id = :fid"),
+            params,
+        )
+        await session.commit()
+        return {"success": True, "updated": 1}
+
 async def _ensure_submissions_indexes(session):
     """Create helpful indexes for submissions table if missing (best-effort)."""
     try:

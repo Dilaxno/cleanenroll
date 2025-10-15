@@ -21,6 +21,7 @@ from botocore.client import Config as BotoConfig
 import socket
 import threading
 import time
+from sqlalchemy import text
 # Optional URL shortener
 try:
     import pyshorteners  # type: ignore
@@ -489,91 +490,6 @@ class ThemeSchema(BaseModel):
     splitImageFit: Literal["cover", "contain"] = "cover"
     splitImageWidthPercent: int = Field(default=50, ge=20, le=80)
     splitImageBgColor: Optional[str] = None
-
-
-class RedirectConfig(BaseModel):
-    enabled: bool = False
-    url: str = ""
-
-
-class FieldSchema(BaseModel):
-    id: str
-    label: str
-    type: Literal[
-        "text",
-        "textarea",
-        "number",
-        "checkbox",
-        "dropdown",
-        "multiple",
-        "date",
-        "age",
-        "location",
-        "address",
-        "url",
-        "email",
-        "file",
-        # Extended input types (supported server-side)
-        "price",
-        "phone",
-        "full-name",
-        "password",
-        "time",
-        "count",
-        "linear-scale",
-        # Media display (non-interactive)
-        "image",
-        "video",
-        "audio",
-        "signature",
-    ]
-    required: bool = False
-    placeholder: Optional[str] = None
-    options: Optional[List[str]] = None
-    step: Optional[int] = Field(default=1, ge=1)
-    maxLength: Optional[int] = Field(default=None, gt=0)
-    accept: Optional[str] = None
-    multiple: Optional[bool] = None
-    # Media-specific configuration
-    mediaUrl: Optional[str] = None
-    poster: Optional[str] = None  # video thumbnail
-    caption: Optional[str] = None
-    autoplay: Optional[bool] = None
-    loop: Optional[bool] = None
-    controls: Optional[bool] = None
-    muted: Optional[bool] = None
-    # Validation options for special field types
-    # Full name
-    fullNameRequireTwoWords: Optional[bool] = True
-    # Password strength
-    passwordMinLength: Optional[int] = 8
-    passwordRequireUppercase: Optional[bool] = True
-    passwordRequireLowercase: Optional[bool] = True
-    passwordRequireNumber: Optional[bool] = True
-    passwordRequireSpecial: Optional[bool] = False
-    # Time field options (HTML5 time input)
-    minTime: Optional[str] = None  # "HH:MM" or "HH:MM:SS"
-    maxTime: Optional[str] = None  # "HH:MM" or "HH:MM:SS"
-    timeStep: Optional[int] = None  # seconds granularity
-    # Count field options
-    minCount: Optional[int] = None
-    maxCount: Optional[int] = None
-    allowCustomCount: Optional[bool] = None
-    # Linear scale options
-    minScale: Optional[int] = None  # default 1
-    maxScale: Optional[int] = None  # default 5
-    lowLabel: Optional[str] = None
-    highLabel: Optional[str] = None
-
-    @validator("options", always=True)
-    def normalize_options(cls, v, values):
-        # Ensure options for dropdown/multiple when present
-        ftype = values.get("type")
-        if ftype in ("dropdown", "multiple"):
-            if not v or len([o for o in (v or []) if str(o).strip()]) == 0:
-                # allow empty here; validation performed at form level to provide better error message
-                return []
-        return v
 
 
 class HeadingStyle(BaseModel):
@@ -1565,6 +1481,33 @@ except Exception:
     from db.database import async_session_maker  # type: ignore
 
 router = APIRouter(prefix="/api/builder", tags=["builder"])
+
+@router.get("/forms/{form_id}")
+async def public_get_form(form_id: str):
+    """
+    Public endpoint to get a published form by ID from Neon (PostgreSQL).
+    Returns 404 only when the form does not exist or is not published.
+    """
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text("""
+                    SELECT * FROM forms
+                    WHERE id = :fid
+                    LIMIT 1
+                """),
+                {"fid": form_id}
+            )
+            row = res.mappings().first()
+            if not row or not bool(row.get("is_published")):
+                raise HTTPException(status_code=404, detail="Form not found")
+            # Return the form row as JSON
+            return dict(row)
+    except HTTPException:
+        raise
+    except Exception:
+        # Avoid leaking internals; treat as not found for public endpoint
+        raise HTTPException(status_code=404, detail="Form not found")
 
 @router.get("/user/plan")
 @limiter.limit("120/minute")

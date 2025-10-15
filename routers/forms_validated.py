@@ -25,10 +25,10 @@ async def get_forms(
 @router.get("/{form_id}")
 async def get_form(
     form_id: str,
-    user_id: str = None,
+    user_id: str,
     session: AsyncSession = Depends(get_session)
 ):
-    """Get a form by ID"""
+    """Get a form by ID (must belong to the provided user_id)."""
     form = await AsyncFormsService.get_form_by_id(session, form_id, user_id)
     if not form:
         raise HTTPException(
@@ -40,6 +40,7 @@ async def get_form(
 @router.post("/")
 async def create_form(
     form_data: FormModel,
+    user_id: str | None = None,
     session: AsyncSession = Depends(get_session)
 ):
     """
@@ -52,6 +53,11 @@ async def create_form(
     """
     # Convert Pydantic model to dict
     form_dict = form_data.model_dump()
+    # Enforce user ownership from query when provided; require user_id overall
+    if user_id:
+        form_dict["user_id"] = user_id
+    if not form_dict.get("user_id"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing user_id")
     
     # Create form with validation
     form = await AsyncFormsService.create_form(session, form_dict)

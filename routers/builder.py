@@ -1836,6 +1836,37 @@ async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str
         await session.commit()
     return {"ok": True, "publicUrl": url}
 
+async def _ensure_submissions_indexes(session):
+    """Create helpful indexes for submissions table if missing (best-effort)."""
+    try:
+        await session.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_submissions_owner_month
+            ON submissions (form_owner_id, submitted_at);
+            """
+        ))
+    except Exception:
+        pass
+    try:
+        await session.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_submissions_form_date
+            ON submissions (form_id, submitted_at);
+            """
+        ))
+    except Exception:
+        pass
+    try:
+        await session.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_submissions_form_ip_date
+            ON submissions (form_id, ip_address, submitted_at);
+            """
+        ))
+    except Exception:
+        pass
+
+
 @router.post("/forms/{form_id}/theme/split-image")
 @limiter.limit("120/minute")
 async def update_theme_split_image(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
@@ -1864,13 +1895,40 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     """Simple submission endpoint that enforces country restrictions.
     On success returns {success: True, message, redirectUrl?}.
     """
-    path = _form_path(form_id)
-    if not os.path.exists(path):
+    # Load the form from Neon (PostgreSQL); require that it's published
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text(
+                    """
+                    SELECT * FROM forms
+                    WHERE id = :fid
+                    LIMIT 1
+                    """
+                ),
+                {"fid": form_id},
+            )
+            row = res.mappings().first()
+        if not row or not bool(row.get("is_published")):
+            raise HTTPException(status_code=404, detail="Form not found")
+        form_data = dict(row)
+        # Normalize JSON fields that may be stored as text
+        for k in ("fields", "theme", "branding"):
+            v = form_data.get(k)
+            if isinstance(v, str):
+                try:
+                    form_data[k] = json.loads(v)
+                except Exception:
+                    form_data[k] = {}
+            elif not isinstance(v, dict):
+                form_data[k] = {}
+    except HTTPException:
+        raise
+    except Exception:
+        # Avoid leaking internals; treat as not found for public submission
         raise HTTPException(status_code=404, detail="Form not found")
 
-    form_data = _read_json(path)
-
-    # Submission limit enforcement (file-backed count)
+    # Submission limit enforcement (Neon-backed counts)
     try:
         limit_raw = form_data.get("submissionLimit")
         limit = int(limit_raw) if limit_raw is not None else 0
@@ -1879,8 +1937,20 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         try:
             owner_id = str(form_data.get("userId") or "").strip() or None
             if owner_id and not _is_pro_plan(owner_id):
-                mk = _month_key()
-                month_count = _load_month_count(owner_id, mk)
+                # Count current month's submissions for this owner in Neon
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text(
+                            """
+                            SELECT COUNT(*) AS cnt
+                            FROM submissions
+                            WHERE form_owner_id = :uid
+                              AND submitted_at >= date_trunc('month', NOW())
+                            """
+                        ),
+                        {"uid": owner_id},
+                    )
+                    month_count = int((res.mappings().first() or {}).get("cnt") or 0)
                 if month_count >= FREE_MONTHLY_SUBMISSION_LIMIT:
                     raise HTTPException(status_code=429, detail=f"Monthly submission limit reached ({FREE_MONTHLY_SUBMISSION_LIMIT}). Please try again next month or upgrade your plan.")
         except HTTPException:
@@ -1889,10 +1959,19 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             # Do not fail submission on unexpected error here
             pass
         if limit and limit > 0:
-            dir_path = _responses_dir(form_id)
-            current = 0
-            if os.path.exists(dir_path):
-                current = sum(1 for n in os.listdir(dir_path) if n.endswith('.json'))
+            # Count total submissions for this form in Neon
+            async with async_session_maker() as session:
+                res = await session.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM submissions
+                        WHERE form_id = :fid
+                        """
+                    ),
+                    {"fid": form_id},
+                )
+                current = int((res.mappings().first() or {}).get("cnt") or 0)
             if current >= limit:
                 raise HTTPException(status_code=429, detail="I'm sorry, we've reached the capacity limit, we cannot accept new submissions at this moment")
     except HTTPException:
@@ -1976,7 +2055,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         # Do not fail submission on unexpected server error here
         pass
 
-    # Duplicate submission check by IP within a time window
+    # Duplicate submission check by IP within a time window (Neon-backed)
     if bool(form_data.get("preventDuplicateByIP")):
         try:
             window_hours = int(form_data.get("duplicateWindowHours") or 24)
@@ -1985,27 +2064,24 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         try:
             from datetime import timedelta
             threshold = datetime.utcnow() - timedelta(hours=max(1, window_hours))
-            # Ensure IP is available
             ip = ip or _client_ip(request)
             if ip:
-                dir_path = _responses_dir(form_id)
-                if os.path.exists(dir_path):
-                    for name in os.listdir(dir_path):
-                        if not name.endswith(".json"):
-                            continue
-                        fpath = os.path.join(dir_path, name)
-                        try:
-                            rec = _read_json(fpath)
-                            rec_ip = rec.get("clientIp") or rec.get("ip") or None
-                            ts = rec.get("submittedAt") or ""
-                            if rec_ip == ip:
-                                dt = datetime.fromisoformat(ts)
-                                if dt >= threshold:
-                                    raise HTTPException(status_code=429, detail="Duplicate submission detected from this IP. Please try again later.")
-                        except HTTPException:
-                            raise
-                        except Exception:
-                            continue
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text(
+                            """
+                            SELECT 1
+                            FROM submissions
+                            WHERE form_id = :fid
+                              AND ip_address = :ip
+                              AND submitted_at >= :th
+                            LIMIT 1
+                            """
+                        ),
+                        {"fid": form_id, "ip": ip, "th": threshold},
+                    )
+                    if res.first() is not None:
+                        raise HTTPException(status_code=429, detail="Duplicate submission detected from this IP. Please try again later.")
         except HTTPException:
             raise
         except Exception:
@@ -2157,7 +2233,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     if redir.get("enabled") and redir.get("url"):
         resp["redirectUrl"] = redir.get("url")
 
-    # Persist submission (store answers separately from form schema)
+    # Persist submission in Neon (store answers and metadata)
     try:
         submitted_at = datetime.utcnow().isoformat()
         response_id = uuid.uuid4().hex
@@ -2248,57 +2324,11 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     try:
                         meta = {"status": "signed", "value": str(val)}
                         signatures[fid] = meta
-                        answers[fid] = meta
                     except Exception:
-                        answers[fid] = str(val)
-            elif val is not None:
-                answers[fid] = val
-        # Build a downloadable ZIP archive of uploaded files (best-effort)
-        files_zip_meta = None
-        try:
-            file_entries = []  # list of tuples (fid, label, url)
-            for f in fields_def:
-                try:
-                    if str((f.get("type") or "")).strip().lower() != "file":
                         continue
-                    fid = str(f.get("id"))
-                    label = str(f.get("label") or "")
-                except Exception:
-                    continue
-                av = answers.get(fid)
-                if isinstance(av, list):
-                    for u in av:
-                        if isinstance(u, str) and (u.startswith("http://") or u.startswith("https://")):
-                            file_entries.append((fid, label, u))
-                elif isinstance(av, str) and (av.startswith("http://") or av.startswith("https://")):
-                    file_entries.append((fid, label, av))
-            if file_entries:
-                max_total_bytes = 200 * 1024 * 1024  # 200MB safety cap
-                total = 0
-                added = 0
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for idx, (fid, label, url) in enumerate(file_entries):
-                        try:
-                            r = requests.get(url, timeout=15)
-                            if not r.ok:
-                                continue
-                            content = r.content or b""
-                            total += len(content)
-                            if total > max_total_bytes:
-                                break
-                            # Derive a sensible filename
-                            try:
-                                from urllib.parse import urlparse
-                                bn = os.path.basename(urlparse(url).path) or f"file_{idx}"
-                            except Exception:
-                                bn = f"file_{idx}"
-                            base_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", (label or "").strip())[:60] or fid[:12]
-                            arcname = f"{base_label}/{bn}"
-                            zf.writestr(arcname, content)
-                            added += 1
-                        except Exception:
-                            continue
+            if added > 0:
+                data_bytes = buf.getvalue()
+                key = f"submissions/{form_id}/{response_id}_files.zip"
                 if added > 0:
                     data_bytes = buf.getvalue()
                     key = f"submissions/{form_id}/{response_id}_files.zip"
@@ -2352,27 +2382,34 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             ua = request.headers.get("user-agent") if isinstance(request, Request) else None
             if owner_id:
                 async with async_session_maker() as session:
-                    # submissions
-                    try:
-                        await session.execute(
+                    # Ensure indexes exist (best-effort, harmless if they already do)
+                    await _ensure_submissions_indexes(session)
+                    await session.execute(
+                        text(
                             """
-                            INSERT INTO submissions (id, form_id, form_owner_id, data, metadata, ip_address, country_code, user_agent)
-                            VALUES (:id, :form_id, :owner_id, :data, :metadata, :ip, :country, :ua)
-                            ON CONFLICT (id) DO NOTHING
-                            """,
-                            {
-                                "id": response_id,
-                                "form_id": form_id,
-                                "owner_id": owner_id,
-                                "data": json.dumps(answers or {}),
-                                "metadata": json.dumps(meta),
-                                "ip": ip,
-                                "country": country_code,
-                                "ua": ua,
-                            },
-                        )
-                    except Exception:
-                        pass
+                            INSERT INTO submissions (
+                                id, form_id, form_owner_id, data, metadata,
+                                ip_address, country_code, user_agent, submitted_at
+                            ) VALUES (
+                                :id, :form_id, :owner_id, :data::jsonb, :metadata::jsonb,
+                                :ip, :country, :ua, :submitted_at
+                            )
+                            """
+                        ),
+                        {
+                            "id": response_id,
+                            "form_id": form_id,
+                            "owner_id": form_data.get("userId") or form_data.get("user_id"),
+                            "data": json.dumps(answers or {}),
+                            "metadata": json.dumps(meta),
+                            "ip": ip,
+                            "country": (country or "").upper() or None,
+                            "ua": str(request.headers.get("user-agent") or ""),
+                            "submitted_at": submitted_at,
+                        },
+                    )
+        except Exception:
+            pass
                     # submission_markers
                     try:
                         if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
@@ -3071,121 +3108,96 @@ async def list_responses(
         except Exception:
             return 0
 
-    dir_path = _responses_dir(form_id)
-    items: List[Dict] = []
-    if os.path.exists(dir_path):
-        for name in os.listdir(dir_path):
-            if name.endswith(".json"):
-                fpath = os.path.join(dir_path, name)
+    @router.get("/forms/{form_id}/responses")
+    async def list_responses(
+        form_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        from_ts: Optional[str] = Query(default=None, alias="from", description="ISO datetime lower bound (inclusive)"),
+        to_ts: Optional[str] = Query(default=None, alias="to", description="ISO datetime upper bound (inclusive)"),
+    ):
+        """
+        List stored responses for a form from Neon. Results are sorted by submittedAt descending.
+        Optional query params:
+          - from (ISO datetime): include responses with submittedAt >= this
+          - to (ISO datetime): include responses with submittedAt <= this
+        """
+        # Build filter bounds on submitted_at
+        start_dt = _to_date(from_ts) if from_ts else None
+        end_dt = _to_date(to_ts) if to_ts else None
+        async with async_session_maker() as session:
+            # Total count with filters
+            where_clauses = ["form_id = :fid"]
+            params: Dict[str, Any] = {"fid": form_id}
+            if start_dt:
+                where_clauses.append("submitted_at >= :start")
+                params["start"] = start_dt
+            if end_dt:
+                where_clauses.append("submitted_at <= :end")
+                params["end"] = end_dt
+            where_sql = " AND ".join(where_clauses)
+            count_sql = f"SELECT COUNT(*) AS cnt FROM submissions WHERE {where_sql}"
+            res = await session.execute(text(count_sql), params)
+            total = int((res.mappings().first() or {}).get("cnt") or 0)
+
+            # Page of responses
+            list_sql = f"""
+                SELECT id, form_id, form_owner_id, data, metadata,
+                       ip_address, country_code, user_agent, submitted_at
+                FROM submissions
+                WHERE {where_sql}
+                ORDER BY submitted_at DESC
+                LIMIT :limit OFFSET :offset
+            """
+            params_page = dict(params)
+            params_page.update({"limit": max(0, int(limit)), "offset": max(0, int(offset))})
+            res = await session.execute(text(list_sql), params_page)
+            rows = [dict(r) for r in res.mappings().all()]
+            # Normalize to previous response object shape where possible
+            items: List[Dict] = []
+            for r in rows:
                 try:
-                    items.append(_read_json(fpath))
+                    answers = r.get("data")
+                    if isinstance(answers, str):
+                        try:
+                            answers = json.loads(answers)
+                        except Exception:
+                            answers = {}
+                    meta = r.get("metadata") or {}
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except Exception:
+                            meta = {}
+                    items.append({
+                        "id": r.get("id"),
+                        "formId": r.get("form_id"),
+                        "answers": answers or {},
+                        "submittedAt": (r.get("submitted_at") or ""),
+                        "clientIp": r.get("ip_address"),
+                        "userAgent": r.get("user_agent"),
+                        "metadata": meta,
+                    })
                 except Exception:
                     continue
+            return {"count": total, "responses": items}
 
-    # Apply server-side date filters when provided
-    lower = _parse_bound_ms(from_ts)
-    upper = _parse_bound_ms(to_ts)
-    if (lower is not None) or (upper is not None):
-        filtered: List[Dict] = []
-        for rec in items:
-            ms = _submitted_ms(rec)
-            if (lower is not None) and (ms < lower):
-                continue
-            if (upper is not None) and (ms > upper):
-                continue
-            filtered.append(rec)
-        items = filtered
-
-    # Sort by submittedAt desc (fallback to 0 when missing)
-    items.sort(key=lambda d: _submitted_ms(d), reverse=True)
-
-    # Pagination
-    sliced = items[offset: offset + max(0, int(limit))]
-    return {"count": len(items), "responses": sliced}
-
-@router.post("/forms/{form_id}/responses/delete-batch")
-async def delete_responses_batch(form_id: str, request: Request, payload: Dict = None):
-    """
-    Delete multiple stored responses for a form by responseId.
-    Auth required: Firebase ID token in Authorization: Bearer <token> header. Only the form owner can delete.
-    Body: { "ids": ["<responseId>", ...] }
-    Response: { success: true, deleted: <count>, idsDeleted: [...], idsFailed: [...] }
-    """
-    try:
-        uid = _verify_firebase_uid(request)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    body = payload or {}
-    ids_raw = body.get("ids") or body.get("responseIds") or []
-    if not isinstance(ids_raw, list) or len(ids_raw) == 0:
-        raise HTTPException(status_code=400, detail="Provide 'ids' as a non-empty array")
-
-    # Verify form exists and ownership
-    path = _form_path(form_id)
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Form not found")
-    try:
-        form_data = _read_json(path)
-    except Exception:
-        form_data = {}
-    owner_id = str(form_data.get("userId") or "").strip() or None
-    if not owner_id or owner_id != uid:
-        raise HTTPException(status_code=403, detail="Not authorized to delete responses for this form")
-
-    dir_path = _responses_dir(form_id)
-    if not os.path.isdir(dir_path):
-        return {"success": True, "deleted": 0, "idsDeleted": [], "idsFailed": [str(i) for i in ids_raw]}
-
-    ids = [str(i).strip() for i in ids_raw if str(i).strip()]
-    deleted: List[str] = []
-    failed: List[str] = []
-
-    for rid in ids:
+    @router.post("/forms/{form_id}/responses/delete-batch")
+    async def delete_responses_batch(form_id: str, request: Request, payload: Dict = None):
+        """
+        Delete multiple stored responses for a form by responseId.
+        Auth required: Firebase ID token in Authorization: Bearer <token> header. Only the form owner can delete.
+        Body: { "ids": ["<responseId>", ...] }
+        Response: { success: true, deleted: <count>, idsDeleted: [...], idsFailed: [...] }
+        """
+        # Auth: Firebase token -> uid
         try:
-            # First try filename pattern match: *_{rid}.json
-            target_file = None
-            try:
-                for name in os.listdir(dir_path):
-                    if not name.endswith('.json'):
-                        continue
-                    if name.endswith(f"_{rid}.json"):
-                        target_file = os.path.join(dir_path, name)
-                        break
-            except Exception:
-                target_file = None
-
-            # Fallback: scan files and match by responseId field
-            if not target_file:
-                for name in os.listdir(dir_path):
-                    if not name.endswith('.json'):
-                        continue
-                    fp = os.path.join(dir_path, name)
-                    try:
-                        rec = _read_json(fp)
-                        if str(rec.get("responseId") or rec.get("id") or "").strip() == rid:
-                            target_file = fp
-                            break
-                    except Exception:
-                        continue
-
-            if target_file and os.path.exists(target_file):
-                try:
-                    os.remove(target_file)
-                    deleted.append(rid)
-                except Exception:
-                    failed.append(rid)
-            else:
-                failed.append(rid)
+            uid = _verify_firebase_uid(request)
         except Exception:
-            failed.append(rid)
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
-    return {"success": True, "deleted": len(deleted), "idsDeleted": deleted, "idsFailed": failed}
-
-@router.get("/forms/{form_id}/analytics/countries")
-async def get_countries_analytics(form_id: str, from_ts: Optional[str] = Query(default=None, alias="from"), to_ts: Optional[str] = Query(default=None, alias="to")):
-    # Return aggregated submission counts by country for a form.
-    # Optional query params:
+        ids_raw = (payload or {}).get("ids") or []
+        ids: List[str] = []
     #   - from (ISO datetime): include days >= this date
     #   - to (ISO datetime): include days <= this date
     # When no range is provided, returns the all-time totals.

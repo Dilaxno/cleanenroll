@@ -138,61 +138,8 @@ def _is_pro_plan(user_id: _Optional[str]) -> bool:
 BACKING_DIR = os.path.join(os.getcwd(), "data", "forms")
 os.makedirs(BACKING_DIR, exist_ok=True)
 
-# Responses storage (separate from form schemas)
-RESPONSES_BASE_DIR = os.path.join(os.getcwd(), "data", "responses")
-os.makedirs(RESPONSES_BASE_DIR, exist_ok=True)
-
-# Analytics storage (file-based aggregation)
-ANALYTICS_BASE_DIR = os.path.join(os.getcwd(), "data", "analytics")
-os.makedirs(ANALYTICS_BASE_DIR, exist_ok=True)
-
-# Monthly submissions usage (file-based per user per month)
-USAGE_BASE_DIR = os.path.join(os.getcwd(), "data", "usage", "submissions")
-os.makedirs(USAGE_BASE_DIR, exist_ok=True)
-
 FREE_MONTHLY_SUBMISSION_LIMIT = 50
 
-def _month_key(dt: Optional[datetime] = None) -> str:
-    try:
-        d = dt or datetime.utcnow()
-        return f"{d.year:04d}{d.month:02d}"
-    except Exception:
-        # Fallback simplistic key
-        return datetime.utcnow().strftime("%Y%m")
-
-def _usage_file(user_id: str, month_key: str) -> str:
-    safe_uid = re.sub(r"[^a-zA-Z0-9._-]", "_", str(user_id or "").strip()) or "unknown"
-    return os.path.join(USAGE_BASE_DIR, safe_uid, f"{month_key}.json")
-
-def _load_month_count(user_id: str, month_key: str) -> int:
-    path = _usage_file(user_id, month_key)
-    try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                c = int((data or {}).get("count", 0))
-                return max(0, c)
-    except Exception:
-        pass
-    return 0
-
-def _save_month_count(user_id: str, month_key: str, count: int) -> None:
-    path = _usage_file(user_id, month_key)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"count": max(0, int(count or 0)), "updatedAt": datetime.utcnow().isoformat()}, f, ensure_ascii=False)
-    except Exception:
-        pass
-
-def _inc_month_count(user_id: str, month_key: str, delta: int = 1) -> int:
-    try:
-        cur = _load_month_count(user_id, month_key)
-        new = max(0, int(cur) + int(delta or 0))
-        _save_month_count(user_id, month_key, new)
-        return new
-    except Exception:
-        return _load_month_count(user_id, month_key)
 
 # Plan-based upload limits
 FREE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024      # 50MB for Free plan
@@ -335,33 +282,7 @@ def _normalize_bg_public_url(u: Optional[str]) -> Optional[str]:
     except Exception:
         return u
 
-def _analytics_countries_path(form_id: str) -> str:
-    # Sanitize form_id and ensure path remains within analytics base directory
-    safe_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(form_id or ""))
-    base = os.path.abspath(ANALYTICS_BASE_DIR)
-    path = os.path.normpath(os.path.join(ANALYTICS_BASE_DIR, safe_id, "countries.json"))
-    if os.path.commonpath([base, os.path.abspath(path)]) != base:
-        raise HTTPException(status_code=400, detail="Invalid form id")
-    return path
-
-def _load_analytics_countries(form_id: str) -> Dict:
-    path = _analytics_countries_path(form_id)
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"total": {}, "daily": {}}
-    return {"total": {}, "daily": {}}
-
-def _save_analytics_countries(form_id: str, data: Dict) -> None:
-    path = _analytics_countries_path(form_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.exception("analytics countries save failed form_id=%s err=%s", form_id, e)
+ 
 
 
 def _analytics_increment_country(form_id: str, country_iso2: Optional[str], submitted_at_iso: str) -> None:
@@ -408,22 +329,6 @@ def _form_path(form_id: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid form id")
     return path
 
-
-def _responses_dir(form_id: str) -> str:
-    """Directory where responses for a given form are stored (path-safe)."""
-    safe_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(form_id or ""))
-    base = os.path.abspath(RESPONSES_BASE_DIR)
-    d = os.path.normpath(os.path.join(RESPONSES_BASE_DIR, safe_id))
-    if os.path.commonpath([base, os.path.abspath(d)]) != base:
-        raise HTTPException(status_code=400, detail="Invalid form id")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _new_response_path(form_id: str, submitted_at_iso: str, response_id: str) -> str:
-    """Generate a filesystem-safe path for a new response file."""
-    safe_ts = str(submitted_at_iso).replace(":", "-")
-    return os.path.join(_responses_dir(form_id), f"{safe_ts}_{response_id}.json")
 
 
 def _write_json(path: str, data: Dict):
@@ -2325,10 +2230,35 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         meta = {"status": "signed", "value": str(val)}
                         signatures[fid] = meta
                     except Exception:
-                        continue
-            if added > 0:
-                data_bytes = buf.getvalue()
-                key = f"submissions/{form_id}/{response_id}_files.zip"
+                    continue
+            # Build a small ZIP manifest of file URLs (best-effort)
+            files_zip_meta = None
+            try:
+                from io import BytesIO
+                import zipfile as _zip
+                buf = BytesIO()
+                added = 0
+                with _zip.ZipFile(buf, mode="w", compression=_zip.ZIP_DEFLATED) as zf:
+                    for f in fields_def:
+                        try:
+                            if str((f.get("type") or "")).strip().lower() != "file":
+                                continue
+                            fid2 = str(f.get("id"))
+                            av2 = answers.get(fid2)
+                            if isinstance(av2, list):
+                                srcs = av2
+                            else:
+                                srcs = [av2] if av2 is not None else []
+                            for idx, v2 in enumerate(srcs):
+                                url2 = None
+                                if isinstance(v2, str):
+                                    url2 = v2
+                                elif isinstance(v2, dict) and v2.get("url"):
+                                    url2 = str(v2.get("url"))
+                                if not url2:
+                                    continue
+                                zf.writestr(f"{fid2}_{idx+1}.txt", url2)
+                                added += 1
                 if added > 0:
                     data_bytes = buf.getvalue()
                     key = f"submissions/{form_id}/{response_id}_files.zip"
@@ -2338,132 +2268,93 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         files_zip_meta = {"url": _public_url_for_key(key), "key": key, "count": added, "bytes": len(data_bytes)}
                     except Exception:
                         files_zip_meta = None
-        except Exception:
-            logger.exception("zip bundle failed form_id=%s", form_id)
-        # Geo enrich from client IP
-        country_code, lat, lon = _geo_from_ip(ip)
-        logger.info("geo_enrich submit form_id=%s ip=%s country=%s lat=%s lon=%s", form_id, ip, country_code, lat, lon)
-        record = {
-            "responseId": response_id,
-            "formId": form_id,
-            "submittedAt": submitted_at,
-            "clientIp": ip,
-            "country": country_code,
-            "lat": lat,
-            "lon": lon,
-            "answers": answers,
-        }
-        # Attach signature metadata to record and API response when available
-        if isinstance(signatures, dict) and signatures:
-            record["signatures"] = signatures
-            resp["signatures"] = signatures
-        if files_zip_meta:
-            record["filesZip"] = files_zip_meta
-        _write_json(_new_response_path(form_id, submitted_at, response_id), record)
-        # Mirror submission to Neon for dashboards (non-fatal on failure)
-        try:
-            preview_text = ""
-            try:
-                for v in (answers or {}).values():
-                    if isinstance(v, str) and v.strip():
-                        preview_text = v.strip()[:140]
-                        break
             except Exception:
-                preview_text = ""
-            meta: Dict[str, Any] = {
+                files_zip_meta = None
+
+            # Geo enrich and insert into Neon in one transaction
+            country_code, lat, lon = _geo_from_ip(ip)
+            owner_id = form_data.get("userId") or form_data.get("user_id")
+            # Build metadata payload
+            meta_payload: Dict[str, Any] = {
+                "clientIp": ip,
+                "userAgent": str(request.headers.get("user-agent") or ""),
                 "lat": lat,
                 "lon": lon,
                 "country": country_code,
             }
             if isinstance(signatures, dict) and signatures:
-                meta["signatures"] = signatures
+                meta_payload["signatures"] = signatures
             if files_zip_meta:
-                meta["filesZip"] = files_zip_meta
-            ua = request.headers.get("user-agent") if isinstance(request, Request) else None
-            if owner_id:
-                async with async_session_maker() as session:
-                    # Ensure indexes exist (best-effort, harmless if they already do)
-                    await _ensure_submissions_indexes(session)
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO submissions (
-                                id, form_id, form_owner_id, data, metadata,
-                                ip_address, country_code, user_agent, submitted_at
-                            ) VALUES (
-                                :id, :form_id, :owner_id, :data::jsonb, :metadata::jsonb,
-                                :ip, :country, :ua, :submitted_at
-                            )
-                            """
-                        ),
-                        {
-                            "id": response_id,
-                            "form_id": form_id,
-                            "owner_id": form_data.get("userId") or form_data.get("user_id"),
-                            "data": json.dumps(answers or {}),
-                            "metadata": json.dumps(meta),
-                            "ip": ip,
-                            "country": (country or "").upper() or None,
-                            "ua": str(request.headers.get("user-agent") or ""),
-                            "submitted_at": submitted_at,
-                        },
-                    )
-        except Exception:
-            pass
-                    # submission_markers
-                    try:
-                        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-                            await session.execute(
+                meta_payload["filesZip"] = files_zip_meta
+
+            async with async_session_maker() as session:
+                await _ensure_submissions_indexes(session)
+                # Insert submission row
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO submissions (
+                            id, form_id, form_owner_id, data, metadata,
+                            ip_address, country_code, user_agent, submitted_at
+                        ) VALUES (
+                            :id, :form_id, :owner_id, :data::jsonb, :metadata::jsonb,
+                            :ip, :country, :ua, :submitted_at
+                        )
+                        """
+                    ),
+                    {
+                        "id": response_id,
+                        "form_id": form_id,
+                        "owner_id": owner_id,
+                        "data": json.dumps(answers or {}),
+                        "metadata": json.dumps(meta_payload),
+                        "ip": ip,
+                        "country": (country_code or "").upper() or None,
+                        "ua": str(request.headers.get("user-agent") or ""),
+                        "submitted_at": submitted_at,
+                    },
+                )
+                # Optional: marker row
+                try:
+                    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                        await session.execute(
+                            text(
                                 """
                                 INSERT INTO submission_markers (id, form_id, response_id, lat, lon, country_code)
                                 VALUES (:id, :form_id, :response_id, :lat, :lon, :country)
                                 ON CONFLICT (id) DO NOTHING
-                                """,
-                                {
-                                    "id": response_id,
-                                    "form_id": form_id,
-                                    "response_id": response_id,
-                                    "lat": float(lat),
-                                    "lon": float(lon),
-                                    "country": country_code,
-                                },
-                            )
-                    except Exception:
-                        pass
-                    # notifications
-                    try:
-                        title = str(form_data.get("title") or "Form")
-                        await session.execute(
+                                """
+                            ),
+                            {"id": response_id, "form_id": form_id, "response_id": response_id, "lat": float(lat), "lon": float(lon), "country": country_code},
+                        )
+                except Exception:
+                    pass
+                # Optional: notification
+                try:
+                    preview_text = ""
+                    for v in (answers or {}).values():
+                        if isinstance(v, str) and v.strip():
+                            preview_text = v.strip()[:140]
+                            break
+                    title = str(form_data.get("title") or "Form")
+                    await session.execute(
+                        text(
                             """
                             INSERT INTO notifications (id, user_id, title, message, type, data)
                             VALUES (:id, :user_id, :title, :message, :type, :data)
                             ON CONFLICT (id) DO NOTHING
-                            """,
-                            {
-                                "id": response_id,
-                                "user_id": owner_id,
-                                "title": title,
-                                "message": (preview_text or "New submission"),
-                                "type": "submission",
-                                "data": json.dumps({"formId": form_id, "responseId": response_id}),
-                            },
-                        )
-                    except Exception:
-                        pass
-                    # increment forms.submissions
-                    try:
-                        await session.execute(
-                            "UPDATE forms SET submissions = COALESCE(submissions,0) + 1, updated_at = NOW() WHERE id = :form_id",
-                            {"form_id": form_id},
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await session.commit()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                            """
+                        ),
+                        {"id": response_id, "user_id": owner_id, "title": title, "message": (preview_text or "New submission"), "type": "submission", "data": json.dumps({"formId": form_id, "responseId": response_id})},
+                    )
+                except Exception:
+                    pass
+                # Increment forms.submissions
+                await session.execute(
+                    text("UPDATE forms SET submissions = COALESCE(submissions,0) + 1, updated_at = NOW() WHERE id = :form_id"),
+                    {"form_id": form_id},
+                )
+                await session.commit()
         # Expose geo hints to client response (non-breaking add-ons)
         try:
             if country_code:
@@ -2474,133 +2365,12 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 resp["lon"] = float(lon)  # type: ignore[index]
         except Exception:
             pass
-        # Firestore counters: increment submissions and update lastSubmissionAt
-        try:
-            if _FS_AVAILABLE:
-                try:
-                    # Initialize Firebase Admin if needed
-                    from firebase_admin import credentials as _fb_credentials  # type: ignore
-                    if not getattr(firebase_admin, "_apps", None):
-                        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or ""
-                        try:
-                            if cred_path and os.path.exists(cred_path):
-                                cred = _fb_credentials.Certificate(cred_path)
-                            else:
-                                cred = _fb_credentials.ApplicationDefault()  # type: ignore
-                            firebase_admin.initialize_app(cred)
-                        except Exception:
-                            # Best-effort; continue even if init fails
-                            pass
-                except Exception:
-                    pass
-                try:
-                    fs = _fs.client()
-                    ref = fs.collection("forms").document(form_id)
-                    # Prefer atomic increment when available
-                    try:
-                        from google.cloud.firestore_v1 import Increment as _FSIncrement  # type: ignore
-                        update_doc = {
-                            "submissionsCount": _FSIncrement(1),
-                            "submissions": _FSIncrement(1),
-                            "lastSubmissionAt": _fs.SERVER_TIMESTAMP,
-                        }
-                        ref.set(update_doc, merge=True)
-                    except Exception:
-                        # Fallback: read-modify-write
-                        snap = ref.get()
-                        data_prev = snap.to_dict() or {}
-                        prev = data_prev.get("submissionsCount")
-                        if not isinstance(prev, int):
-                            prev = data_prev.get("submissions") if isinstance(data_prev.get("submissions"), int) else 0
-                        new_count = int(prev or 0) + 1
-                        ref.set({
-                            "submissionsCount": new_count,
-                            "submissions": new_count,
-                            "lastSubmissionAt": _fs.SERVER_TIMESTAMP,
-                        }, merge=True)
-
-                    # Mirror submission and lightweight analytics to Firestore (server-side)
-                    try:
-                        # submissions/{responseId}
-                        sub_payload = {
-                            "formId": form_id,
-                            "ownerId": owner_id or "",
-                            "responseId": response_id,
-                            "submittedAt": _fs.SERVER_TIMESTAMP,
-                            "country": country_code,
-                            "lat": lat,
-                            "lng": lon,
-                            "values": answers,
-                        }
-                        # derive a short preview from first text-like value
-                        try:
-                            preview = ""
-                            for v in (answers or {}).values():
-                                if isinstance(v, str) and v.strip():
-                                    preview = v.strip()[:140]
-                                    break
-                                if isinstance(v, list):
-                                    sv = next((str(x) for x in v if isinstance(x, str) and x.strip()), None)
-                                    if sv:
-                                        preview = sv.strip()[:140]
-                                        break
-                            if preview:
-                                sub_payload["preview"] = preview
-                        except Exception:
-                            pass
-                        fs.collection("submissions").document(response_id).set(sub_payload, merge=True)
-                    except Exception:
-                        # Non-fatal
-                        pass
-
-                    # submissions_markers/{formId}.markers += { id, position:[lat,lng], country }
-                    try:
-                        marker = None
-                        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-                            marker = {"id": response_id, "position": [float(lat), float(lon)], "country": country_code}
-                        if marker:
-                            try:
-                                from google.cloud.firestore_v1 import ArrayUnion as _FSArrayUnion  # type: ignore
-                                fs.collection("submissions_markers").document(form_id).set({
-                                    "markers": _FSArrayUnion([marker])
-                                }, merge=True)
-                            except Exception:
-                                # Fallback read-modify-write
-                                mref = fs.collection("submissions_markers").document(form_id)
-                                snap = mref.get()
-                                data_prev = snap.to_dict() or {}
-                                arr = list(data_prev.get("markers") or [])
-                                # Avoid duplicates by id
-                                if not any((isinstance(x, dict) and str(x.get("id")) == response_id) for x in arr):
-                                    arr.append(marker)
-                                mref.set({"markers": arr}, merge=True)
-                    except Exception:
-                        pass
-
-                    # notifications/{ownerId}/items add new notification for creators
-                    try:
-                        if owner_id:
-                            form_title = str(form_data.get("title") or "Form").strip() or "Form"
-                            notif = {
-                                "formId": form_id,
-                                "formTitle": form_title,
-                                "preview": sub_payload.get("preview") if isinstance(sub_payload, dict) else None,
-                                "submittedAt": _fs.SERVER_TIMESTAMP,
-                                "read": False,
-                            }
-                            fs.collection("notifications").document(owner_id).collection("items").add(notif)
-                    except Exception:
-                        pass
-                except Exception:
-                    # Non-fatal if Firestore unavailable or misconfigured
-                    pass
-        except Exception:
-            # Never fail the submission on analytics/counters failure
-            pass
+        # Firestore mirroring removed (Neon is source of truth)
         # Update country analytics aggregation (file-based)
         try:
             if country_code:
-                _analytics_increment_country(form_id, country_code, submitted_at)
+                async with async_session_maker() as session:
+                    await _analytics_increment_country(session, form_id, country_code, submitted_at)
         except Exception:
             logger.exception("analytics: country increment failed form_id=%s", form_id)
         # Attempt Google Sheets append if syncing is enabled for this form
@@ -2671,13 +2441,14 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     for k, v in list(ans.items())[:10]:
                         try:
                             label = label_by_id.get(str(k), str(k))
+                            if isinstance(v, str) and v.strip():
+                                preview = v.strip()[:140]
+                                break
                             if isinstance(v, list):
-                                vv = ", ".join(str(x) for x in v)
-                            elif isinstance(v, dict):
-                                vv = json.dumps(v, ensure_ascii=False)
-                            else:
-                                vv = str(v)
-                            parts.append(f"<div><strong>{label}:</strong> {vv}</div>")
+                                sv = next((str(x) for x in v if isinstance(x, str) and x.strip()), None)
+                                if sv:
+                                    preview = sv.strip()[:140]
+                                    break
                         except Exception:
                             continue
                     preview = "".join(parts)
@@ -2918,24 +2689,26 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
     """
     Verify that a user domain points to our SaaS target and mark it ready for Caddy on-demand TLS.
     """
-    path = _form_path(form_id)
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Form not found. Save it first.")
-
-    data = _read_json(path)
-
     inbound_domain = _normalize_domain(
         domain or (payload or {}).get("customDomain") or (payload or {}).get("domain")
     )
     if not inbound_domain:
         raise HTTPException(status_code=400, detail="Missing custom domain")
 
-    # Prevent duplicates
-    for name in os.listdir(BACKING_DIR):
-        if not name.endswith(".json"):
-            continue
-        other = _read_json(os.path.join(BACKING_DIR, name))
-        if _normalize_domain(other.get("customDomain")) == inbound_domain and other.get("id") != form_id:
+    # Prevent duplicates in Neon
+    async with async_session_maker() as session:
+        res = await session.execute(
+            text(
+                """
+                SELECT id FROM forms
+                WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
+                  AND id <> :fid
+                LIMIT 1
+                """
+            ),
+            {"dom": inbound_domain, "fid": form_id},
+        )
+        if res.first() is not None:
             raise HTTPException(status_code=409, detail="This domain is already used by another form")
 
     # DNS check
@@ -2967,14 +2740,22 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
     if not (cname_ok or apex_ok):
         raise HTTPException(status_code=400, detail=f"Domain {inbound_domain} must point to {CUSTOM_DOMAIN_TARGET}")
 
-    # Mark verified
-    data.update({
-        "customDomain": inbound_domain,
-        "customDomainVerified": True,
-        "sslVerified": True,  # Caddy handles SSL automatically
-        "updatedAt": datetime.utcnow().isoformat(),
-    })
-    _write_json(path, data)
+    # Mark verified in Neon
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET custom_domain = :dom,
+                    custom_domain_verified = TRUE,
+                    ssl_verified = TRUE,
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "dom": inbound_domain},
+        )
+        await session.commit()
 
     return {
         "verified": True,
@@ -2995,20 +2776,29 @@ async def issue_cert(form_id: str):
     Dummy endpoint for compatibility.
     With Caddy, certificates are issued automatically on first HTTPS request.
     """
-    path = _form_path(form_id)
-    if not os.path.exists(path):
+    # Read current domain info from Neon
+    async with async_session_maker() as session:
+        res = await session.execute(
+            text("SELECT custom_domain, custom_domain_verified FROM forms WHERE id = :fid LIMIT 1"),
+            {"fid": form_id},
+        )
+        row = res.mappings().first()
+    if not row:
         raise HTTPException(status_code=404, detail="Form not found")
-    data = _read_json(path)
-    domain_val = _normalize_domain(data.get("customDomain"))
+    domain_val = _normalize_domain(row.get("custom_domain"))
 
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
-    if not data.get("customDomainVerified"):
+    if not bool(row.get("custom_domain_verified")):
         raise HTTPException(status_code=400, detail="Domain not verified yet")
 
-    data["sslVerified"] = True
-    data["updatedAt"] = datetime.utcnow().isoformat()
-    _write_json(path, data)
+    # Mark SSL as verified in Neon (Caddy does this on first request; we mirror state)
+    async with async_session_maker() as session:
+        await session.execute(
+            text("UPDATE forms SET ssl_verified = TRUE, updated_at = NOW() WHERE id = :fid"),
+            {"fid": form_id},
+        )
+        await session.commit()
 
     return {
         "success": True,
@@ -3025,14 +2815,21 @@ async def issue_cert(form_id: str):
 @router.get("/forms/{form_id}/custom-domain/cert-status")
 async def get_cert_status(form_id: str):
     """Return custom domain verification and SSL readiness (Caddy-managed)."""
-    path = _form_path(form_id)
-    if not os.path.exists(path):
+    async with async_session_maker() as session:
+        res = await session.execute(
+            text("""
+                SELECT custom_domain, custom_domain_verified, ssl_verified
+                FROM forms WHERE id = :fid LIMIT 1
+            """),
+            {"fid": form_id},
+        )
+        row = res.mappings().first()
+    if not row:
         raise HTTPException(status_code=404, detail="Form not found")
-    data = _read_json(path)
     return {
-        "domain": data.get("customDomain"),
-        "verified": bool(data.get("customDomainVerified")),
-        "sslVerified": bool(data.get("sslVerified")),
+        "domain": row.get("custom_domain"),
+        "verified": bool(row.get("custom_domain_verified")),
+        "sslVerified": bool(row.get("ssl_verified")),
         "mode": "caddy",
         "message": "SSL automatically managed by Caddy (on-demand)."
     }
@@ -3047,11 +2844,21 @@ async def allow_domain(domain: str):
     Endpoint used by Caddy on-demand TLS.
     Returns 200 if the domain is verified for SSL.
     """
-    for name in os.listdir(BACKING_DIR):
-        if not name.endswith(".json"):
-            continue
-        data = _read_json(os.path.join(BACKING_DIR, name))
-        if _normalize_domain(data.get("customDomain")) == domain and data.get("customDomainVerified"):
+    # Allow when a forms row has matching verified domain
+    inbound = _normalize_domain(domain)
+    async with async_session_maker() as session:
+        res = await session.execute(
+            text(
+                """
+                SELECT 1 FROM forms
+                WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
+                  AND custom_domain_verified = TRUE
+                LIMIT 1
+                """
+            ),
+            {"dom": inbound},
+        )
+        if res.first() is not None:
             return Response(status_code=200)
     return Response(status_code=403)
 

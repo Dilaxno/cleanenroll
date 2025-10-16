@@ -1,7 +1,7 @@
 # (moved user endpoints below router initialization)
 from fastapi import APIRouter, HTTPException, Request, Query, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from typing import List, Optional, Dict
 import os
 import json

@@ -8,40 +8,12 @@ import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy import text
-from sqlalchemy.exc import NotSupportedError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_session
 from models.validators import validate_form, sanitize_for_db
 from models.base import FormModel
 from db.validation import validate_and_save_form
-
-def _is_invalid_cached_stmt_error(err: Exception) -> bool:
-    try:
-        msg = str(err) or ""
-        name = err.__class__.__name__
-        # asyncpg/SQLAlchemy message indicators
-        return (
-            isinstance(err, NotSupportedError)
-            or "InvalidCachedStatementError" in name
-            or "cached statement plan is invalid" in msg
-        )
-    except Exception:
-        return False
-
-
-async def _execute_with_retry(session: AsyncSession, stmt, params=None):
-    """Execute a statement and retry once if asyncpg cached statement plan was invalidated by schema change.
-    This avoids a one-off 500 immediately after migrations that add columns.
-    """
-    try:
-        return await session.execute(stmt, params or {})
-    except Exception as e:
-        if _is_invalid_cached_stmt_error(e):
-            # Retry once – SQLAlchemy will invalidate caches; second attempt should pass
-            return await session.execute(stmt, params or {})
-        raise
-
 
 class AsyncFormsService:
     """Async service for handling form operations with PostgreSQL and Pydantic validation"""
@@ -56,10 +28,9 @@ class AsyncFormsService:
             LIMIT :limit OFFSET :offset
         """)
         
-        result = await _execute_with_retry(
-            session,
-            query,
-            {"user_id": user_id, "limit": limit, "offset": offset},
+        result = await session.execute(
+            query, 
+            {"user_id": user_id, "limit": limit, "offset": offset}
         )
         
         return [dict(row) for row in result.mappings().all()]
@@ -75,7 +46,7 @@ class AsyncFormsService:
             params["user_id"] = user_id
             
         query = text(query_text)
-        result = await _execute_with_retry(session, query, params)
+        result = await session.execute(query, params)
         row = result.mappings().first()
         
         return dict(row) if row else None
@@ -88,7 +59,7 @@ class AsyncFormsService:
             WHERE user_id = :user_id AND name = :name
         """)
         
-        result = await _execute_with_retry(session, query, {"user_id": user_id, "name": name})
+        result = await session.execute(query, {"user_id": user_id, "name": name})
         row = result.mappings().first()
         
         return row["count"] > 0 if row else False
@@ -198,7 +169,7 @@ class AsyncFormsService:
             validated_data['updated_at'] = now
             
         # Convert complex objects to JSON strings for database
-        for json_field in ['fields', 'theme', 'branding', 'allowed_domains', 'redirect', 'restricted_countries', 'allowed_countries', 'embed_allow_list']:
+        for json_field in ['fields', 'theme', 'branding', 'allowed_domains']:
             if json_field in validated_data and not isinstance(validated_data[json_field], str):
                 validated_data[json_field] = json.dumps(validated_data[json_field])
 

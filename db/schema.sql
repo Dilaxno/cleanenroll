@@ -36,6 +36,7 @@ CREATE TABLE forms (
     fields JSONB,
     theme JSONB,
     branding JSONB,
+    form_settings JSONB,
     allowed_domains JSONB,
     idempotency_key VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

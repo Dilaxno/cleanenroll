@@ -109,22 +109,17 @@ except Exception:
     from utils.email import render_email, send_email_html  # type: ignore
 try:
     import firebase_admin
-    from utils.firebase_admin_adapter import admin_auth, admin_firestore
+    from utils.firebase_admin_adapter import admin_auth
     _FB_AVAILABLE = True
 except Exception:
     firebase_admin = None  # type: ignore
     admin_auth = None  # type: ignore
     admin_credentials = None  # type: ignore
-    admin_firestore = None  # type: ignore
     _FB_AVAILABLE = False
 
-# Firestore FieldFilter (new query API) for deprecation-free filters
-try:
-    from google.cloud.firestore_v1 import FieldFilter as _FSFieldFilter  # type: ignore
-except Exception:  # pragma: no cover
-    _FSFieldFilter = None  # type: ignore
+# Firestore has been removed; no FieldFilter or Firestore client is used.
 
-# Temporary/disposable domains cache (Firestore-backed)
+# Temporary/disposable domains cache (in-memory; optional)
 TEMP_DOMAINS_CACHE: set[str] = set()
 TEMP_DOMAINS_LOADED_AT: float = 0
 TEMP_DOMAINS_TTL_SECONDS: int = 600
@@ -209,8 +204,7 @@ def _istempmail_disposable_status(email: str, domain: str) -> bool | None:
 
 async def _ensure_temp_domains_loaded(force: bool = False):
     """
-    Firestore has been removed; this loader is now a no-op.
-    Left in place to avoid breaking call sites.
+    No-op placeholder. Previously populated from Firestore; now disabled.
     """
     return
 
@@ -542,7 +536,7 @@ async def signup_enrich_options():
 @router.post("/api/auth/signup/enrich")
 @router.post("/api/auth/signup/enrich/")
 async def signup_enrich(request: Request):
-    """Record the caller's signup IP and country onto their Firestore user doc.
+    """Record the caller's signup IP and country onto their Neon user row.
     Requires a valid Firebase ID token in the Authorization header.
     """
     # Extract bearer token
@@ -556,7 +550,7 @@ async def signup_enrich(request: Request):
         _ensure_firebase_initialized()
     except HTTPException as e:
         raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
-    # Only require Firebase Auth; Firestore is optional/removed
+    # Only require Firebase Auth
     if not (_FB_AVAILABLE and admin_auth is not None):
         raise HTTPException(status_code=500, detail="Firebase Auth unavailable")
 
@@ -836,7 +830,6 @@ async def password_reset_confirm_options():
 class VerifySendRequest(BaseModel):
     email: EmailStr
 
-
 def _get_verify_serializer():
     try:
         from itsdangerous import URLSafeTimedSerializer  # type: ignore
@@ -845,7 +838,6 @@ def _get_verify_serializer():
     secret = os.getenv("EMAIL_VERIFY_SECRET", os.getenv("SECRET_KEY", "change-me"))
     salt = os.getenv("EMAIL_VERIFY_SALT", "email-verify")
     return URLSafeTimedSerializer(secret, salt=salt)
-
 
 @router.post("/api/auth/verify/send")
 @router.post("/api/auth/verify/send/")
@@ -970,81 +962,84 @@ async def verify_confirm(token: str):
     except Exception:
         return {"status": "invalid"}
 
-
 @router.post("/api/disposable/sync")
 @router.post("/api/disposable/sync/")
 async def sync_disposable_domains(strict: bool = True):
-    """Fetch disposable domain lists and store into Firestore collection 'temporary-domains'."""
-    try:
-        _ensure_firebase_initialized()
-    except HTTPException as e:
-        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
-    # Firestore is disabled/removed; skip this operation
-    raise HTTPException(status_code=503, detail="Firestore is disabled on this environment")
-
+    """Fetch disposable domain lists from upstream sources and upsert into Neon.
+    Table: disposable_domains(domain TEXT PRIMARY KEY, strict BOOLEAN, updated_at TIMESTAMPTZ)
+    """
     # Fetch upstream lists
     try:
-        import urllib.request as _url
+        import urllib.request as _urlreq
         sources = [
-            "https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains.txt",
+            "https://raw.githubusercontent.com/7c/fakefilter/main/emails/disposable.txt",
+            "https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/master/disposable_email_blocklist.conf",
         ]
-        if strict:
-            sources.append("https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains_strict.txt")
         domains: set[str] = set()
         for u in sources:
             try:
-                with _url.urlopen(u, timeout=20) as resp:
-                    text = resp.read().decode("utf-8", errors="ignore")
-                    for line in text.splitlines():
-                        dom = line.strip().lower()
-                        if dom and not dom.startswith('#'):
-                            domains.add(dom)
+                with _urlreq.urlopen(u, timeout=10) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                for line in raw.splitlines():
+                    s = line.strip().lower()
+                    if not s or s.startswith("#"):
+                        continue
+                    if s.startswith("@"):
+                        s = s[1:]
+                    if "/" in s or " " in s:
+                        continue
+                    if "." in s:
+                        domains.add(s)
             except Exception:
                 continue
-        if not domains:
-            raise HTTPException(status_code=502, detail="Failed to fetch disposable domains from upstream")
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fetch error: {e}")
 
-    fs = admin_firestore.client()
-    col = fs.collection("temporary-domains")
-    # Clear existing docs (best-effort)
+    # Upsert into Neon in batches
     try:
-        existing = list(col.stream())
-        i = 0
-        while i < len(existing):
-            batch = fs.batch()
-            for doc in existing[i:i+400]:
-                batch.delete(doc.reference)
-            batch.commit()
-            i += 400
-    except Exception:
-        pass
-
-    # Insert new items in batches
-    count = 0
-    items = list(domains)
-    i = 0
-    while i < len(items):
-        batch = fs.batch()
-        for dom in items[i:i+400]:
-            ref = col.document(dom)
-            batch.set(ref, {
-                "domain": dom,
-                "source": "disposable-email-domains",
-                "strict": bool(strict),
-                "updatedAt": admin_firestore.SERVER_TIMESTAMP,
-            })
-            count += 1
-        batch.commit()
-        i += 400
-
-    # Refresh in-memory cache
-    await _ensure_temp_domains_loaded(force=True)
-
-    return {"status": "ok", "count": count}
+        from sqlalchemy import text as _text  # type: ignore
+        async with async_session_maker() as session:
+            # Ensure table exists (migration should have created; this is a safety net)
+            await session.execute(_text(
+                """
+                CREATE TABLE IF NOT EXISTS disposable_domains (
+                  domain TEXT PRIMARY KEY,
+                  strict BOOLEAN DEFAULT TRUE,
+                  updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            ))
+            batch = []
+            count = 0
+            for d in domains:
+                batch.append((d, bool(strict)))
+                if len(batch) >= 500:
+                    await session.execute(_text(
+                        """
+                        INSERT INTO disposable_domains (domain, strict, updated_at)
+                        VALUES """ + ",".join(["(:d"+str(i)+", :s"+str(i)+", NOW())" for i in range(len(batch))]) + "\n"
+                        + " ON CONFLICT (domain) DO UPDATE SET strict = EXCLUDED.strict, updated_at = NOW()"
+                    ), {**{f"d{i}": b[0] for i, b in enumerate(batch)}, **{f"s{i}": b[1] for i, b in enumerate(batch)}})
+                    count += len(batch)
+                    batch = []
+            if batch:
+                await session.execute(_text(
+                    """
+                    INSERT INTO disposable_domains (domain, strict, updated_at)
+                    VALUES """ + ",".join(["(:d"+str(i)+", :s"+str(i)+", NOW())" for i in range(len(batch))]) + "\n"
+                    + " ON CONFLICT (domain) DO UPDATE SET strict = EXCLUDED.strict, updated_at = NOW()"
+                ), {**{f"d{i}": b[0] for i, b in enumerate(batch)}, **{f"s{i}": b[1] for i, b in enumerate(batch)}})
+                count += len(batch)
+            await session.commit()
+        # Optionally refresh in-memory cache
+        try:
+            TEMP_DOMAINS_CACHE.clear()
+            TEMP_DOMAINS_CACHE.update(domains)
+        except Exception:
+            pass
+        return {"status": "ok", "domains": len(domains), "upserted": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upsert error: {e}")
 
 # -----------------------------
 # Custom domains API (Caddy on-demand TLS integration)
@@ -1239,10 +1234,28 @@ async def validate_email_deliverability(
             result["disposable"] = False
     except Exception:
         pass
-    # Fallback: Firestore-backed disposable domains cache
+    # Neon-backed disposable domains check
+    try:
+        if domain:
+            from sqlalchemy import text as _text  # type: ignore
+            async with async_session_maker() as session:
+                q = _text("SELECT strict FROM disposable_domains WHERE domain = :dom LIMIT 1")
+                res = await session.execute(q, {"dom": domain.strip().lower()})
+                row = res.mappings().first()
+                if row is not None:
+                    result["disposable"] = True
+                    if bool(row.get("strict")):
+                        result["deliverable"] = False
+                        if not result.get("reason"):
+                            result["reason"] = "Disposable email domains are not accepted"
+    except Exception:
+        pass
+
+    # Fallback: optional in-memory disposable domains cache (no-op by default)
     try:
         await _ensure_temp_domains_loaded()
         dom_lower = (domain or "").strip().lower()
+
         if dom_lower and dom_lower in TEMP_DOMAINS_CACHE:
             result["disposable"] = True
             result["deliverable"] = False

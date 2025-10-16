@@ -1,4 +1,4 @@
--- Analytics tables in Neon (no Supabase)
+-- Analytics tables in Neon
 
 -- Ensure required pgcrypto or gen_random_uuid is available
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

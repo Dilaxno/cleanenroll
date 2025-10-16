@@ -1879,7 +1879,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
         res = await session.execute(
             text(
                 """
-                SELECT user_id, owner_id FROM forms
+                SELECT user_id FROM forms
                 WHERE id = :fid
                 LIMIT 1
                 """
@@ -1890,10 +1890,9 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
         if not owner_row:
             raise HTTPException(status_code=404, detail="Form not found")
         form_user = (owner_row.get("user_id") or "").strip()
-        form_owner = (owner_row.get("owner_id") or "").strip()
-        if uid not in (form_user, form_owner):
+        if uid not in (form_user,):
             # If ownership columns are empty, allow update by any authenticated user who knows the ID (best-effort)
-            if form_user or form_owner:
+            if form_user:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
         set_sql = ", ".join(sets) + ", updated_at = NOW()"
@@ -2455,16 +2454,15 @@ async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[st
     async with async_session_maker() as session:
         # Ownership check
         res = await session.execute(
-            text("SELECT user_id, owner_id FROM forms WHERE id = :fid LIMIT 1"),
+            text("SELECT user_id FROM forms WHERE id = :fid LIMIT 1"),
             {"fid": form_id},
         )
         row = res.mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail="Form not found")
         form_user = (row.get("user_id") or "").strip()
-        form_owner = (row.get("owner_id") or "").strip()
-        if uid not in (form_user, form_owner):
-            if form_user or form_owner:
+        if uid not in (form_user,):
+            if form_user:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
         set_sql = ", ".join(sets) + ", updated_at = NOW()"

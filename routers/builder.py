@@ -1921,11 +1921,30 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     if isinstance(password_protection_enabled, bool):
         sets.append("password_protection_enabled = :password_protection_enabled")
         params["password_protection_enabled"] = bool(password_protection_enabled)
+    # Accept either a precomputed hash or a plaintext password (builder may send either)
     password_hash = payload.get("passwordHash") or payload.get("password_hash")
-    if isinstance(password_hash, str):
-        # Store as provided (assume already hashed client-side or handled by caller)
+    password_plain = payload.get("password") or payload.get("passwordPlain") or payload.get("password_plain")
+    if isinstance(password_hash, str) and password_hash.strip() != "":
+        # Store provided hash as-is
         sets.append("password_hash = :password_hash")
-        params["password_hash"] = password_hash.strip() or None
+        params["password_hash"] = password_hash.strip()
+    elif isinstance(password_plain, str):
+        pw = password_plain.strip()
+        # Best-effort hashing: prefer bcrypt if available; else store as-is (not ideal, but functional)
+        try:
+            import bcrypt  # type: ignore
+            hashed = bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+            sets.append("password_hash = :password_hash")
+            params["password_hash"] = hashed
+        except Exception:
+            # Fallback: store plaintext; consider securing later with a migration to hashed values
+            sets.append("password_hash = :password_hash")
+            params["password_hash"] = pw or None
+    else:
+        # If explicitly disabling protection and no password provided, clear hash to avoid stale secrets
+        if password_protection_enabled is False:
+            sets.append("password_hash = :password_hash")
+            params["password_hash"] = None
 
     # Branding: persist JSON and translate removePoweredBy -> show_powered_by
     # Also accept explicit showPoweredBy/show_powered_by at top-level

@@ -3618,12 +3618,124 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         if not sent_via_integration:
                             send_email_html(to_email, subject, html)
                     except Exception:
-                        pass
+                        logger.exception("client auto-reply failed form_id=%s", form_id)
     except Exception:
         logger.exception("auto-reply send failed form_id=%s", form_id)
 
     logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp
+
+
+# -----------------------------
+# Submissions listing & retrieval (Neon-backed)
+# -----------------------------
+
+@router.get("/forms/{form_id}/responses")
+@limiter.limit("120/minute")
+async def list_form_responses(form_id: str, request: Request, limit: int = 50, offset: int = 0):
+    """List submissions for a form owned by the authenticated user.
+    Returns a paginated list ordered by submitted_at DESC.
+    Response: { items: [...], total: number, limit, offset }
+    """
+    # Auth
+    try:
+        uid = _verify_firebase_uid(request)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Clamp pagination
+    try:
+        limit = max(1, min(200, int(limit)))
+    except Exception:
+        limit = 50
+    try:
+        offset = max(0, int(offset))
+    except Exception:
+        offset = 0
+
+    async with async_session_maker() as session:
+        # Ownership check
+        res = await session.execute(
+            text("SELECT user_id FROM forms WHERE id = :fid LIMIT 1"),
+            {"fid": form_id},
+        )
+        row = res.mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Form not found")
+        form_user = (row.get("user_id") or "").strip()
+        if uid not in (form_user,):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        # Total count
+        res_total = await session.execute(
+            text("SELECT COUNT(*) AS cnt FROM submissions WHERE form_id = :fid"),
+            {"fid": form_id},
+        )
+        total = int((res_total.mappings().first() or {}).get("cnt") or 0)
+
+        # Page items
+        res_items = await session.execute(
+            text(
+                """
+                SELECT id, form_id, form_owner_id, data, metadata,
+                       ip_address, country_code, user_agent, submitted_at
+                FROM submissions
+                WHERE form_id = :fid
+                ORDER BY submitted_at DESC
+                LIMIT :lim OFFSET :off
+                """
+            ).bindparams(
+                bindparam("lim", type_=Integer),
+                bindparam("off", type_=Integer),
+            ),
+            {"fid": form_id, "lim": limit, "off": offset},
+        )
+        items = [dict(r) for r in res_items.mappings().all()]
+
+    # Back-compat: some clients expect 'responses'
+    return {"items": items, "responses": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/forms/{form_id}/responses/{response_id}")
+@limiter.limit("240/minute")
+async def get_form_response(form_id: str, response_id: str, request: Request):
+    """Get a single submission for a form owned by the authenticated user."""
+    try:
+        uid = _verify_firebase_uid(request)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with async_session_maker() as session:
+        # Ownership check
+        res = await session.execute(
+            text("SELECT user_id FROM forms WHERE id = :fid LIMIT 1"),
+            {"fid": form_id},
+        )
+        row = res.mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Form not found")
+        form_user = (row.get("user_id") or "").strip()
+        if uid not in (form_user,):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        res_sub = await session.execute(
+            text(
+                """
+                SELECT id, form_id, form_owner_id, data, metadata,
+                       ip_address, country_code, user_agent, submitted_at
+                FROM submissions
+                WHERE id = :rid AND form_id = :fid
+                LIMIT 1
+                """
+            ),
+            {"rid": response_id, "fid": form_id},
+        )
+        sub = res_sub.mappings().first()
+        if not sub:
+            raise HTTPException(status_code=404, detail="Response not found")
+        # Back-compat alias 'responses' with single-element array
+        payload = dict(sub)
+        return {"response": payload, "responses": [payload]}
 
 @router.post("/forms/{form_id}/custom-domain/verify")
 async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optional[str] = None):

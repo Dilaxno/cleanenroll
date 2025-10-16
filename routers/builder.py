@@ -363,45 +363,30 @@ async def analytics_events(request: Request, payload: Dict[str, Any] | None = No
     data = {k: v for k, v in body.items() if k not in extras_keys}
     ip = _client_ip(request)
 
-    try:
-        # Optional date filters
-    th_from = None
-    th_to = None
-    try:
-        if from_:
-            th_from = datetime.fromisoformat(from_.replace("Z", "+00:00")).replace(tzinfo=None)
-    except Exception:
-        th_from = None
-    try:
-        if to:
-            th_to = datetime.fromisoformat(to.replace("Z", "+00:00")).replace(tzinfo=None)
-    except Exception:
-        th_to = None
-
     async with async_session_maker() as session:
-            await _ensure_form_analytics_table(session)
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO form_analytics_events (id, form_id, user_id, type, ts, session_id, visitor_id, device_info, data, ip)
-                    VALUES (:id, :form_id, :user_id, :type, :ts, :session_id, :visitor_id, CAST(:device_info AS JSONB), CAST(:data AS JSONB), :ip)
-                    ON CONFLICT (id) DO NOTHING
-                    """
-                ),
-                {
-                    "id": eid,
-                    "form_id": form_id,
-                    "user_id": body.get("userId") or None,
-                    "type": etype,
-                    "ts": ts or datetime.utcnow(),
-                    "session_id": session_id,
-                    "visitor_id": visitor_id,
-                    "device_info": json.dumps(device_info) if isinstance(device_info, dict) else None,
-                    "data": json.dumps(data) if isinstance(data, dict) else json.dumps({}),
-                    "ip": ip,
-                }
-            )
-            await session.commit()
+        await _ensure_form_analytics_table(session)
+        await session.execute(
+            text(
+                """
+                INSERT INTO form_analytics_events (id, form_id, user_id, type, ts, session_id, visitor_id, device_info, data, ip)
+                VALUES (:id, :form_id, :user_id, :type, :ts, :session_id, :visitor_id, CAST(:device_info AS JSONB), CAST(:data AS JSONB), :ip)
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": eid,
+                "form_id": form_id,
+                "user_id": body.get("userId") or None,
+                "type": etype,
+                "ts": ts or datetime.utcnow(),
+                "session_id": session_id,
+                "visitor_id": visitor_id,
+                "device_info": json.dumps(device_info) if isinstance(device_info, dict) else None,
+                "data": json.dumps(data) if isinstance(data, dict) else json.dumps({}),
+                "ip": ip,
+            }
+        )
+        await session.commit()
     except Exception:
         # Best effort only
         pass

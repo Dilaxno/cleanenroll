@@ -2658,6 +2658,47 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         signatures[fid] = meta
                     except Exception:
                         continue
+        # Server-side price min/max validation using built answers
+        try:
+            for f in fields_def:
+                try:
+                    if str((f.get("type") or "")).strip().lower() != "price":
+                        continue
+                    fid = str(f.get("id") or "")
+                    if not fid:
+                        continue
+                    amt_raw = None
+                    v = answers.get(fid)
+                    if isinstance(v, dict):
+                        amt_raw = v.get("amount")
+                    elif isinstance(v, (str, int, float)):
+                        amt_raw = v
+                    if amt_raw in (None, ""):
+                        # If required and empty, earlier required check should catch; skip here
+                        continue
+                    try:
+                        amount = float(str(amt_raw))
+                    except Exception:
+                        continue
+                    try:
+                        min_p = f.get("minPrice")
+                        max_p = f.get("maxPrice")
+                        min_v = float(min_p) if min_p is not None else None
+                        max_v = float(max_p) if max_p is not None else None
+                    except Exception:
+                        min_v = None
+                        max_v = None
+                    label = str(f.get("label") or "Price")
+                    if (min_v is not None) and (amount < min_v):
+                        raise HTTPException(status_code=400, detail=f"Minimum allowed is {min_v} for '{label}'.")
+                    if (max_v is not None) and (amount > max_v):
+                        raise HTTPException(status_code=400, detail=f"Maximum allowed is {max_v} for '{label}'.")
+                except HTTPException:
+                    raise
+                except Exception:
+                    continue
+        except HTTPException:
+            raise
             # Build a small ZIP manifest of file URLs (best-effort)
             files_zip_meta = None
             try:

@@ -364,7 +364,21 @@ async def analytics_events(request: Request, payload: Dict[str, Any] | None = No
     ip = _client_ip(request)
 
     try:
-        async with async_session_maker() as session:
+        # Optional date filters
+    th_from = None
+    th_to = None
+    try:
+        if from_:
+            th_from = datetime.fromisoformat(from_.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        th_from = None
+    try:
+        if to:
+            th_to = datetime.fromisoformat(to.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        th_to = None
+
+    async with async_session_maker() as session:
             await _ensure_form_analytics_table(session)
             await session.execute(
                 text(
@@ -3041,7 +3055,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
     # Persist submission in Neon (store answers and metadata)
     try:
-        submitted_at = datetime.utcnow().isoformat()
+        # Use a real datetime object so Postgres stores TIMESTAMPTZ and comparisons work
+        submitted_at = datetime.utcnow()
         response_id = uuid.uuid4().hex
 
         # Only persist answers for known fields, keyed by field id
@@ -3632,7 +3647,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
 @router.get("/forms/{form_id}/responses")
 @limiter.limit("120/minute")
-async def list_form_responses(form_id: str, request: Request, limit: int = 50, offset: int = 0):
+async def list_form_responses(form_id: str, request: Request, limit: int = 50, offset: int = 0, from_: Optional[str] = Query(default=None, alias="from"), to: Optional[str] = Query(default=None)):
     """List submissions for a form owned by the authenticated user.
     Returns a paginated list ordered by submitted_at DESC.
     Response: { items: [...], total: number, limit, offset }
@@ -3666,30 +3681,52 @@ async def list_form_responses(form_id: str, request: Request, limit: int = 50, o
         if uid not in (form_user,):
             raise HTTPException(status_code=403, detail="Forbidden")
 
-        # Total count
-        res_total = await session.execute(
-            text("SELECT COUNT(*) AS cnt FROM submissions WHERE form_id = :fid"),
-            {"fid": form_id},
-        )
+        # Total count with optional date filters
+        if th_from and th_to:
+            res_total = await session.execute(
+                text("SELECT COUNT(*) AS cnt FROM submissions WHERE form_id = :fid AND submitted_at BETWEEN :f AND :t"),
+                {"fid": form_id, "f": th_from, "t": th_to},
+            )
+        elif th_from:
+            res_total = await session.execute(
+                text("SELECT COUNT(*) AS cnt FROM submissions WHERE form_id = :fid AND submitted_at >= :f"),
+                {"fid": form_id, "f": th_from},
+            )
+        elif th_to:
+            res_total = await session.execute(
+                text("SELECT COUNT(*) AS cnt FROM submissions WHERE form_id = :fid AND submitted_at <= :t"),
+                {"fid": form_id, "t": th_to},
+            )
+        else:
+            res_total = await session.execute(
+                text("SELECT COUNT(*) AS cnt FROM submissions WHERE form_id = :fid"),
+                {"fid": form_id},
+            )
         total = int((res_total.mappings().first() or {}).get("cnt") or 0)
 
         # Page items
-        res_items = await session.execute(
-            text(
-                """
-                SELECT id, form_id, form_owner_id, data, metadata,
-                       ip_address, country_code, user_agent, submitted_at
-                FROM submissions
-                WHERE form_id = :fid
-                ORDER BY submitted_at DESC
-                LIMIT :lim OFFSET :off
-                """
-            ).bindparams(
-                bindparam("lim", type_=Integer),
-                bindparam("off", type_=Integer),
-            ),
-            {"fid": form_id, "lim": limit, "off": offset},
+        base_sql = """
+            SELECT id, form_id, form_owner_id, data, metadata,
+                   ip_address, country_code, user_agent, submitted_at
+            FROM submissions
+            WHERE form_id = :fid
+        """
+        cond = ""
+        params = {"fid": form_id, "lim": limit, "off": offset}
+        if th_from and th_to:
+            cond = " AND submitted_at BETWEEN :f AND :t"
+            params.update({"f": th_from, "t": th_to})
+        elif th_from:
+            cond = " AND submitted_at >= :f"
+            params.update({"f": th_from})
+        elif th_to:
+            cond = " AND submitted_at <= :t"
+            params.update({"t": th_to})
+        sql_items = text(base_sql + cond + " ORDER BY submitted_at DESC LIMIT :lim OFFSET :off").bindparams(
+            bindparam("lim", type_=Integer),
+            bindparam("off", type_=Integer),
         )
+        res_items = await session.execute(sql_items, params)
         items = [dict(r) for r in res_items.mappings().all()]
 
     # Back-compat: some clients expect 'responses'

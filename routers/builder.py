@@ -1835,6 +1835,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     subtitle = payload.get("subtitle")
     description = payload.get("description")
     theme = payload.get("theme")
+    branding = payload.get("branding")
     redirect_cfg = payload.get("redirect")
     # Spam/GDPR flags and geo restrictions
     recaptcha_enabled = payload.get("recaptchaEnabled")
@@ -1913,6 +1914,39 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             params["min_domain_age_days"] = mdd
     except Exception:
         pass
+    # Branding: persist JSON and translate removePoweredBy -> show_powered_by
+    # Also accept explicit showPoweredBy/show_powered_by at top-level
+    # Precompute potential show_powered_by value, but only set when provided
+    _spb_provided = False
+    _spb_value = None
+    try:
+        # From branding.removePoweredBy / branding.remove_powered_by
+        if isinstance(branding, dict):
+            # Persist branding JSON as-is
+            try:
+                sets.append("branding = CAST(:branding AS JSONB)")
+                params["branding"] = json.dumps(branding)
+            except Exception:
+                pass
+            if isinstance(branding.get("removePoweredBy"), bool):
+                _spb_provided = True
+                _spb_value = (not branding.get("removePoweredBy"))
+            elif isinstance(branding.get("remove_powered_by"), bool):
+                _spb_provided = True
+                _spb_value = (not branding.get("remove_powered_by"))
+        # Top-level explicit showPoweredBy/show_powered_by overrides branding mapping when present
+        if isinstance(payload.get("showPoweredBy"), bool):
+            _spb_provided = True
+            _spb_value = bool(payload.get("showPoweredBy"))
+        elif isinstance(payload.get("show_powered_by"), bool):
+            _spb_provided = True
+            _spb_value = bool(payload.get("show_powered_by"))
+        if _spb_provided:
+            sets.append("show_powered_by = :show_powered_by")
+            params["show_powered_by"] = bool(_spb_value)
+    except Exception:
+        pass
+
     if isinstance(theme, dict):
         # Merge typography styles into theme if supplied
         try:

@@ -1526,8 +1526,7 @@ async def public_get_form(form_id: str):
                     "color": (btn.get("color") if isinstance(btn, dict) else None) or primary,
                     "textColor": (btn.get("textColor") if isinstance(btn, dict) else None) or "#ffffff",
                 }
-                data["submitButton"] = computed_btn
-                # Also ensure theme.submitButton exists for clients that only read theme
+                # Ensure theme.submitButton exists for clients that read theme
                 try:
                     if not isinstance(theme, dict):
                         theme = {}
@@ -1555,6 +1554,79 @@ async def public_get_form(form_id: str):
     except Exception:
         # Avoid leaking internals; treat as not found for public endpoint
         raise HTTPException(status_code=404, detail="Form not found")
+
+@router.put("/forms/{form_id}")
+@limiter.limit("60/minute")
+async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | None = None):
+    """Update core form properties in Neon.
+    Allowed fields: name, title, subtitle, description, theme (JSON).
+    Requires Firebase ID token and ownership of the form.
+    """
+    # Auth
+    try:
+        uid = _verify_firebase_uid(request)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = payload or {}
+    name = payload.get("name")
+    title = payload.get("title")
+    subtitle = payload.get("subtitle")
+    description = payload.get("description")
+    theme = payload.get("theme")
+
+    # Build dynamic SET clause
+    sets = []
+    params: Dict[str, Any] = {"fid": form_id}
+    if isinstance(name, str):
+        sets.append("name = :name")
+        params["name"] = name.strip()
+    if isinstance(title, str):
+        sets.append("title = :title")
+        params["title"] = title.strip()
+    if isinstance(subtitle, str):
+        sets.append("subtitle = :subtitle")
+        params["subtitle"] = subtitle.strip()
+    if isinstance(description, str):
+        sets.append("description = :description")
+        params["description"] = description.strip()
+    if isinstance(theme, dict):
+        sets.append("theme = :theme::jsonb")
+        params["theme"] = json.dumps(theme)
+    if not sets:
+        return {"success": True, "updated": 0}
+
+    async with async_session_maker() as session:
+        # Ownership check: prefer user_id, fallback owner_id
+        res = await session.execute(
+            text(
+                """
+                SELECT user_id, owner_id FROM forms
+                WHERE id = :fid
+                LIMIT 1
+                """
+            ),
+            {"fid": form_id},
+        )
+        owner_row = res.mappings().first()
+        if not owner_row:
+            raise HTTPException(status_code=404, detail="Form not found")
+        form_user = (owner_row.get("user_id") or "").strip()
+        form_owner = (owner_row.get("owner_id") or "").strip()
+        if uid not in (form_user, form_owner):
+            # If ownership columns are empty, allow update by any authenticated user who knows the ID (best-effort)
+            if form_user or form_owner:
+                raise HTTPException(status_code=403, detail="Forbidden")
+
+        set_sql = ", ".join(sets) + ", updated_at = NOW()"
+        sql = text(f"""
+            UPDATE forms
+            SET {set_sql}
+            WHERE id = :fid
+        """)
+        await session.execute(sql, params)
+        await session.commit()
+        return {"success": True, "updated": 1}
 
 @router.post("/forms/{form_id}/view")
 @limiter.limit("600/minute")
@@ -3491,8 +3563,8 @@ async def analytics_countries(form_id: str, from_ts: Optional[str] = Query(defau
                 SELECT country_iso2, SUM(count) AS cnt
                 FROM form_countries_analytics
                 WHERE form_id = :fid
-                  AND (:start::date IS NULL OR day >= :start::date)
-                  AND (:end::date   IS NULL OR day <= :end::date)
+                  AND (:start IS NULL OR day >= CAST(:start AS DATE))
+                  AND (:end   IS NULL OR day <= CAST(:end   AS DATE))
                 GROUP BY country_iso2
                 ORDER BY cnt DESC
                 """

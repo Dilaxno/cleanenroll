@@ -292,6 +292,95 @@ def _save_analytics_countries(form_id: str, data: Dict[str, Any]) -> None:
     except Exception:
         return None
 
+async def _ensure_form_analytics_table(session):
+    try:
+        await session.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS form_analytics_events (
+                id TEXT PRIMARY KEY,
+                form_id TEXT NOT NULL,
+                user_id TEXT,
+                type TEXT NOT NULL,
+                ts TIMESTAMPTZ,
+                session_id TEXT,
+                visitor_id TEXT,
+                device_info JSONB,
+                data JSONB,
+                ip TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """
+        ))
+        await session.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_form_analytics_form_ts ON form_analytics_events(form_id, ts);
+            """
+        ))
+    except Exception:
+        pass
+
+@router.post("/analytics/events")
+@limiter.limit("600/minute")
+async def analytics_events(request: Request, payload: Dict[str, Any] | None = None):
+    """Accept client analytics events from the viewer page. Best-effort persist; never error fatally."""
+    try:
+        body = payload or {}
+    except Exception:
+        body = {}
+
+    # Normalize fields expected from analyticsService.js
+    eid = str(body.get("id") or uuid.uuid4().hex)
+    form_id = str(body.get("formId") or "").strip()
+    if not form_id:
+        # Ignore events without a form id
+        return {"ok": False}
+    etype = str(body.get("type") or "").strip() or "event"
+    ts_raw = str(body.get("ts") or "").strip()
+    try:
+        ts = None
+        if ts_raw:
+            if ts_raw.endswith("Z"):
+                ts_raw = ts_raw[:-1] + "+00:00"
+            ts = datetime.fromisoformat(ts_raw)
+    except Exception:
+        ts = None
+    session_id = body.get("sessionId") or None
+    visitor_id = body.get("visitorId") or None
+    device_info = body.get("deviceInfo") if isinstance(body.get("deviceInfo"), dict) else None
+    # Keep the rest as generic data
+    extras_keys = {"id","formId","userId","type","ts","deviceInfo","sessionId","visitorId"}
+    data = {k: v for k, v in body.items() if k not in extras_keys}
+    ip = _client_ip(request)
+
+    try:
+        async with async_session_maker() as session:
+            await _ensure_form_analytics_table(session)
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO form_analytics_events (id, form_id, user_id, type, ts, session_id, visitor_id, device_info, data, ip)
+                    VALUES (:id, :form_id, :user_id, :type, :ts, :session_id, :visitor_id, CAST(:device_info AS JSONB), CAST(:data AS JSONB), :ip)
+                    ON CONFLICT (id) DO NOTHING
+                    """
+                ),
+                {
+                    "id": eid,
+                    "form_id": form_id,
+                    "user_id": body.get("userId") or None,
+                    "type": etype,
+                    "ts": ts or datetime.utcnow(),
+                    "session_id": session_id,
+                    "visitor_id": visitor_id,
+                    "device_info": json.dumps(device_info) if isinstance(device_info, dict) else None,
+                    "data": json.dumps(data) if isinstance(data, dict) else json.dumps({}),
+                    "ip": ip,
+                }
+            )
+            await session.commit()
+    except Exception:
+        # Best effort only
+        pass
+    return {"ok": True}
 
 # Models aligned with the front-end builder
 class SubmitButton(BaseModel):
@@ -1427,6 +1516,138 @@ async def get_geoapify_key(request: Request):
         key = ""
     return {"key": key}
 
+async def _ensure_form_abandons_table(session):
+    try:
+        await session.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS form_abandons (
+                id TEXT PRIMARY KEY,
+                form_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                user_id TEXT,
+                values JSONB,
+                filled_count INTEGER,
+                total_fields INTEGER,
+                progress TEXT,
+                step INTEGER,
+                total_steps INTEGER,
+                submitted BOOLEAN DEFAULT FALSE,
+                abandoned BOOLEAN DEFAULT FALSE,
+                abandoned_at TIMESTAMPTZ,
+                last_activity_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """
+        ))
+        # Helpful index for lookups
+        await session.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_form_abandons_form_session ON form_abandons(form_id, session_id);
+            """
+        ))
+    except Exception:
+        # Best effort; subsequent upserts may fail if DDL is not permitted
+        pass
+
+@router.post("/abandons/upsert")
+@limiter.limit("240/minute")
+async def upsert_abandon(request: Request, payload: Dict[str, Any] | None = None):
+    """Upsert partial progress/abandonment state for a form session.
+    Expects JSON body with at least: { formId, sessionId }.
+    Other optional fields are persisted when provided by the frontend.
+    Public endpoint (no auth) to avoid blocking anonymous submitters.
+    """
+    try:
+        body = payload or {}
+    except Exception:
+        body = {}
+
+    form_id = str((body.get("formId") or "").strip())
+    session_id = str((body.get("sessionId") or "").strip())
+    if not form_id or not session_id:
+        raise HTTPException(status_code=400, detail="Missing formId or sessionId")
+
+    # Prepare fields
+    rec = {
+        "id": f"{form_id}:{session_id}",
+        "form_id": form_id,
+        "session_id": session_id,
+        "user_id": (body.get("userId") or None),
+        "values": body.get("values") if isinstance(body.get("values"), (dict, list)) else None,
+        "filled_count": _safe_int(body.get("filledCount")),
+        "total_fields": _safe_int(body.get("totalFields")),
+        "progress": (body.get("progress") or None),
+        "step": _safe_int(body.get("step")),
+        "total_steps": _safe_int(body.get("totalSteps")),
+        "submitted": bool(body.get("submitted")) if body.get("submitted") is not None else False,
+        "abandoned": bool(body.get("abandoned")) if body.get("abandoned") is not None else False,
+        "abandoned_at": _safe_iso_dt(body.get("abandonedAt")),
+        "last_activity_at": _safe_iso_dt(body.get("lastActivityAt")),
+        "updated_at": _safe_iso_dt(body.get("updatedAt")) or datetime.utcnow(),
+    }
+
+    # Upsert
+    try:
+        async with async_session_maker() as session:
+            await _ensure_form_abandons_table(session)
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO form_abandons (
+                        id, form_id, session_id, user_id, values, filled_count, total_fields, progress,
+                        step, total_steps, submitted, abandoned, abandoned_at, last_activity_at, updated_at
+                    ) VALUES (
+                        :id, :form_id, :session_id, :user_id, CAST(:values AS JSONB), :filled_count, :total_fields, :progress,
+                        :step, :total_steps, :submitted, :abandoned, :abandoned_at, :last_activity_at, :updated_at
+                    )
+                    ON CONFLICT (id) DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
+                        values = EXCLUDED.values,
+                        filled_count = EXCLUDED.filled_count,
+                        total_fields = EXCLUDED.total_fields,
+                        progress = EXCLUDED.progress,
+                        step = EXCLUDED.step,
+                        total_steps = EXCLUDED.total_steps,
+                        submitted = EXCLUDED.submitted,
+                        abandoned = EXCLUDED.abandoned,
+                        abandoned_at = COALESCE(EXCLUDED.abandoned_at, form_abandons.abandoned_at),
+                        last_activity_at = COALESCE(EXCLUDED.last_activity_at, form_abandons.last_activity_at),
+                        updated_at = EXCLUDED.updated_at
+                    """
+                ),
+                {
+                    **rec,
+                    # Ensure JSONB binding works across drivers by serializing dict/list to text
+                    "values": json.dumps(rec["values"]) if isinstance(rec["values"], (dict, list)) else None,
+                },
+            )
+            await session.commit()
+        return {"ok": True}
+    except Exception as e:
+        # Do not leak internals
+        raise HTTPException(status_code=500, detail="Failed to save progress")
+
+def _safe_int(v):
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+def _safe_iso_dt(v):
+    try:
+        s = (v or "").strip()
+        if not s:
+            return None
+        # Accept ISO strings, allow trailing Z
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
 @router.get("/forms/{form_id}")
 async def public_get_form(form_id: str):
     """
@@ -1687,7 +1908,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
                         text(
                             """
                             UPDATE forms
-                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{titleStyle}', to_jsonb(:ts::json), true),
+                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{titleStyle}', CAST(:ts AS JSONB), true),
                                 updated_at = NOW()
                             WHERE id = :fid
                             """
@@ -1699,7 +1920,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
                         text(
                             """
                             UPDATE forms
-                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{subtitleStyle}', to_jsonb(:ss::json), true),
+                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{subtitleStyle}', CAST(:ss AS JSONB), true),
                                 updated_at = NOW()
                             WHERE id = :fid
                             """
@@ -2136,12 +2357,12 @@ async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str
             text(
                 """
                 UPDATE forms
-                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{pageBackgroundImage}', to_jsonb(:url::text), true),
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{pageBackgroundImage}', CAST(:url AS JSONB), true),
                     updated_at = NOW()
                 WHERE id = :fid
                 """
             ),
-            {"fid": form_id, "url": url}
+            {"fid": form_id, "url": json.dumps(url)}
         )
         await session.commit()
     return {"ok": True, "publicUrl": url}
@@ -2183,7 +2404,7 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
             text(
                 """
                 UPDATE forms
-                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButton}', to_jsonb(:btn::json), true),
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButton}', CAST(:btn AS JSONB), true),
                     updated_at = NOW()
                 WHERE id = :fid
                 """
@@ -2294,12 +2515,12 @@ async def update_theme_split_image(request: Request, form_id: str, payload: Dict
             text(
                 """
                 UPDATE forms
-                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{splitImageUrl}', to_jsonb(:url::text), true),
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{splitImageUrl}', CAST(:url AS JSONB), true),
                     updated_at = NOW()
                 WHERE id = :fid
                 """
             ),
-            {"fid": form_id, "url": url}
+            {"fid": form_id, "url": json.dumps(url)}
         )
         await session.commit()
     return {"ok": True, "publicUrl": url}

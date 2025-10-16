@@ -1914,6 +1914,19 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             params["min_domain_age_days"] = mdd
     except Exception:
         pass
+    # Password protection: persist to Neon (accept camelCase and snake_case)
+    password_protection_enabled = payload.get("passwordProtectionEnabled")
+    if not isinstance(password_protection_enabled, bool):
+        password_protection_enabled = payload.get("password_protection_enabled")
+    if isinstance(password_protection_enabled, bool):
+        sets.append("password_protection_enabled = :password_protection_enabled")
+        params["password_protection_enabled"] = bool(password_protection_enabled)
+    password_hash = payload.get("passwordHash") or payload.get("password_hash")
+    if isinstance(password_hash, str):
+        # Store as provided (assume already hashed client-side or handled by caller)
+        sets.append("password_hash = :password_hash")
+        params["password_hash"] = password_hash.strip() or None
+
     # Branding: persist JSON and translate removePoweredBy -> show_powered_by
     # Also accept explicit showPoweredBy/show_powered_by at top-level
     # Precompute potential show_powered_by value, but only set when provided

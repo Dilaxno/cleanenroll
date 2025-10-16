@@ -1474,6 +1474,54 @@ async def public_get_form(form_id: str):
             except Exception:
                 # Best-effort; leave as-is on error
                 pass
+            # Map DB snake_case fields to frontend camelCase expected by SPA
+            try:
+                # Normalize JSON/text fields first
+                def _json_or(val, default):
+                    try:
+                        if isinstance(val, str):
+                            return json.loads(val)
+                        return val if isinstance(val, (dict, list)) else default
+                    except Exception:
+                        return default
+
+                # Build camelCase payload
+                out = {
+                    "id": data.get("id"),
+                    "userId": data.get("user_id") or data.get("userId"),
+                    "title": data.get("title"),
+                    "subtitle": data.get("subtitle"),
+                    "description": data.get("description"),
+                    "language": data.get("language") or "en",
+                    "thankYouMessage": data.get("thankYouMessage") or data.get("thank_you_message") or "Thank you for your submission! We'll get back to you soon.",
+                    "redirect": _json_or(data.get("redirect"), {}) or {},
+                    "emailValidationEnabled": bool(data.get("email_validation_enabled") if data.get("email_validation_enabled") is not None else data.get("emailValidationEnabled")),
+                    "professionalEmailsOnly": bool(data.get("professional_emails_only") if data.get("professional_emails_only") is not None else data.get("professionalEmailsOnly")),
+                    "blockRoleEmails": bool(data.get("block_role_emails") if data.get("block_role_emails") is not None else data.get("blockRoleEmails")),
+                    "emailRejectBadReputation": bool(data.get("email_reject_bad_reputation") if data.get("email_reject_bad_reputation") is not None else data.get("emailRejectBadReputation")),
+                    "minDomainAgeDays": int(data.get("min_domain_age_days") or data.get("minDomainAgeDays") or 30),
+                    "recaptchaEnabled": bool(data.get("recaptcha_enabled") if data.get("recaptcha_enabled") is not None else data.get("recaptchaEnabled")),
+                    "urlScanEnabled": bool(data.get("url_scan_enabled") if data.get("url_scan_enabled") is not None else data.get("urlScanEnabled")),
+                    "gdprComplianceEnabled": bool(data.get("gdpr_compliance_enabled") if data.get("gdpr_compliance_enabled") is not None else data.get("gdprComplianceEnabled")),
+                    "showPoweredBy": True if data.get("show_powered_by") is None and data.get("showPoweredBy") is None else bool(data.get("show_powered_by") if data.get("show_powered_by") is not None else data.get("showPoweredBy")),
+                    "privacyPolicyUrl": data.get("privacyPolicyUrl") or data.get("privacy_policy_url") or "",
+                    "passwordProtectionEnabled": bool(data.get("password_protection_enabled") if data.get("password_protection_enabled") is not None else data.get("passwordProtectionEnabled")),
+                    "passwordHash": data.get("password_hash") or data.get("passwordHash"),
+                    "preventDuplicateByIP": bool(data.get("prevent_duplicate_by_ip") if data.get("prevent_duplicate_by_ip") is not None else data.get("preventDuplicateByIP")),
+                    "duplicateWindowHours": int(data.get("duplicate_window_hours") or data.get("duplicateWindowHours") or 24),
+                    "restrictedCountries": _json_or(data.get("restricted_countries"), data.get("restrictedCountries") or []) or [],
+                    "allowedCountries": _json_or(data.get("allowed_countries"), data.get("allowedCountries") or []) or [],
+                    "isPublished": bool(data.get("is_published") if data.get("is_published") is not None else data.get("isPublished")),
+                    "formType": data.get("formType") or data.get("form_type") or "simple",
+                    # Large JSON blobs already normalized above
+                    "theme": data.get("theme") or {},
+                    "branding": _json_or(data.get("branding"), data.get("branding") or {}) or {},
+                    "fields": _json_or(data.get("fields"), data.get("fields") or []) or [],
+                }
+                return out
+            except Exception:
+                # Fallback to original data shape
+                return data
             # Best-effort: increment views in Neon as well (in case client didn't POST /view)
             try:
                 async with async_session_maker() as session2:

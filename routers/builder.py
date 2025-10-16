@@ -1817,7 +1817,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     if isinstance(redirect_cfg, dict):
         # Expect shape { enabled: bool, url: str }
         try:
-            sets.append("redirect = :redirect::jsonb")
+            sets.append("redirect = CAST(:redirect AS JSONB)")
             params["redirect"] = json.dumps(redirect_cfg)
         except Exception:
             pass
@@ -1831,7 +1831,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     if isinstance(restricted_countries, list):
         try:
             norm = [str(c).strip().upper() for c in restricted_countries if str(c).strip()]
-            sets.append("restricted_countries = :restricted_countries::jsonb")
+            sets.append("restricted_countries = CAST(:restricted_countries AS JSONB)")
             params["restricted_countries"] = json.dumps(norm)
         except Exception:
             pass
@@ -1869,13 +1869,13 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
                 theme["subtitleStyle"] = subtitle_style
         except Exception:
             pass
-        sets.append("theme = :theme::jsonb")
+        sets.append("theme = CAST(:theme AS JSONB)")
         params["theme"] = json.dumps(theme)
     if not sets:
         return {"success": True, "updated": 0}
 
     async with async_session_maker() as session:
-        # Ownership check: prefer user_id, fallback owner_id
+        # Ownership check: prefer user_id
         res = await session.execute(
             text(
                 """
@@ -1894,14 +1894,41 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             # If ownership columns are empty, allow update by any authenticated user who knows the ID (best-effort)
             if form_user:
                 raise HTTPException(status_code=403, detail="Forbidden")
+        # Filter SET clauses to existing columns to avoid ProgrammingError on missing columns
+        try:
+            cols_res = await session.execute(
+                text(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'forms'
+                    """
+                )
+            )
+            existing_cols = {r[0] for r in cols_res}
+        except Exception:
+            existing_cols = set(["id","user_id","title","name","description","form_type","is_published","views","submissions","submission_limit","fields","theme","branding","allowed_domains","idempotency_key","created_at","updated_at"])
 
-        set_sql = ", ".join(sets) + ", updated_at = NOW()"
-        sql = text(f"""
-            UPDATE forms
-            SET {set_sql}
-            WHERE id = :fid
-        """)
-        await session.execute(sql, params)
+        def _col_from_set(s: str) -> str:
+            try:
+                return s.split("=", 1)[0].strip().split()[0]
+            except Exception:
+                return ""
+
+        filtered_sets = [s for s in sets if _col_from_set(s) in existing_cols]
+        if filtered_sets:
+            set_sql = ", ".join(filtered_sets) + ", updated_at = NOW()"
+            sql = text(f"""
+                UPDATE forms
+                SET {set_sql}
+                WHERE id = :fid
+            """)
+            # Keep only params referenced by the query
+            import re as _re
+            needed = set(_re.findall(r":([a-zA-Z_][a-zA-Z0-9_]*)", set_sql)) | {"fid"}
+            exec_params = {k: v for k, v in params.items() if k in needed}
+            exec_params["fid"] = form_id
+            await session.execute(sql, exec_params)
+        # If filtered out everything, skip base UPDATE; JSONB merges below may still run
         # If theme wasn't provided but individual styles were, upsert them into theme JSONB
         try:
             if not isinstance(theme, dict):
@@ -2434,21 +2461,17 @@ async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[st
     subject = payload.get("subject")
     message_html = payload.get("messageHtml")
 
-    sets = []
-    params: Dict[str, Any] = {"fid": form_id}
+    # Persist into theme JSONB to avoid schema drift issues
+    patch: Dict[str, Any] = {}
     if isinstance(enabled, bool):
-        sets.append("auto_reply_enabled = :enabled")
-        params["enabled"] = enabled
+        patch["autoReplyEnabled"] = enabled
     if isinstance(email_field_id, str):
-        sets.append("auto_reply_email_field_id = :efid")
-        params["efid"] = email_field_id.strip()
+        patch["autoReplyEmailFieldId"] = email_field_id.strip()
     if isinstance(subject, str):
-        sets.append("auto_reply_subject = :subj")
-        params["subj"] = subject.strip()
+        patch["autoReplySubject"] = subject.strip()
     if isinstance(message_html, str):
-        sets.append("auto_reply_message_html = :html")
-        params["html"] = message_html
-    if not sets:
+        patch["autoReplyMessageHtml"] = message_html
+    if not patch:
         return {"success": True, "updated": 0}
 
     async with async_session_maker() as session:
@@ -2465,10 +2488,16 @@ async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[st
             if form_user:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
-        set_sql = ", ".join(sets) + ", updated_at = NOW()"
         await session.execute(
-            text(f"UPDATE forms SET {set_sql} WHERE id = :fid"),
-            params,
+            text(
+                """
+                UPDATE forms
+                SET theme = COALESCE(theme, '{}'::jsonb) || CAST(:patch AS JSONB),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "patch": json.dumps(patch)},
         )
         await session.commit()
         return {"success": True, "updated": 1}
@@ -3069,7 +3098,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                             id, form_id, form_owner_id, data, metadata,
                             ip_address, country_code, user_agent, submitted_at
                         ) VALUES (
-                            :id, :form_id, :owner_id, :data::jsonb, :metadata::jsonb,
+                            :id, :form_id, :owner_id, CAST(:data AS JSONB), CAST(:metadata AS JSONB),
                             :ip, :country, :ua, :submitted_at
                         )
                         """

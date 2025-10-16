@@ -954,6 +954,40 @@ async def verify_confirm(token: str):
                     user = admin_auth.get_user_by_email(email)
                     if not getattr(user, "email_verified", False):
                         admin_auth.update_user(user.uid, email_verified=True)
+                    # Persist email verified status to Neon users table
+                    try:
+                        from sqlalchemy import text as _text  # type: ignore
+                        from backend.db.database import async_session_maker  # type: ignore
+                    except Exception:
+                        async_session_maker = None  # type: ignore
+                    if async_session_maker is not None:
+                        try:
+                            async with async_session_maker() as session:
+                                # Prefer updating by uid if available; fallback to email match
+                                if getattr(user, "uid", None):
+                                    await session.execute(
+                                        _text("UPDATE users SET email_verified = TRUE, updated_at = NOW() WHERE uid = :uid"),
+                                        {"uid": user.uid},
+                                    )
+                                else:
+                                    await session.execute(
+                                        _text("UPDATE users SET email_verified = TRUE, updated_at = NOW() WHERE email = :email"),
+                                        {"email": email},
+                                    )
+                                await session.commit()
+                        except Exception:
+                            # Do not fail verification if Neon update fails
+                            pass
+                    # Best-effort Firestore mirror (if admin Firestore available)
+                    try:
+                        from backend.utils.firebase_admin_adapter import admin_firestore  # type: ignore
+                        if admin_firestore is not None and getattr(user, "uid", None):
+                            try:
+                                admin_firestore.document(f"users/{user.uid}").set({"emailVerified": True}, merge=True)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
                     pass
         except Exception:

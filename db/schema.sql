@@ -9,6 +9,7 @@ CREATE TABLE users (
     display_name VARCHAR(255),
     photo_url TEXT,
     plan VARCHAR(50) DEFAULT 'free',
+    email_verified BOOLEAN DEFAULT FALSE,
     forms_count INTEGER DEFAULT 0,
     signup_ip VARCHAR(45),
     signup_country VARCHAR(2),

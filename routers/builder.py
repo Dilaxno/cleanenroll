@@ -403,7 +403,8 @@ class ThemeSchema(BaseModel):
     inputBorderSide: Literal["all", "top", "right", "bottom", "left"] = "all"
     # Optional input shadow
     inputShadowEnabled: bool = False
-    # Thank-you screen colors
+    # Split image mode
+    splitImageEnabled: bool = False
     thankYouBgColor: str = "#ecfdf5"
     thankYouTextColor: str = "#065f46"
     # Font settings (persist custom or Google font)
@@ -419,6 +420,13 @@ class ThemeSchema(BaseModel):
     splitImageFit: Literal["cover", "contain"] = "cover"
     splitImageWidthPercent: int = Field(default=50, ge=20, le=80)
     splitImageBgColor: Optional[str] = None
+
+    # Submit button styling (label/color/textColor)
+    submitButton: Optional[SubmitButton] = None
+    # Typography styles under theme (mirror of top-level fields)
+    # Using dict typing for forward-compatibility
+    titleStyle: Optional[Dict[str, Any]] = None
+    subtitleStyle: Optional[Dict[str, Any]] = None
 
 
 class HeadingStyle(BaseModel):

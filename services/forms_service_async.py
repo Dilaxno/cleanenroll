@@ -7,7 +7,7 @@ import uuid
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from sqlalchemy import text
+from sqlalchemy import text, Integer, String, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_session
@@ -21,16 +21,29 @@ class AsyncFormsService:
     @staticmethod
     async def get_forms_by_user(session: AsyncSession, user_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Get forms for a specific user"""
-        query = text("""
-            SELECT * FROM forms 
-            WHERE user_id = :user_id
-            ORDER BY created_at DESC
-            LIMIT :limit OFFSET :offset
-        """)
-        
+        # Normalize pagination values and bind explicit types to avoid driver ambiguity
+        safe_limit = int(limit) if isinstance(limit, int) else 100
+        safe_offset = max(0, int(offset) if isinstance(offset, int) else 0)
+
+        query = (
+            text(
+                """
+                SELECT * FROM forms 
+                WHERE user_id = :user_id
+                ORDER BY created_at DESC
+                LIMIT :limit_val OFFSET :offset_val
+                """
+            )
+            .bindparams(
+                bindparam("user_id", type_=String),
+                bindparam("limit_val", type_=Integer),
+                bindparam("offset_val", type_=Integer),
+            )
+        )
+
         result = await session.execute(
-            query, 
-            {"user_id": user_id, "limit": limit, "offset": offset}
+            query,
+            {"user_id": user_id, "limit_val": safe_limit, "offset_val": safe_offset},
         )
         
         return [dict(row) for row in result.mappings().all()]

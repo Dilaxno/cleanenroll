@@ -169,7 +169,7 @@ class AsyncFormsService:
             validated_data['updated_at'] = now
             
         # Convert complex objects to JSON strings for database
-        for json_field in ['fields', 'theme', 'branding', 'allowed_domains']:
+        for json_field in ['fields', 'theme', 'branding', 'allowed_domains', 'redirect', 'restricted_countries', 'allowed_countries', 'embed_allow_list']:
             if json_field in validated_data and not isinstance(validated_data[json_field], str):
                 validated_data[json_field] = json.dumps(validated_data[json_field])
 

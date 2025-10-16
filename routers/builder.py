@@ -1834,16 +1834,29 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     title = payload.get("title")
     subtitle = payload.get("subtitle")
     description = payload.get("description")
-    theme = payload.get("theme")
-    redirect_cfg = payload.get("redirect")
-    # Spam/GDPR flags and geo restrictions
-    recaptcha_enabled = payload.get("recaptchaEnabled")
-    gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
-    restricted_countries = payload.get("restrictedCountries")
-    # Link safety check (URL scanner)
-    url_scan_enabled = payload.get("urlScanEnabled")
-    # Email validation flags/settings
+    language = payload.get("language")
+    thank_you_message = payload.get("thankYouMessage") or payload.get("thank_you_message")
+    redirect_cfg = payload.get("redirect") if isinstance(payload.get("redirect"), (dict, str)) else None
     email_validation_enabled = payload.get("emailValidationEnabled")
+    professional_emails_only = payload.get("professionalEmailsOnly")
+    block_role_emails = payload.get("blockRoleEmails")
+    email_reject_bad_reputation = payload.get("emailRejectBadReputation")
+    min_domain_age_days = payload.get("minDomainAgeDays")
+    recaptcha_enabled = payload.get("recaptchaEnabled")
+    url_scan_enabled = payload.get("urlScanEnabled")
+    gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
+    show_powered_by = payload.get("showPoweredBy")
+    privacy_policy_url = payload.get("privacyPolicyUrl") or payload.get("privacy_policy_url")
+    password_protection_enabled = payload.get("passwordProtectionEnabled")
+    password_hash = payload.get("passwordHash") or payload.get("password_hash")
+    prevent_duplicate_by_ip = payload.get("preventDuplicateByIP")
+    duplicate_window_hours = payload.get("duplicateWindowHours")
+    restricted_countries = payload.get("restrictedCountries")
+    allowed_countries = payload.get("allowedCountries")
+    is_published = payload.get("isPublished")
+    form_type = payload.get("formType") or payload.get("form_type")
+    embed_allow_list = payload.get("embedAllowList") or payload.get("embed_allow_list")
+    theme = payload.get("theme") if isinstance(payload.get("theme"), dict) else None
     professional_emails_only = payload.get("professionalEmailsOnly")
     block_role_emails = payload.get("blockRoleEmails")
     email_reject_bad_rep = payload.get("emailRejectBadReputation")
@@ -1924,270 +1937,137 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             pass
         sets.append("theme = CAST(:theme AS JSONB)")
         params["theme"] = json.dumps(theme)
+    # --- Extended settings persistence ---
+    if isinstance(description, str):
+        sets.append("description = :description")
+        params["description"] = description
+    if isinstance(language, str) and language:
+        sets.append("language = :language")
+        params["language"] = language
+    if isinstance(thank_you_message, str):
+        sets.append("thank_you_message = :tym")
+        params["tym"] = thank_you_message
+    if redirect_cfg is not None:
+        # Accept string URL or object {enabled, url}
+        try:
+            if isinstance(redirect_cfg, str):
+                redirect_obj = {"enabled": bool(redirect_cfg.strip()), "url": redirect_cfg.strip() or None}
+            else:
+                redirect_obj = {
+                    "enabled": bool(redirect_cfg.get("enabled")),
+                    "url": (redirect_cfg.get("url") or "").strip() or None,
+                }
+        except Exception:
+            redirect_obj = {}
+        sets.append("redirect = CAST(:redirect AS JSONB)")
+        params["redirect"] = json.dumps(redirect_obj)
+    if email_validation_enabled is not None:
+        sets.append("email_validation_enabled = :email_validation_enabled")
+        params["email_validation_enabled"] = bool(email_validation_enabled)
+    if professional_emails_only is not None:
+        sets.append("professional_emails_only = :professional_emails_only")
+        params["professional_emails_only"] = bool(professional_emails_only)
+    if block_role_emails is not None:
+        sets.append("block_role_emails = :block_role_emails")
+        params["block_role_emails"] = bool(block_role_emails)
+    if email_reject_bad_reputation is not None:
+        sets.append("email_reject_bad_reputation = :email_reject_bad_reputation")
+        params["email_reject_bad_reputation"] = bool(email_reject_bad_reputation)
+    if isinstance(min_domain_age_days, (int, str)):
+        try:
+            sets.append("min_domain_age_days = :min_domain_age_days")
+            params["min_domain_age_days"] = int(min_domain_age_days)
+        except Exception:
+            pass
+    if recaptcha_enabled is not None:
+        sets.append("recaptcha_enabled = :recaptcha_enabled")
+        params["recaptcha_enabled"] = bool(recaptcha_enabled)
+    if url_scan_enabled is not None:
+        sets.append("url_scan_enabled = :url_scan_enabled")
+        params["url_scan_enabled"] = bool(url_scan_enabled)
+    if gdpr_compliance_enabled is not None:
+        sets.append("gdpr_compliance_enabled = :gdpr_compliance_enabled")
+        params["gdpr_compliance_enabled"] = bool(gdpr_compliance_enabled)
+    if show_powered_by is not None:
+        sets.append("show_powered_by = :show_powered_by")
+        params["show_powered_by"] = bool(show_powered_by)
+    if isinstance(privacy_policy_url, str):
+        sets.append("privacy_policy_url = :privacy_policy_url")
+        params["privacy_policy_url"] = privacy_policy_url.strip()
+    if password_protection_enabled is not None:
+        sets.append("password_protection_enabled = :password_protection_enabled")
+        params["password_protection_enabled"] = bool(password_protection_enabled)
+    if isinstance(password_hash, str) and password_hash:
+        sets.append("password_hash = :password_hash")
+        params["password_hash"] = password_hash
+    if prevent_duplicate_by_ip is not None:
+        sets.append("prevent_duplicate_by_ip = :prevent_duplicate_by_ip")
+        params["prevent_duplicate_by_ip"] = bool(prevent_duplicate_by_ip)
+    if isinstance(duplicate_window_hours, (int, str)):
+        try:
+            sets.append("duplicate_window_hours = :duplicate_window_hours")
+            params["duplicate_window_hours"] = int(duplicate_window_hours)
+        except Exception:
+            pass
+    if isinstance(restricted_countries, list):
+        try:
+            rc = _normalize_country_list(restricted_countries)
+            sets.append("restricted_countries = CAST(:restricted_countries AS JSONB)")
+            params["restricted_countries"] = json.dumps(rc)
+        except Exception:
+            pass
+    if isinstance(allowed_countries, list):
+        try:
+            ac = _normalize_country_list(allowed_countries)
+            sets.append("allowed_countries = CAST(:allowed_countries AS JSONB)")
+            params["allowed_countries"] = json.dumps(ac)
+        except Exception:
+            pass
+    if is_published is not None:
+        sets.append("is_published = :is_published")
+        params["is_published"] = bool(is_published)
+    if isinstance(form_type, str) and form_type:
+        sets.append("form_type = :form_type")
+        params["form_type"] = form_type.strip().lower()
+    if isinstance(embed_allow_list, list):
+        try:
+            # Domain normalization similar to allowedDomains handling elsewhere
+            norm = []
+            seen = set()
+            for d in embed_allow_list:
+                try:
+                    nd = _normalize_domain(d)
+                except Exception:
+                    nd = (str(d or '')).strip().lower()
+                if nd and nd not in seen:
+                    seen.add(nd)
+                    norm.append(nd)
+            sets.append("embed_allow_list = CAST(:embed_allow_list AS JSONB)")
+            params["embed_allow_list"] = json.dumps(norm)
+        except Exception:
+            pass
     if not sets:
         return {"success": True, "updated": 0}
 
     async with async_session_maker() as session:
-        # Ownership check: prefer user_id
+        # Verify ownership
         res = await session.execute(
-            text(
-                """
-                SELECT user_id FROM forms
-                WHERE id = :fid
-                LIMIT 1
-                """
-            ),
+            text("SELECT user_id FROM forms WHERE id = :fid LIMIT 1"),
             {"fid": form_id},
         )
-        owner_row = res.mappings().first()
-        if not owner_row:
+        row = res.mappings().first()
+        if not row:
             raise HTTPException(status_code=404, detail="Form not found")
-        form_user = (owner_row.get("user_id") or "").strip()
+        form_user = (row.get("user_id") or "").strip()
         if uid not in (form_user,):
-            # If ownership columns are empty, allow update by any authenticated user who knows the ID (best-effort)
             if form_user:
                 raise HTTPException(status_code=403, detail="Forbidden")
-        # Filter SET clauses to existing columns to avoid ProgrammingError on missing columns
-        try:
-            cols_res = await session.execute(
-                text(
-                    """
-                    SELECT column_name FROM information_schema.columns
-                    WHERE table_name = 'forms'
-                    """
-                )
-            )
-            existing_cols = {r[0] for r in cols_res}
-        except Exception:
-            existing_cols = set(["id","user_id","title","name","description","form_type","is_published","views","submissions","submission_limit","fields","theme","branding","allowed_domains","idempotency_key","created_at","updated_at"])
-
-        def _col_from_set(s: str) -> str:
-            try:
-                return s.split("=", 1)[0].strip().split()[0]
-            except Exception:
-                return ""
-
-        filtered_sets = [s for s in sets if _col_from_set(s) in existing_cols]
-        if filtered_sets:
-            set_sql = ", ".join(filtered_sets) + ", updated_at = NOW()"
-            sql = text(f"""
-                UPDATE forms
-                SET {set_sql}
-                WHERE id = :fid
-            """)
-            # Keep only params referenced by the query
-            import re as _re
-            needed = set(_re.findall(r":([a-zA-Z_][a-zA-Z0-9_]*)", set_sql)) | {"fid"}
-            exec_params = {k: v for k, v in params.items() if k in needed}
-            exec_params["fid"] = form_id
-            await session.execute(sql, exec_params)
-        # If filtered out everything, skip base UPDATE; JSONB merges below may still run
-        # If theme wasn't provided but individual styles were, upsert them into theme JSONB
-        try:
-            if not isinstance(theme, dict):
-                if isinstance(title_style, dict):
-                    await session.execute(
-                        text(
-                            """
-                            UPDATE forms
-                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{titleStyle}', CAST(:ts AS JSONB), true),
-                                updated_at = NOW()
-                            WHERE id = :fid
-                            """
-                        ),
-                        {"fid": form_id, "ts": json.dumps(title_style)},
-                    )
-                if isinstance(subtitle_style, dict):
-                    await session.execute(
-                        text(
-                            """
-                            UPDATE forms
-                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{subtitleStyle}', CAST(:ss AS JSONB), true),
-                                updated_at = NOW()
-                            WHERE id = :fid
-                            """
-                        ),
-                        {"fid": form_id, "ss": json.dumps(subtitle_style)},
-                    )
-        except Exception:
-            # Do not fail the entire request if style merge fails
-            pass
+        # Perform update
+        sql = f"UPDATE forms SET {', '.join(sets)}, updated_at = NOW() WHERE id = :fid"
+        params["fid"] = form_id
+        await session.execute(text(sql), params)
         await session.commit()
-        return {"success": True, "updated": 1}
-
-@router.post("/forms/{form_id}/view")
-@limiter.limit("600/minute")
-async def increment_form_view(form_id: str, request: Request):
-    """Increment a form's view count in Neon (PostgreSQL)."""
-    try:
-        async with async_session_maker() as session:
-            res = await session.execute(
-                text("""
-                    UPDATE forms
-                    SET views = COALESCE(views, 0) + 1,
-                        updated_at = NOW()
-                    WHERE id = :fid
-                """),
-                {"fid": form_id}
-            )
-            await session.commit()
-        # rowcount may be None on some drivers; treat as success when not zero-ish
-        try:
-            updated = int(res.rowcount or 0)
-        except Exception:
-            updated = 0
-        if updated < 1:
-            return {"ok": False, "reason": "not_found"}
-        return {"ok": True, "updated": updated}
-    except Exception:
-        # Do not leak internals; return ok=false to avoid breaking the client
-        return {"ok": False}
-
-@router.get("/forms/{form_id}/views")
-async def get_form_views(form_id: str):
-    """Return current views counter for a form (debug-friendly, no auth)."""
-    try:
-        async with async_session_maker() as session:
-            res = await session.execute(
-                text("SELECT views FROM forms WHERE id = :fid LIMIT 1"),
-                {"fid": form_id},
-            )
-            row = res.mappings().first()
-            if not row:
-                raise HTTPException(status_code=404, detail="Form not found")
-            return {"views": int(row.get("views") or 0)}
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to fetch views")
-
-@router.get("/user/plan")
-@limiter.limit("120/minute")
-async def get_user_plan(request: Request, userId: str = Query(...)):
-    """Return the plan for a given user from Neon (PostgreSQL).
-    Response: { "plan": "free" | "pro" | "business" | "enterprise" }
-    """
-    try:
-        uid = str(userId or "").strip()
-        if not uid:
-            raise HTTPException(status_code=400, detail="Missing userId")
-        is_pro = await _is_pro_plan(uid)
-        # We only know if the user is on a paid tier or not; return a simple mapping
-        return {"plan": "pro" if is_pro else "free"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("get_user_plan failed userId=%s", userId)
-        raise HTTPException(status_code=500, detail=str(e))
-
-# -----------------------------
-# Email integration status (Neon persistence)
-# -----------------------------
-
-async def _ensure_email_integrations_table(session):
-    try:
-        await session.execute(text(
-            """
-            CREATE TABLE IF NOT EXISTS email_integrations (
-                uid TEXT PRIMARY KEY,
-                google_connected BOOLEAN DEFAULT FALSE,
-                microsoft_connected BOOLEAN DEFAULT FALSE,
-                smtp_enabled BOOLEAN DEFAULT FALSE,
-                smtp_host TEXT,
-                smtp_port INTEGER,
-                smtp_username TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            );
-            """
-        ))
-    except Exception:
-        # Best-effort; subsequent queries may fail if DDL is not permitted
-        pass
-
-@router.get("/email/integration/status")
-@limiter.limit("120/minute")
-async def get_email_integration_status(request: Request, userId: Optional[str] = Query(default=None)):
-    """Return email integration status for a user from Neon.
-    Response: { google: bool, microsoft: bool, smtp: bool }
-    """
-    try:
-        if not userId:
-            # No user provided; return safe defaults
-            return {"google": False, "microsoft": False, "smtp": False}
-        async with async_session_maker() as session:
-            await _ensure_email_integrations_table(session)
-            await session.commit()
-            res = await session.execute(
-                text("""
-                    SELECT google_connected, microsoft_connected, smtp_enabled
-                    FROM email_integrations
-                    WHERE uid = :uid
-                    LIMIT 1
-                """),
-                {"uid": userId}
-            )
-            row = res.mappings().first()
-            if not row:
-                return {"google": False, "microsoft": False, "smtp": False}
-            return {
-                "google": bool(row.get("google_connected")) if row.get("google_connected") is not None else False,
-                "microsoft": bool(row.get("microsoft_connected")) if row.get("microsoft_connected") is not None else False,
-                "smtp": bool(row.get("smtp_enabled")) if row.get("smtp_enabled") is not None else False,
-            }
-    except Exception:
-        # Do not leak errors; default to all false
-        return {"google": False, "microsoft": False, "smtp": False}
-
-@router.post("/email/smtp/save")
-@limiter.limit("30/minute")
-async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = None, userId: Optional[str] = Query(default=None)):
-    """Save SMTP settings status for a user in Neon and mark SMTP as enabled.
-    Expects JSON body: { host, port, username, password } (password not persisted).
-    Returns: { success: true }
-    """
-    try:
-        if not userId:
-            raise HTTPException(status_code=400, detail="Missing userId")
-        payload = payload or {}
-        host = str(payload.get("host") or "").strip()
-        try:
-            port = int(payload.get("port")) if payload.get("port") is not None else 0
-        except Exception:
-            port = 0
-        username = str(payload.get("username") or "").strip()
-        # Basic validation aligned with frontend
-        if not host or port not in (465, 587) or not username:
-            raise HTTPException(status_code=400, detail="Enter SMTP host, port (465/587), username and password")
-        async with async_session_maker() as session:
-            await _ensure_email_integrations_table(session)
-            # Upsert status and metadata; do not store password server-side in this endpoint
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO email_integrations (uid, smtp_enabled, smtp_host, smtp_port, smtp_username, updated_at)
-                    VALUES (:uid, TRUE, :host, :port, :username, NOW())
-                    ON CONFLICT (uid) DO UPDATE SET
-                        smtp_enabled = EXCLUDED.smtp_enabled,
-                        smtp_host = EXCLUDED.smtp_host,
-                        smtp_port = EXCLUDED.smtp_port,
-                        smtp_username = EXCLUDED.smtp_username,
-                        updated_at = NOW()
-                    """
-                ),
-                {"uid": userId, "host": host, "port": port, "username": username}
-            )
-            await session.commit()
-            return {"success": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("save_smtp_settings failed uid=%s", userId)
-        raise HTTPException(status_code=500, detail="Failed to save SMTP settings")
-
-# -----------------------------
-# Upload presign endpoints for R2 + theme updates persisted to Neon
-# -----------------------------
+        return {"success": True, "updated": len(sets)}
 
 @router.post("/forms/{form_id}/notify-client")
 @limiter.limit("60/minute")

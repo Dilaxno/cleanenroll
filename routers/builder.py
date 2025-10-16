@@ -448,13 +448,11 @@ class ThemeSchema(BaseModel):
     splitImageFit: Literal["cover", "contain"] = "cover"
     splitImageWidthPercent: int = Field(default=50, ge=20, le=80)
     splitImageBgColor: Optional[str] = None
-
     # Submit button styling (label/color/textColor)
-    submitButton: Optional[SubmitButton] = None
+    submitButton: SubmitButton = Field(default_factory=SubmitButton)
     # Typography styles under theme (mirror of top-level fields)
-    # Using dict typing for forward-compatibility
-    titleStyle: Optional[Dict[str, Any]] = None
-    subtitleStyle: Optional[Dict[str, Any]] = None
+    titleStyle: Dict[str, Any] = Field(default_factory=dict)
+    subtitleStyle: Dict[str, Any] = Field(default_factory=dict)
 
 
 class HeadingStyle(BaseModel):

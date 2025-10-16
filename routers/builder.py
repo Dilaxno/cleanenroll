@@ -1946,6 +1946,27 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             sets.append("password_hash = :password_hash")
             params["password_hash"] = None
 
+    # Duplicate submissions by IP: persist flags (accept camelCase and snake_case)
+    prevent_duplicate_by_ip = payload.get("preventDuplicateByIP")
+    if not isinstance(prevent_duplicate_by_ip, bool):
+        prevent_duplicate_by_ip = payload.get("prevent_duplicate_by_ip")
+    if isinstance(prevent_duplicate_by_ip, bool):
+        sets.append("prevent_duplicate_by_ip = :prevent_duplicate_by_ip")
+        params["prevent_duplicate_by_ip"] = bool(prevent_duplicate_by_ip)
+
+    duplicate_window_hours = payload.get("duplicateWindowHours")
+    if duplicate_window_hours is None:
+        duplicate_window_hours = payload.get("duplicate_window_hours")
+    try:
+        if duplicate_window_hours is not None:
+            dwh = int(duplicate_window_hours)
+            if dwh < 0:
+                dwh = 0
+            sets.append("duplicate_window_hours = :duplicate_window_hours")
+            params["duplicate_window_hours"] = dwh
+    except Exception:
+        pass
+
     # Branding: persist JSON and translate removePoweredBy -> show_powered_by
     # Also accept explicit showPoweredBy/show_powered_by at top-level
     # Precompute potential show_powered_by value, but only set when provided

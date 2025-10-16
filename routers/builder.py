@@ -1582,6 +1582,19 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     subtitle = payload.get("subtitle")
     description = payload.get("description")
     theme = payload.get("theme")
+    redirect_cfg = payload.get("redirect")
+    # Spam/GDPR flags and geo restrictions
+    recaptcha_enabled = payload.get("recaptchaEnabled")
+    gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
+    restricted_countries = payload.get("restrictedCountries")
+    # Link safety check (URL scanner)
+    url_scan_enabled = payload.get("urlScanEnabled")
+    # Email validation flags/settings
+    email_validation_enabled = payload.get("emailValidationEnabled")
+    professional_emails_only = payload.get("professionalEmailsOnly")
+    block_role_emails = payload.get("blockRoleEmails")
+    email_reject_bad_rep = payload.get("emailRejectBadReputation")
+    min_domain_age_days = payload.get("minDomainAgeDays")
     # Typography styles for title/subtitle (persist under theme JSON)
     title_style = payload.get("titleStyle")
     subtitle_style = payload.get("subtitleStyle")
@@ -1601,6 +1614,52 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     if isinstance(description, str):
         sets.append("description = :description")
         params["description"] = description.strip()
+    if isinstance(redirect_cfg, dict):
+        # Expect shape { enabled: bool, url: str }
+        try:
+            sets.append("redirect = :redirect::jsonb")
+            params["redirect"] = json.dumps(redirect_cfg)
+        except Exception:
+            pass
+    # Spam/GDPR flags and geo restrictions
+    if isinstance(recaptcha_enabled, bool):
+        sets.append("recaptcha_enabled = :recaptcha_enabled")
+        params["recaptcha_enabled"] = recaptcha_enabled
+    if isinstance(gdpr_compliance_enabled, bool):
+        sets.append("gdpr_compliance_enabled = :gdpr_compliance_enabled")
+        params["gdpr_compliance_enabled"] = gdpr_compliance_enabled
+    if isinstance(restricted_countries, list):
+        try:
+            norm = [str(c).strip().upper() for c in restricted_countries if str(c).strip()]
+            sets.append("restricted_countries = :restricted_countries::jsonb")
+            params["restricted_countries"] = json.dumps(norm)
+        except Exception:
+            pass
+    # Link safety check (URL scanner)
+    if isinstance(url_scan_enabled, bool):
+        sets.append("url_scan_enabled = :url_scan_enabled")
+        params["url_scan_enabled"] = url_scan_enabled
+    # Email validation flags/settings
+    if isinstance(email_validation_enabled, bool):
+        sets.append("email_validation_enabled = :email_validation_enabled")
+        params["email_validation_enabled"] = email_validation_enabled
+    if isinstance(professional_emails_only, bool):
+        sets.append("professional_emails_only = :professional_emails_only")
+        params["professional_emails_only"] = professional_emails_only
+    if isinstance(block_role_emails, bool):
+        sets.append("block_role_emails = :block_role_emails")
+        params["block_role_emails"] = block_role_emails
+    if isinstance(email_reject_bad_rep, bool):
+        sets.append("email_reject_bad_reputation = :email_reject_bad_reputation")
+        params["email_reject_bad_reputation"] = email_reject_bad_rep
+    try:
+        # Accept numeric string or number
+        if min_domain_age_days is not None:
+            mdd = int(min_domain_age_days)
+            sets.append("min_domain_age_days = :min_domain_age_days")
+            params["min_domain_age_days"] = mdd
+    except Exception:
+        pass
     if isinstance(theme, dict):
         # Merge typography styles into theme if supplied
         try:

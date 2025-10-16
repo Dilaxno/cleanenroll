@@ -1574,6 +1574,9 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     subtitle = payload.get("subtitle")
     description = payload.get("description")
     theme = payload.get("theme")
+    # Typography styles for title/subtitle (persist under theme JSON)
+    title_style = payload.get("titleStyle")
+    subtitle_style = payload.get("subtitleStyle")
 
     # Build dynamic SET clause
     sets = []
@@ -1591,6 +1594,14 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
         sets.append("description = :description")
         params["description"] = description.strip()
     if isinstance(theme, dict):
+        # Merge typography styles into theme if supplied
+        try:
+            if isinstance(title_style, dict):
+                theme["titleStyle"] = title_style
+            if isinstance(subtitle_style, dict):
+                theme["subtitleStyle"] = subtitle_style
+        except Exception:
+            pass
         sets.append("theme = :theme::jsonb")
         params["theme"] = json.dumps(theme)
     if not sets:
@@ -1625,6 +1636,36 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             WHERE id = :fid
         """)
         await session.execute(sql, params)
+        # If theme wasn't provided but individual styles were, upsert them into theme JSONB
+        try:
+            if not isinstance(theme, dict):
+                if isinstance(title_style, dict):
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE forms
+                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{titleStyle}', to_jsonb(:ts::json), true),
+                                updated_at = NOW()
+                            WHERE id = :fid
+                            """
+                        ),
+                        {"fid": form_id, "ts": json.dumps(title_style)},
+                    )
+                if isinstance(subtitle_style, dict):
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE forms
+                            SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{subtitleStyle}', to_jsonb(:ss::json), true),
+                                updated_at = NOW()
+                            WHERE id = :fid
+                            """
+                        ),
+                        {"fid": form_id, "ss": json.dumps(subtitle_style)},
+                    )
+        except Exception:
+            # Do not fail the entire request if style merge fails
+            pass
         await session.commit()
         return {"success": True, "updated": 1}
 

@@ -1840,7 +1840,6 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     recaptcha_enabled = payload.get("recaptchaEnabled")
     gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
     restricted_countries = payload.get("restrictedCountries")
-    allowed_countries = payload.get("allowedCountries")
     # Link safety check (URL scanner)
     url_scan_enabled = payload.get("urlScanEnabled")
     # Email validation flags/settings
@@ -1887,13 +1886,6 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             norm = [str(c).strip().upper() for c in restricted_countries if str(c).strip()]
             sets.append("restricted_countries = CAST(:restricted_countries AS JSONB)")
             params["restricted_countries"] = json.dumps(norm)
-        except Exception:
-            pass
-    if isinstance(allowed_countries, list):
-        try:
-            norm2 = [str(c).strip().upper() for c in allowed_countries if str(c).strip()]
-            sets.append("allowed_countries = CAST(:allowed_countries AS JSONB)")
-            params["allowed_countries"] = json.dumps(norm2)
         except Exception:
             pass
     # Link safety check (URL scanner)
@@ -1989,59 +1981,6 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             exec_params = {k: v for k, v in params.items() if k in needed}
             exec_params["fid"] = form_id
             await session.execute(sql, exec_params)
-        # Update consolidated form_settings JSONB with provided settings
-        try:
-            fs_update: Dict[str, Any] = {}
-            # Redirect settings
-            if isinstance(redirect_cfg, dict):
-                # Only pick whitelisted keys
-                fs_update["redirect"] = {
-                    k: v for k, v in redirect_cfg.items() if k in {"enabled", "url"}
-                }
-            # Email checks
-            if isinstance(email_validation_enabled, bool):
-                fs_update["emailValidationEnabled"] = email_validation_enabled
-            if isinstance(professional_emails_only, bool):
-                fs_update["professionalEmailsOnly"] = professional_emails_only
-            if isinstance(block_role_emails, bool):
-                fs_update["blockRoleEmails"] = block_role_emails
-            if isinstance(email_reject_bad_rep, bool):
-                fs_update["emailRejectBadReputation"] = email_reject_bad_rep
-            try:
-                if min_domain_age_days is not None:
-                    fs_update["minDomainAgeDays"] = int(min_domain_age_days)
-            except Exception:
-                pass
-            # reCAPTCHA
-            if isinstance(recaptcha_enabled, bool):
-                fs_update["recaptchaEnabled"] = recaptcha_enabled
-            # GDPR and privacy link
-            if isinstance(gdpr_compliance_enabled, bool):
-                fs_update["gdprComplianceEnabled"] = gdpr_compliance_enabled
-            priv = payload.get("privacyPolicyUrl") or payload.get("privacy_policy_url")
-            if isinstance(priv, str) and priv.strip():
-                fs_update["privacyPolicyUrl"] = priv.strip()
-            # Geo restrictions
-            if isinstance(restricted_countries, list):
-                fs_update["restrictedCountries"] = [str(c).strip().upper() for c in restricted_countries if str(c).strip()]
-            if isinstance(allowed_countries, list):
-                fs_update["allowedCountries"] = [str(c).strip().upper() for c in allowed_countries if str(c).strip()]
-
-            if fs_update:
-                await session.execute(
-                    text(
-                        """
-                        UPDATE forms
-                        SET form_settings = COALESCE(form_settings, '{}'::jsonb) || CAST(:fs AS JSONB),
-                            updated_at = NOW()
-                        WHERE id = :fid
-                        """
-                    ),
-                    {"fid": form_id, "fs": json.dumps(fs_update)},
-                )
-        except Exception:
-            # Do not fail if form_settings merge fails
-            pass
         # If filtered out everything, skip base UPDATE; JSONB merges below may still run
         # If theme wasn't provided but individual styles were, upsert them into theme JSONB
         try:

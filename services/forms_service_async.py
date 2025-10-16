@@ -8,7 +8,6 @@ import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_session
@@ -18,18 +17,6 @@ from db.validation import validate_and_save_form
 
 class AsyncFormsService:
     """Async service for handling form operations with PostgreSQL and Pydantic validation"""
-    @staticmethod
-    async def _exec_with_retry(session: AsyncSession, query, params=None):
-        """Execute a query and transparently retry once if asyncpg invalidates cached plans
-        after a schema change (InvalidCachedStatementError).
-        """
-        try:
-            return await session.execute(query, params or {})
-        except DBAPIError as e:
-            # SQLAlchemy wraps asyncpg InvalidCachedStatementError; retry once
-            if "InvalidCachedStatementError" in str(e.orig if hasattr(e, 'orig') else e):
-                return await session.execute(query, params or {})
-            raise
     
     @staticmethod
     async def get_forms_by_user(session: AsyncSession, user_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -41,9 +28,8 @@ class AsyncFormsService:
             LIMIT :limit OFFSET :offset
         """)
         
-        result = await AsyncFormsService._exec_with_retry(
-            session,
-            query,
+        result = await session.execute(
+            query, 
             {"user_id": user_id, "limit": limit, "offset": offset}
         )
         
@@ -60,7 +46,7 @@ class AsyncFormsService:
             params["user_id"] = user_id
             
         query = text(query_text)
-        result = await AsyncFormsService._exec_with_retry(session, query, params)
+        result = await session.execute(query, params)
         row = result.mappings().first()
         
         return dict(row) if row else None
@@ -73,7 +59,7 @@ class AsyncFormsService:
             WHERE user_id = :user_id AND name = :name
         """)
         
-        result = await AsyncFormsService._exec_with_retry(session, query, {"user_id": user_id, "name": name})
+        result = await session.execute(query, {"user_id": user_id, "name": name})
         row = result.mappings().first()
         
         return row["count"] > 0 if row else False
@@ -115,7 +101,7 @@ class AsyncFormsService:
             return False
         # Delete the form and decrement user's forms_count in a single transaction
         try:
-            res = await AsyncFormsService._exec_with_retry(session, text(
+            res = await session.execute(text(
                 """
                 DELETE FROM forms 
                 WHERE id = :form_id AND user_id = :user_id
@@ -192,9 +178,9 @@ class AsyncFormsService:
         if ikey:
             try:
                 # Serialize concurrent creates with the same idempotency key
-                await AsyncFormsService._exec_with_retry(session, text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": str(ikey)})
+                await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": str(ikey)})
                 # Return existing row when present (no duplicate insert)
-                existing = await AsyncFormsService._exec_with_retry(session,
+                existing = await session.execute(
                     text("""
                         SELECT * FROM forms
                         WHERE idempotency_key = :k AND user_id = :uid
@@ -224,7 +210,7 @@ class AsyncFormsService:
             RETURNING *
         """)
         
-        result = await AsyncFormsService._exec_with_retry(session, query, validated_data)
+        result = await session.execute(query, validated_data)
         await session.commit()
         
         # Update user's forms count only on successful insert

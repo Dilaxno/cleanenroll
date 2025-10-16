@@ -73,13 +73,6 @@ else:
         )
     )
 
-# Allow disabling asyncpg prepared statement cache to avoid InvalidCachedStatementError after schema changes
-DISABLE_STMT_CACHE = str(os.getenv("ASYNCPG_DISABLE_STATEMENT_CACHE", "0")).strip().lower() in {"1", "true", "yes"}
-_connect_args = {"ssl": True}
-if DISABLE_STMT_CACHE:
-    # asyncpg parameter to disable statement caching
-    _connect_args["statement_cache_size"] = 0
-
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
@@ -88,7 +81,7 @@ engine = create_async_engine(
     pool_timeout=30,
     pool_recycle=1800,
     pool_pre_ping=True,
-    connect_args=_connect_args,
+    connect_args={"ssl": True},
 )
 
 # Create session factory

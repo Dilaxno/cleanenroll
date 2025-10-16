@@ -4,6 +4,11 @@ Base Pydantic models for data validation and sanitization
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Union
 from pydantic import BaseModel, Field, EmailStr, field_validator, AnyHttpUrl
+try:
+    # Pydantic v2
+    from pydantic import ConfigDict  # type: ignore
+except Exception:
+    ConfigDict = dict  # type: ignore
 import re
 import bleach
 
@@ -58,6 +63,12 @@ class UserModel(BaseDBModel):
 
 class FormModel(BaseDBModel):
     """Form model for validation and sanitization"""
+    # Allow population by both snake_case and camelCase aliases
+    try:
+        model_config = ConfigDict(populate_by_name=True)
+    except Exception:
+        # Fallback for older Pydantic; harmless
+        pass
     id: Optional[str] = None
     user_id: str
     title: str
@@ -72,6 +83,13 @@ class FormModel(BaseDBModel):
     theme: Dict[str, Any] = Field(default_factory=dict)
     branding: Dict[str, Any] = Field(default_factory=dict)
     allowed_domains: List[str] = Field(default_factory=list)
+    # New controls synced from builder to Neon (DB columns expected)
+    password_protection_enabled: bool = Field(default=False, alias="passwordProtectionEnabled")
+    password_hash: Optional[str] = Field(default=None, alias="passwordHash")
+    prevent_duplicate_by_ip: bool = Field(default=False, alias="preventDuplicateByIP")
+    duplicate_window_hours: int = Field(default=24, alias="duplicateWindowHours")
+    show_powered_by: bool = Field(default=True, alias="showPoweredBy")
+    privacy_policy_url: Optional[AnyHttpUrl] = Field(default=None, alias="privacyPolicyUrl")
     idempotency_key: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

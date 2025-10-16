@@ -12,7 +12,6 @@ import base64
 import time
 import logging
 import traceback
-from pydantic import BaseModel, EmailStr
 from datetime import timedelta
 try:
     from standardwebhooks import Webhook  # type: ignore
@@ -273,7 +272,7 @@ async def get_user_preferences(request: Request, userId: str = Query(..., descri
         raise HTTPException(status_code=500, detail="Database not configured")
     async with async_session_maker() as session:
         from sqlalchemy import text as _text  # type: ignore
-        res = await session.execute(_text("SELECT preferences FROM users WHERE uid = :uid LIMIT 1"), {"uid": userId})
+        res = await session.execute(_text("SELECT preferences, marketing_opt_in FROM users WHERE uid = :uid LIMIT 1"), {"uid": userId})
         row = res.mappings().first()
         prefs = (row or {}).get("preferences") if row else None
         if not isinstance(prefs, dict):
@@ -282,6 +281,12 @@ async def get_user_preferences(request: Request, userId: str = Query(..., descri
                 prefs = _json.loads(prefs) if isinstance(prefs, str) else {}
             except Exception:
                 prefs = {}
+        # Merge Neon marketing_opt_in into preferences.marketingEmails if missing
+        try:
+            if (row is not None) and ("marketing_opt_in" in row) and ("marketingEmails" not in prefs):
+                prefs["marketingEmails"] = bool(row["marketing_opt_in"]) if row["marketing_opt_in"] is not None else False
+        except Exception:
+            pass
         return {"preferences": prefs or {}}
 
 
@@ -605,6 +610,90 @@ async def signup_enrich(request: Request):
         pass
 
     return {"status": "ok", "ip": ip, "country": (str(country).upper() if country else None)}
+
+# -----------------------------
+# Signup upsert (create user row in Neon)
+# -----------------------------
+
+class SignupUpsertPayload(BaseModel):
+    email: Optional[EmailStr] = None
+    displayName: Optional[str] = None
+    photoURL: Optional[str] = None
+
+
+@router.options("/api/auth/signup/upsert")
+@router.options("/api/auth/signup/upsert/")
+async def signup_upsert_options():
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+
+@router.post("/api/auth/signup/upsert")
+@router.post("/api/auth/signup/upsert/")
+async def signup_upsert(request: Request, body: SignupUpsertPayload):
+    """Create or update the caller's user row in Neon users table.
+    Requires a valid Firebase ID token in the Authorization header.
+    """
+    # Extract bearer token
+    authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if not authz.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization")
+    token = authz.split(" ", 1)[1].strip()
+
+    # Initialize Firebase Admin
+    try:
+        _ensure_firebase_initialized()
+    except HTTPException as e:
+        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
+    if not (_FB_AVAILABLE and admin_auth is not None):
+        raise HTTPException(status_code=500, detail="Firebase Auth unavailable")
+
+    # Verify token -> uid, claims email when present
+    try:
+        decoded = admin_auth.verify_id_token(token)
+        uid = decoded.get("uid")
+        claim_email = decoded.get("email")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Determine final fields to upsert
+    email = (body.email or claim_email) or None
+    display_name = (body.displayName or "").strip() or None
+    photo_url = (body.photoURL or "").strip() or None
+
+    # Upsert into Neon
+    try:
+        async with async_session_maker() as session:
+            await session.execute(
+                _text(
+                    """
+                    INSERT INTO users (uid, email, display_name, photo_url, created_at, updated_at)
+                    VALUES (:uid, :email, :display_name, :photo_url, NOW(), NOW())
+                    ON CONFLICT (uid) DO UPDATE SET
+                      email = COALESCE(EXCLUDED.email, users.email),
+                      display_name = COALESCE(EXCLUDED.display_name, users.display_name),
+                      photo_url = COALESCE(EXCLUDED.photo_url, users.photo_url),
+                      updated_at = NOW()
+                    """
+                ),
+                {
+                    "uid": uid,
+                    "email": email,
+                    "display_name": display_name,
+                    "photo_url": photo_url,
+                },
+            )
+            await session.commit()
+    except Exception as e:
+        logger.exception("[signup_upsert] Neon upsert failed")
+        raise HTTPException(status_code=500, detail="Failed to persist user")
+
+    return {"status": "ok", "uid": uid}
 
 # --- Token helpers for password reset ---
 RESET_TOKEN_LEEWAY = 60  # seconds of clock skew allowed

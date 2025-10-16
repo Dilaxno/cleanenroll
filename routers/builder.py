@@ -97,6 +97,17 @@ except Exception:
 
 from typing import Optional as _Optional
 
+# Shared limiter and async DB session must be defined before any route decorators
+try:
+    from utils.limiter import limiter  # type: ignore
+    from db.database import async_session_maker  # type: ignore
+except Exception:
+    from utils.limiter import limiter  # type: ignore
+    from db.database import async_session_maker  # type: ignore
+
+# FastAPI router for this module
+router = APIRouter(prefix="/api/builder", tags=["builder"])
+
 async def _is_pro_plan(user_id: _Optional[str]) -> bool:
     """Return True if the user's plan in Neon is a paid tier."""
     if not user_id:
@@ -1493,15 +1504,7 @@ def _geo_from_ip(ip: str) -> Tuple[Optional[str], Optional[float], Optional[floa
 # Routes
 # -----------------------------
 
-# Use the shared limiter instance configured in utils.limiter (supports both package and flat runs)
-try:
-    from utils.limiter import limiter  # type: ignore
-    from db.database import async_session_maker  # type: ignore
-except Exception:
-    from utils.limiter import limiter  # type: ignore
-    from db.database import async_session_maker  # type: ignore
-
-router = APIRouter(prefix="/api/builder", tags=["builder"])
+# Routes start here
 
 # Public endpoint to fetch Geoapify API key from server env for the frontend
 @router.get("/geoapify/key")

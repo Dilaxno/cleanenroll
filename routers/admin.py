@@ -112,6 +112,10 @@ try:
     from db.database import async_session_maker  # type: ignore
 except Exception:
     from ..db.database import async_session_maker  # type: ignore
+try:
+    from sqlalchemy import text as _text  # type: ignore
+except Exception:
+    _text = None  # type: ignore
 
 class AdminUserUpdate(BaseModel):
     plan: Optional[str] = None
@@ -231,7 +235,7 @@ async def list_users(
         params["limit"] = int(limit)
         items: List[Dict[str, Any]] = []
         async with async_session_maker() as session:
-            res = await session.execute(sql, params)
+            res = await session.execute(_text(sql), params)
             rows = res.fetchall()
         for r in rows:
             it = {
@@ -279,9 +283,11 @@ async def get_user(request: Request, uid: str):
     try:
         async with async_session_maker() as session:
             res = await session.execute(
-                "SELECT uid, email, display_name, photo_url, plan, forms_count, signup_ip, signup_country, "
-                "signup_geo_lat, signup_geo_lon, signup_user_agent, signup_at, created_at, updated_at "
-                "FROM users WHERE uid = :uid",
+                _text(
+                    "SELECT uid, email, display_name, photo_url, plan, forms_count, signup_ip, signup_country, "
+                    "signup_geo_lat, signup_geo_lon, signup_user_agent, signup_at, created_at, updated_at "
+                    "FROM users WHERE uid = :uid"
+                ),
                 {"uid": uid},
             )
             row = res.first()
@@ -332,7 +338,7 @@ async def update_user(request: Request, uid: str, payload: AdminUserUpdate = Bod
         set_sql = ", ".join(set_parts + ["updated_at = NOW()"])
         try:
             async with async_session_maker() as session:
-                await session.execute(f"UPDATE users SET {set_sql} WHERE uid = :uid", params)
+                await session.execute(_text(f"UPDATE users SET {set_sql} WHERE uid = :uid"), params)
                 await session.commit()
         except Exception as e:
             logger.exception("[admin] update_user Neon update failed")
@@ -374,7 +380,7 @@ async def delete_user(request: Request, uid: str, hard: bool = Query(default=Tru
     # 2) Neon: delete user row (cascades)
     try:
         async with async_session_maker() as session:
-            await session.execute("DELETE FROM users WHERE uid = :uid", {"uid": uid})
+            await session.execute(_text("DELETE FROM users WHERE uid = :uid"), {"uid": uid})
             await session.commit()
     except Exception as e:
         logger.warning("[admin] Neon delete failed for %s: %s", uid, e)

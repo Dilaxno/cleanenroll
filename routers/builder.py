@@ -1791,6 +1791,7 @@ async def public_get_form(form_id: str):
                     "minDomainAgeDays": int(data.get("min_domain_age_days") or data.get("minDomainAgeDays") or 30),
                     "recaptchaEnabled": bool(data.get("recaptcha_enabled") if data.get("recaptcha_enabled") is not None else data.get("recaptchaEnabled")),
                     "urlScanEnabled": bool(data.get("url_scan_enabled") if data.get("url_scan_enabled") is not None else data.get("urlScanEnabled")),
+                    "fileSafetyCheckEnabled": bool(data.get("file_safety_check_enabled") if data.get("file_safety_check_enabled") is not None else data.get("fileSafetyCheckEnabled")),
                     "gdprComplianceEnabled": bool(data.get("gdpr_compliance_enabled") if data.get("gdpr_compliance_enabled") is not None else data.get("gdprComplianceEnabled")),
                     "showPoweredBy": True if data.get("show_powered_by") is None and data.get("showPoweredBy") is None else bool(data.get("show_powered_by") if data.get("show_powered_by") is not None else data.get("showPoweredBy")),
                     "privacyPolicyUrl": data.get("privacyPolicyUrl") or data.get("privacy_policy_url") or "",
@@ -1856,6 +1857,8 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     restricted_countries = payload.get("restrictedCountries")
     # Link safety check (URL scanner)
     url_scan_enabled = payload.get("urlScanEnabled")
+    # File safety check
+    file_safety_check_enabled = payload.get("fileSafetyCheckEnabled")
     # Email validation flags/settings
     email_validation_enabled = payload.get("emailValidationEnabled")
     professional_emails_only = payload.get("professionalEmailsOnly")
@@ -1909,6 +1912,10 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     if isinstance(url_scan_enabled, bool):
         sets.append("url_scan_enabled = :url_scan_enabled")
         params["url_scan_enabled"] = url_scan_enabled
+    # File safety check
+    if isinstance(file_safety_check_enabled, bool):
+        sets.append("file_safety_check_enabled = :file_safety_check_enabled")
+        params["file_safety_check_enabled"] = file_safety_check_enabled
     # Email validation flags/settings
     if isinstance(email_validation_enabled, bool):
         sets.append("email_validation_enabled = :email_validation_enabled")

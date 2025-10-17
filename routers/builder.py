@@ -86,6 +86,14 @@ GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY") or ""
 _GEOAPIFY_AVAILABLE = bool(GEOAPIFY_API_KEY)
 _GEO_LOOKUP_AVAILABLE = bool(_GEOAPIFY_AVAILABLE or _DBIPCITY_AVAILABLE)
 
+# Firestore (optional for legacy mirroring)
+try:
+    from utils import firestore as _fs  # type: ignore
+    _FS_AVAILABLE = True
+except Exception:
+    _fs = None  # type: ignore
+    _FS_AVAILABLE = False
+
 # Logger
 logger = logging.getLogger("backend.builder")
 # Log geo lookup availability at import time
@@ -225,7 +233,7 @@ def _normalize_bg_public_url(u: Optional[str]) -> Optional[str]:
  
 
 
-async def _analytics_increment_country(session, form_id: str, country_iso2: Optional[str], submitted_at_iso: str) -> None:
+async def _analytics_increment_country(session, form_id: str, country_iso2: Optional[str], submitted_at) -> None:
     """Increment Neon-backed per-day country counters.
     Uses INSERT ... ON CONFLICT to atomically increment the counter.
     """
@@ -235,15 +243,18 @@ async def _analytics_increment_country(session, form_id: str, country_iso2: Opti
         iso = str(country_iso2 or "").strip().upper()
         if not iso:
             return
-        # Derive day (UTC) from submitted_at_iso
-        s = (submitted_at_iso or "").strip()
-        try:
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
-            dt = datetime.fromisoformat(s)
-            day_key = dt.date().isoformat()
-        except Exception:
-            day_key = (submitted_at_iso or "")[:10]
+        # Derive day (UTC) from submitted_at (can be datetime or string)
+        if isinstance(submitted_at, datetime):
+            day_key = submitted_at.date().isoformat()
+        else:
+            s = str(submitted_at or "").strip()
+            try:
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                dt = datetime.fromisoformat(s)
+                day_key = dt.date().isoformat()
+            except Exception:
+                day_key = s[:10] if s else datetime.utcnow().date().isoformat()
         await session.execute(
             text(
                 """
@@ -2640,7 +2651,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             raise HTTPException(status_code=404, detail="Form not found")
         form_data = dict(row)
         # Normalize JSON fields that may be stored as text
-        for k in ("fields", "theme", "branding"):
+        for k in ("theme", "branding"):
             v = form_data.get(k)
             if isinstance(v, str):
                 try:
@@ -2649,6 +2660,16 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     form_data[k] = {}
             elif not isinstance(v, dict):
                 form_data[k] = {}
+        
+        # Fields is an array, handle separately
+        v = form_data.get("fields")
+        if isinstance(v, str):
+            try:
+                form_data["fields"] = json.loads(v)
+            except Exception:
+                form_data["fields"] = []
+        elif not isinstance(v, list):
+            form_data["fields"] = []
     except HTTPException:
         raise
     except Exception:

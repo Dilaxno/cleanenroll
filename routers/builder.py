@@ -1692,9 +1692,110 @@ async def upsert_abandon(request: Request, payload: Dict[str, Any] | None = None
                 )
             await session.commit()
         return {"ok": True}
-    except Exception:
-        # Do not leak internals
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("upsert_abandon failed form_id=%s session_id=%s error=%s", form_id, session_id, str(e))
         raise HTTPException(status_code=500, detail="Failed to save progress")
+
+@router.get("/forms/{form_id}/abandons")
+async def list_form_abandons(form_id: str, limit: int = 100):
+    """List abandoned sessions for a form.
+    Returns: { abandons: [{ id, sessionId, values, filledCount, totalFields, progress, abandonedAt, ... }] }
+    """
+    try:
+        async with async_session_maker() as session:
+            # Check if extended schema exists
+            try:
+                cols_res = await session.execute(
+                    text(
+                        """
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'form_abandons'
+                        """
+                    )
+                )
+                fa_cols = {str(r[0]) for r in cols_res}
+            except Exception:
+                fa_cols = set()
+
+            extended_cols = {
+                "id","form_id","session_id","user_id","values","filled_count","total_fields",
+                "progress","step","total_steps","submitted","abandoned","abandoned_at",
+                "last_activity_at","updated_at","created_at"
+            }
+
+            abandons = []
+            if extended_cols.issubset(fa_cols):
+                # Use extended schema
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT 
+                            id, session_id, user_id, values, filled_count, total_fields,
+                            progress, step, total_steps, submitted, abandoned,
+                            abandoned_at, last_activity_at, updated_at, created_at
+                        FROM form_abandons
+                        WHERE form_id = :fid AND abandoned = TRUE
+                        ORDER BY abandoned_at DESC NULLS LAST
+                        LIMIT :lim
+                        """
+                    ),
+                    {"fid": form_id, "lim": limit}
+                )
+                rows = result.mappings().all()
+                abandons = [
+                    {
+                        "id": row["id"],
+                        "sessionId": row["session_id"],
+                        "userId": row["user_id"],
+                        "values": row["values"],
+                        "filledCount": row["filled_count"],
+                        "totalFields": row["total_fields"],
+                        "progress": row["progress"],
+                        "step": row["step"],
+                        "totalSteps": row["total_steps"],
+                        "submitted": row["submitted"],
+                        "abandoned": row["abandoned"],
+                        "abandonedAt": row["abandoned_at"].isoformat() if row["abandoned_at"] else None,
+                        "lastActivityAt": row["last_activity_at"].isoformat() if row["last_activity_at"] else None,
+                        "updatedAt": row["updated_at"].isoformat() if row["updated_at"] else None,
+                        "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
+                    }
+                    for row in rows
+                ]
+            else:
+                # Fallback to compact schema
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT id, form_id, data, created_at
+                        FROM form_abandons
+                        WHERE form_id = :fid
+                        ORDER BY created_at DESC
+                        LIMIT :lim
+                        """
+                    ),
+                    {"fid": form_id, "lim": limit}
+                )
+                rows = result.mappings().all()
+                for row in rows:
+                    try:
+                        data = row["data"] if isinstance(row["data"], dict) else {}
+                        if data.get("abandoned"):
+                            abandons.append({
+                                "id": row["id"],
+                                "sessionId": data.get("sessionId"),
+                                "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
+                                **data
+                            })
+                    except Exception:
+                        continue
+
+        return {"abandons": abandons}
+    except Exception as e:
+        logger.exception("list abandons failed form_id=%s", form_id)
+        raise HTTPException(status_code=500, detail=f"Failed to list abandoned sessions: {e}")
 
 def _safe_int(v):
     try:
@@ -3159,7 +3260,23 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             else:
                 # Store all other field types (text, email, number, etc.)
                 if val is not None:
-                    answers[fid] = val
+                    # Transform price fields from JSON to simple string format (e.g., USD2000.00)
+                    if field_type == "price" and isinstance(val, dict):
+                        amount = val.get("amount", "")
+                        currency = val.get("currency", "USD")
+                        # Format as CURRENCY + AMOUNT (e.g., USD2000.00 or USD2000)
+                        try:
+                            # Remove trailing .00 if amount is whole number
+                            amt_float = float(str(amount))
+                            if amt_float == int(amt_float):
+                                answers[fid] = f"{currency}{int(amt_float)}"
+                            else:
+                                answers[fid] = f"{currency}{amount}"
+                        except Exception:
+                            # Fallback to direct concatenation
+                            answers[fid] = f"{currency}{amount}"
+                    else:
+                        answers[fid] = val
         # Server-side price min/max validation using built answers
         try:
             for f in fields_def:

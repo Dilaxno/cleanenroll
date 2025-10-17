@@ -3105,6 +3105,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     continue
         except HTTPException:
             raise
+        except Exception:
+            pass
     
     # Build a small ZIP manifest of file URLs (best-effort)
     files_zip_meta = None

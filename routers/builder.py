@@ -1852,6 +1852,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     # Spam/GDPR flags and geo restrictions
     recaptcha_enabled = payload.get("recaptchaEnabled")
     gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
+    privacy_policy_url = payload.get("privacyPolicyUrl") or payload.get("privacy_policy_url")
     restricted_countries = payload.get("restrictedCountries")
     # Link safety check (URL scanner)
     url_scan_enabled = payload.get("urlScanEnabled")
@@ -1894,6 +1895,9 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     if isinstance(gdpr_compliance_enabled, bool):
         sets.append("gdpr_compliance_enabled = :gdpr_compliance_enabled")
         params["gdpr_compliance_enabled"] = gdpr_compliance_enabled
+    if isinstance(privacy_policy_url, str):
+        sets.append("privacy_policy_url = :privacy_policy_url")
+        params["privacy_policy_url"] = privacy_policy_url.strip() if privacy_policy_url.strip() else None
     if isinstance(restricted_countries, list):
         try:
             norm = [str(c).strip().upper() for c in restricted_countries if str(c).strip()]

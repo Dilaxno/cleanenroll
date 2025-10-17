@@ -2282,7 +2282,7 @@ async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = 
 async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] | None = None):
     """Send a client notification email for a form.
 
-    Body: { to: string, subject?: string, html?: string, text?: string }
+    Body: { to: string, subject?: string, html?: string, text?: string, fullName?: string }
     If subject/html are omitted, falls back to form auto-reply config.
     """
     payload = payload or {}
@@ -2291,21 +2291,17 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
     subject = str(payload.get("subject") or "").strip()
     html = str(payload.get("html") or "").strip()
     text_fallback = str(payload.get("text") or "").strip()
-    values = payload.get("values") if isinstance(payload.get("values"), dict) else None
-    field_id = str(payload.get("fieldId") or "").strip()
+    full_name = str(payload.get("fullName") or "").strip()
 
     # If direct recipient not provided, try to derive from submission values using fieldId or form config
     if not to_raw:
-        try:
-            if values and (field_id and field_id in values):
-                cand = values.get(field_id)
-                if isinstance(cand, list):
-                    cand = cand[0] if cand else ""
-                to_raw = str(cand or "").strip()
-            if not to_raw and values:
-                async with async_session_maker() as session:
-                    res = await session.execute(
-                        text(
+        raise HTTPException(status_code=400, detail="Recipient email is required.")
+
+    if not subject:
+        subject = "Notification"
+    if not html:
+        if text_fallback:
+            html = f"<pre style=\
                             """
                             SELECT auto_reply_email_field_id
                             FROM forms
@@ -3175,362 +3171,365 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     continue
         except HTTPException:
             raise
-            # Build a small ZIP manifest of file URLs (best-effort)
-            files_zip_meta = None
-            try:
-                from io import BytesIO
-                import zipfile as _zip
-                buf = BytesIO()
-                added = 0
-                with _zip.ZipFile(buf, mode="w", compression=_zip.ZIP_DEFLATED) as zf:
-                    for f in fields_def:
-                        try:
-                            if str((f.get("type") or "")).strip().lower() != "file":
-                                continue
-                            fid2 = str(f.get("id"))
-                            av2 = answers.get(fid2)
-                            srcs = av2 if isinstance(av2, list) else ([av2] if av2 is not None else [])
-                            for idx, v2 in enumerate(srcs):
-                                url2 = None
-                                if isinstance(v2, str):
-                                    url2 = v2
-                                elif isinstance(v2, dict) and v2.get("url"):
-                                    url2 = str(v2.get("url"))
-                                if not url2:
-                                    continue
-                                zf.writestr(f"{fid2}_{idx+1}.txt", url2)
-                                added += 1
-                        except Exception:
+    
+    # Build a small ZIP manifest of file URLs (best-effort)
+    files_zip_meta = None
+    try:
+        from io import BytesIO
+        import zipfile as _zip
+        buf = BytesIO()
+        added = 0
+        with _zip.ZipFile(buf, mode="w", compression=_zip.ZIP_DEFLATED) as zf:
+            for f in fields_def:
+                try:
+                    if str((f.get("type") or "")).strip().lower() != "file":
+                        continue
+                    fid2 = str(f.get("id"))
+                    av2 = answers.get(fid2)
+                    srcs = av2 if isinstance(av2, list) else ([av2] if av2 is not None else [])
+                    for idx, v2 in enumerate(srcs):
+                        url2 = None
+                        if isinstance(v2, str):
+                            url2 = v2
+                        elif isinstance(v2, dict) and v2.get("url"):
+                            url2 = str(v2.get("url"))
+                        if not url2:
                             continue
-                if added > 0:
-                    data_bytes = buf.getvalue()
-                    key = f"submissions/{form_id}/{response_id}_files.zip"
-                    try:
-                        s3 = _r2_client()
-                        s3.put_object(Bucket=R2_BUCKET, Key=key, Body=data_bytes, ContentType="application/zip")
-                        files_zip_meta = {"url": _public_url_for_key(key), "key": key, "count": added, "bytes": len(data_bytes)}
-                    except Exception:
-                        files_zip_meta = None
+                        zf.writestr(f"{fid2}_{idx+1}.txt", url2)
+                        added += 1
+                except Exception:
+                    continue
+        if added > 0:
+            data_bytes = buf.getvalue()
+            key = f"submissions/{form_id}/{response_id}_files.zip"
+            try:
+                s3 = _r2_client()
+                s3.put_object(Bucket=R2_BUCKET, Key=key, Body=data_bytes, ContentType="application/zip")
+                files_zip_meta = {"url": _public_url_for_key(key), "key": key, "count": added, "bytes": len(data_bytes)}
             except Exception:
                 files_zip_meta = None
+    except Exception:
+        files_zip_meta = None
 
-            # Geo enrich and insert into Neon in one transaction
-            country_code, lat, lon = _geo_from_ip(ip)
-            owner_id = form_data.get("userId") or form_data.get("user_id")
-            # Build metadata payload
-            meta_payload: Dict[str, Any] = {
-                "clientIp": ip,
-                "userAgent": str(request.headers.get("user-agent") or ""),
-                "lat": lat,
-                "lon": lon,
-                "country": country_code,
-            }
-            if isinstance(signatures, dict) and signatures:
-                meta_payload["signatures"] = signatures
-            if files_zip_meta:
-                meta_payload["filesZip"] = files_zip_meta
+    # Geo enrich and insert into Neon in one transaction
+    country_code, lat, lon = _geo_from_ip(ip)
+    owner_id = form_data.get("userId") or form_data.get("user_id")
+    # Build metadata payload
+    meta_payload: Dict[str, Any] = {
+        "clientIp": ip,
+        "userAgent": str(request.headers.get("user-agent") or ""),
+        "lat": lat,
+        "lon": lon,
+        "country": country_code,
+    }
+    if isinstance(signatures, dict) and signatures:
+        meta_payload["signatures"] = signatures
+    if files_zip_meta:
+        meta_payload["filesZip"] = files_zip_meta
 
-            async with async_session_maker() as session:
-                await _ensure_submissions_indexes(session)
-                # Insert submission row
+    async with async_session_maker() as session:
+        await _ensure_submissions_indexes(session)
+        # Insert submission row
+        await session.execute(
+            text(
+                """
+                INSERT INTO submissions (
+                    id, form_id, form_owner_id, data, metadata,
+                    ip_address, country_code, user_agent, submitted_at
+                ) VALUES (
+                :id, :form_id, :owner_id, CAST(:data AS JSONB), CAST(:metadata AS JSONB),
+                :ip, :country, :ua, :submitted_at
+            )
+            """
+            ),
+            {
+                "id": response_id,
+                "form_id": form_id,
+                "owner_id": owner_id,
+                "data": json.dumps(answers or {}),
+                "metadata": json.dumps(meta_payload),
+                "ip": ip,
+                "country": (country_code or "").upper() or None,
+                "ua": str(request.headers.get("user-agent") or ""),
+                "submitted_at": submitted_at,
+            },
+        )
+        # Optional: marker row
+        try:
+            if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
                 await session.execute(
                     text(
                         """
-                        INSERT INTO submissions (
-                            id, form_id, form_owner_id, data, metadata,
-                            ip_address, country_code, user_agent, submitted_at
-                        ) VALUES (
-                            :id, :form_id, :owner_id, CAST(:data AS JSONB), CAST(:metadata AS JSONB),
-                            :ip, :country, :ua, :submitted_at
-                        )
+                        INSERT INTO submission_markers (id, form_id, response_id, lat, lon, country_code)
+                        VALUES (:id, :form_id, :response_id, :lat, :lon, :country)
+                        ON CONFLICT (id) DO NOTHING
                         """
                     ),
-                    {
-                        "id": response_id,
-                        "form_id": form_id,
-                        "owner_id": owner_id,
-                        "data": json.dumps(answers or {}),
-                        "metadata": json.dumps(meta_payload),
-                        "ip": ip,
-                        "country": (country_code or "").upper() or None,
-                        "ua": str(request.headers.get("user-agent") or ""),
-                        "submitted_at": submitted_at,
-                    },
+                    {"id": response_id, "form_id": form_id, "response_id": response_id, "lat": float(lat), "lon": float(lon), "country": country_code},
                 )
-                # Optional: marker row
-                try:
-                    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-                        await session.execute(
-                            text(
-                                """
-                                INSERT INTO submission_markers (id, form_id, response_id, lat, lon, country_code)
-                                VALUES (:id, :form_id, :response_id, :lat, :lon, :country)
-                                ON CONFLICT (id) DO NOTHING
-                                """
-                            ),
-                            {"id": response_id, "form_id": form_id, "response_id": response_id, "lat": float(lat), "lon": float(lon), "country": country_code},
-                        )
-                except Exception:
-                    pass
-                # Optional: notification
-                try:
-                    preview_text = ""
-                    for v in (answers or {}).values():
-                        if isinstance(v, str) and v.strip():
-                            preview_text = v.strip()[:140]
-                            break
-                    title = str(form_data.get("title") or "Form")
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO notifications (id, user_id, title, message, type, data)
-                            VALUES (:id, :user_id, :title, :message, :type, :data)
-                            ON CONFLICT (id) DO NOTHING
-                            """
-                        ),
-                        {"id": response_id, "user_id": owner_id, "title": title, "message": (preview_text or "New submission"), "type": "submission", "data": json.dumps({"formId": form_id, "responseId": response_id})},
-                    )
-                except Exception:
-                    pass
-                # Increment forms.submissions
-                await session.execute(
-                    text("UPDATE forms SET submissions = COALESCE(submissions,0) + 1, updated_at = NOW() WHERE id = :form_id"),
-                    {"form_id": form_id},
-                )
-                await session.commit()
-        # Expose geo hints to client response (non-breaking add-ons)
-        try:
-            if country_code:
-                resp["country"] = country_code  # type: ignore[index]
-            if isinstance(lat, (int, float)):
-                resp["lat"] = float(lat)  # type: ignore[index]
-            if isinstance(lon, (int, float)):
-                resp["lon"] = float(lon)  # type: ignore[index]
         except Exception:
             pass
-        # Firestore mirroring removed (Neon is source of truth)
-        # Update country analytics aggregation (file-based)
+        # Optional: notification
         try:
-            if country_code:
-                async with async_session_maker() as session:
-                    await _analytics_increment_country(session, form_id, country_code, submitted_at)
-        except Exception:
-            logger.exception("analytics: country increment failed form_id=%s", form_id)
-        # Attempt Google Sheets append if syncing is enabled for this form
-        try:
-            # try import via package-aware path first
-            try:
-                from routers.google_sheets import try_append_submission_for_form  # type: ignore
-            except Exception:
-                from routers.google_sheets import try_append_submission_for_form  # type: ignore
-            owner_id = str(form_data.get("userId") or "").strip() or None
-            if owner_id:
-                try_append_submission_for_form(owner_id, form_id, record)
-        except Exception:
-            logger.exception("google_sheets sync append failed form_id=%s", form_id)
-        # Attempt Airtable append if syncing is enabled for this form
-        try:
-            try:
-                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
-            except Exception:
-                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
-            owner_id = str(form_data.get("userId") or "").strip() or None
-            if owner_id:
-                _airtable_append(owner_id, form_id, record)
-        except Exception:
-            logger.exception("airtable sync append failed form_id=%s", form_id)
-        # Attempt Slack notification if configured
-        try:
-            try:
-                from routers.slack import try_notify_slack_for_form  # type: ignore
-            except Exception:
-                from routers.slack import try_notify_slack_for_form  # type: ignore
-            owner_id = str(form_data.get("userId") or "").strip() or None
-            if owner_id:
-                try_notify_slack_for_form(owner_id, form_id, record)
-        except Exception:
-            logger.exception("slack notify failed form_id=%s", form_id)
-        # Email notification to form owner (best-effort)
-        try:
-            owner_id = str(form_data.get("userId") or "").strip() or None
-            owner_email = None
-            if _FS_AVAILABLE and owner_id:
-                try:
-                    snap = _fs.client().collection("users").document(owner_id).get()
-                    d = snap.to_dict() or {}
-                    em = d.get("email")
-                    if isinstance(em, str) and "@" in em:
-                        owner_email = em.strip()
-                except Exception:
-                    owner_email = None
-            if owner_email:
-                form_title = str(form_data.get("title") or "Form").strip() or "Form"
-                subject = f"New submission — {form_title}"
-                preview = ""
-                try:
-                    ans = record.get("answers") or {}
-                    # Map field ids to labels for human-readable output
-                    label_by_id = {}
-                    try:
-                        for f in (form_data.get("fields") or []):
-                            if isinstance(f, dict):
-                                fid = str(f.get("id") or "").strip()
-                                lab = str(f.get("label") or "").strip()
-                                if fid:
-                                    label_by_id[fid] = lab or fid
-                    except Exception:
-                        label_by_id = {}
-                    parts = []
-                    for k, v in list(ans.items())[:10]:
-                        try:
-                            label = label_by_id.get(str(k), str(k))
-                            if isinstance(v, str) and v.strip():
-                                preview = v.strip()[:140]
-                                break
-                            if isinstance(v, list):
-                                sv = next((str(x) for x in v if isinstance(x, str) and x.strip()), None)
-                                if sv:
-                                    preview = sv.strip()[:140]
-                                    break
-                        except Exception:
-                            continue
-                    preview = "".join(parts)
-                except Exception:
-                    preview = ""
-                # If signatures are available, append thumbnails below the preview
-                try:
-                    sigs = record.get("signatures") or {}
-                except Exception:
-                    sigs = {}
-                sigs_html = ""
-                if isinstance(sigs, dict) and sigs:
-                    items = []
-                    for k, v in sigs.items():
-                        try:
-                            url = (v.get("pngUrl") or v.get("url") or v.get("pngDataUrl") or v.get("dataUrl") or "").strip()
-                            if url:
-                                safe = _normalize_bg_public_url(url) if url.startswith("http") else url
-                                link = _shorten_url(safe) if safe.startswith("http") else safe
-                                items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><a href='{link}' target='_blank' rel='noopener noreferrer'><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></a>" + (f"<div style='font-size:12px;color:#94a3b8;word-break:break-all'>{link}</div>" if link and isinstance(link, str) and link.startswith('http') else "") + "</div>")
-                        except Exception:
-                            continue
-                    if items:
-                        sigs_html = "<div style='margin-top:12px'><div style='font-weight:600;margin-bottom:6px'>Signatures</div>" + "".join(items) + "</div>"
-
-                html = render_email("base.html", {
-                    "subject": subject,
-                    "title": subject,
-                    "intro": f"You received a new submission for {form_title}.",
-                    "content_html": (preview or "") + sigs_html,
-                    "preheader": f"New submission for {form_title}",
-                })
-                send_email_html(owner_email, subject, html)
-        except Exception:
-            logger.exception("owner email notify failed form_id=%s", form_id)
-        # Attempt Airtable append if syncing is enabled for this form
-        try:
-            try:
-                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
-            except Exception:
-                from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
-            owner_id = str(form_data.get("userId") or "").strip() or None
-            if owner_id:
-                _airtable_append(owner_id, form_id, record)
-        except Exception:
-            logger.exception("airtable sync append failed form_id=%s", form_id)
-        # Server-side mirrors to Firestore for submissions, markers and notifications (no client writes)
-        try:
-            if _FS_AVAILABLE:
-                fs = _fs.client()
-                # Submissions collection: store minimal snapshot for dashboards/maps
-                try:
-                    owner_id_safe = owner_id or ""
-                except Exception:
-                    owner_id_safe = ""
-                try:
-                    # Use responseId as document id for idempotency
-                    sub_ref = fs.collection("submissions").document(response_id)
-                    # Build preview text from first string-like answer
-                    preview_text = ""
-                    try:
-                        for _k, _v in (answers or {}).items():
-                            if isinstance(_v, str) and _v.strip():
-                                preview_text = _v.strip()[:140]
-                                break
-                    except Exception:
-                        preview_text = ""
-                    sub_ref.set({
-                        "formId": form_id,
-                        "ownerId": owner_id_safe,
-                        "responseId": response_id,
-                        "submittedAt": _fs.SERVER_TIMESTAMP,
-                        "country": country_code,
-                        "lat": lat,
-                        "lng": lon,
-                        "values": answers,
-                        "preview": preview_text,
-                    }, merge=True)
-                except Exception:
-                    pass
-                # Submissions markers: append marker entry for map rendering
-                try:
-                    mr_ref = fs.collection("submissions_markers").document(form_id)
-                    markers_doc = mr_ref.get()
-                    markers = []
-                    try:
-                        if markers_doc.exists:
-                            data_doc = markers_doc.to_dict() or {}
-                            if isinstance(data_doc.get("markers"), list):
-                                markers = data_doc.get("markers")
-                    except Exception:
-                        markers = []
-                    marker_entry = {
-                        "id": response_id,
-                        "position": [lat, lon] if (isinstance(lat, (int, float)) and isinstance(lon, (int, float))) else None,
-                        "country": country_code,
-                    }
-                    # Avoid duplicates
-                    try:
-                        if not any(isinstance(m, dict) and str(m.get("id")) == response_id for m in (markers or [])):
-                            markers.append(marker_entry)
-                    except Exception:
-                        markers.append(marker_entry)
-                    mr_ref.set({"markers": markers, "updatedAt": _fs.SERVER_TIMESTAMP}, merge=True)
-                except Exception:
-                    pass
-                # Creator notifications: notifications/{ownerId}/items/*
-                try:
-                    if owner_id_safe:
-                        items_ref = fs.collection("notifications").document(owner_id_safe).collection("items").document()
-                        items_ref.set({
-                            "formId": form_id,
-                            "formTitle": str(form_data.get("title") or "Form"),
-                            "preview": (preview_text if isinstance(preview_text, str) else ""),
-                            "submittedAt": _fs.SERVER_TIMESTAMP,
-                            "read": False,
-                        }, merge=True)
-                except Exception:
-                    pass
-        except Exception:
-            # Never fail submission on Firestore mirror errors
-            pass
-
-        # Include geo hints in response for client-side use without extra roundtrips
-        try:
-            if isinstance(lat, (int, float)):
-                resp["lat"] = float(lat)
-            if isinstance(lon, (int, float)):
-                resp["lon"] = float(lon)
-            if country_code:
-                resp["country"] = country_code
+            preview_text = ""
+            for v in (answers or {}).values():
+                if isinstance(v, str) and v.strip():
+                    preview_text = v.strip()[:140]
+                    break
+            title = str(form_data.get("title") or "Form")
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO notifications (id, user_id, title, message, type, data)
+                    VALUES (:id, :user_id, :title, :message, :type, :data)
+                    ON CONFLICT (id) DO NOTHING
+                    """
+                ),
+                {"id": response_id, "user_id": owner_id, "title": title, "message": (preview_text or "New submission"), "type": "submission", "data": json.dumps({"formId": form_id, "responseId": response_id})},
+            )
         except Exception:
             pass
-
-        # Optionally return responseId to the client
-        resp["responseId"] = response_id  # type: ignore
+        # Increment forms.submissions
+        await session.execute(
+            text("UPDATE forms SET submissions = COALESCE(submissions,0) + 1, updated_at = NOW() WHERE id = :form_id"),
+            {"form_id": form_id},
+        )
+        await session.commit()
+    
+    # Build record object for integrations (Google Sheets, Airtable, Slack, etc.)
+    record = {
+        "responseId": response_id,
+        "formId": form_id,
+        "answers": answers,
+        "submittedAt": submitted_at.isoformat() if submitted_at else datetime.utcnow().isoformat(),
+        "clientIp": ip,
+        "country": country_code,
+        "lat": lat,
+        "lon": lon,
+        "userAgent": str(request.headers.get("user-agent") or ""),
+    }
+    if isinstance(signatures, dict) and signatures:
+        record["signatures"] = signatures
+    
+    # Expose geo hints to client response (non-breaking add-ons)
+    try:
+        if country_code:
+            resp["country"] = country_code  # type: ignore[index]
+        if isinstance(lat, (int, float)):
+            resp["lat"] = float(lat)  # type: ignore[index]
+        if isinstance(lon, (int, float)):
+            resp["lon"] = float(lon)  # type: ignore[index]
     except Exception:
-        # Swallow persistence errors to not break client submission flow
-        logger.exception("submit_form persistence error id=%s", form_id)
+        pass
+    # Firestore mirroring removed (Neon is source of truth)
+    # Update country analytics aggregation (file-based)
+    try:
+        if country_code:
+            async with async_session_maker() as session:
+                await _analytics_increment_country(session, form_id, country_code, submitted_at)
+    except Exception:
+        logger.exception("analytics: country increment failed form_id=%s", form_id)
+    # Attempt Google Sheets append if syncing is enabled for this form
+    try:
+        # try import via package-aware path first
+        try:
+            from routers.google_sheets import try_append_submission_for_form  # type: ignore
+        except Exception:
+            from routers.google_sheets import try_append_submission_for_form  # type: ignore
+        owner_id = str(form_data.get("userId") or "").strip() or None
+        if owner_id:
+            try_append_submission_for_form(owner_id, form_id, record)
+    except Exception:
+        logger.exception("google_sheets sync append failed form_id=%s", form_id)
+    # Attempt Airtable append if syncing is enabled for this form
+    try:
+        try:
+            from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+        except Exception:
+            from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
+        owner_id = str(form_data.get("userId") or "").strip() or None
+        if owner_id:
+            _airtable_append(owner_id, form_id, record)
+    except Exception:
+        logger.exception("airtable sync append failed form_id=%s", form_id)
+    # Attempt Slack notification if configured
+    try:
+        try:
+            from routers.slack import try_notify_slack_for_form  # type: ignore
+        except Exception:
+            from routers.slack import try_notify_slack_for_form  # type: ignore
+        owner_id = str(form_data.get("userId") or "").strip() or None
+        if owner_id:
+            try_notify_slack_for_form(owner_id, form_id, record)
+    except Exception:
+        logger.exception("slack notify failed form_id=%s", form_id)
+    # Email notification to form owner (best-effort)
+    try:
+        owner_id = str(form_data.get("userId") or "").strip() or None
+        owner_email = None
+        if _FS_AVAILABLE and owner_id:
+            try:
+                snap = _fs.client().collection("users").document(owner_id).get()
+                d = snap.to_dict() or {}
+                em = d.get("email")
+                if isinstance(em, str) and "@" in em:
+                    owner_email = em.strip()
+            except Exception:
+                owner_email = None
+        if owner_email:
+            form_title = str(form_data.get("title") or "Form").strip() or "Form"
+            subject = f"New submission — {form_title}"
+            preview = ""
+            try:
+                ans = record.get("answers") or {}
+                # Map field ids to labels for human-readable output
+                label_by_id = {}
+                try:
+                    for f in (form_data.get("fields") or []):
+                        if isinstance(f, dict):
+                            fid = str(f.get("id") or "").strip()
+                            lab = str(f.get("label") or "").strip()
+                            if fid:
+                                label_by_id[fid] = lab or fid
+                except Exception:
+                    label_by_id = {}
+                parts = []
+                for k, v in list(ans.items())[:10]:
+                    try:
+                        label = label_by_id.get(str(k), str(k))
+                        if isinstance(v, str) and v.strip():
+                            preview = v.strip()[:140]
+                            break
+                        if isinstance(v, list):
+                            sv = next((str(x) for x in v if isinstance(x, str) and x.strip()), None)
+                            if sv:
+                                preview = sv.strip()[:140]
+                                break
+                    except Exception:
+                        continue
+                preview = "".join(parts)
+            except Exception:
+                preview = ""
+            # If signatures are available, append thumbnails below the preview
+            try:
+                sigs = record.get("signatures") or {}
+            except Exception:
+                sigs = {}
+            sigs_html = ""
+            if isinstance(sigs, dict) and sigs:
+                items = []
+                for k, v in sigs.items():
+                    try:
+                        url = (v.get("pngUrl") or v.get("url") or v.get("pngDataUrl") or v.get("dataUrl") or "").strip()
+                        if url:
+                            safe = _normalize_bg_public_url(url) if url.startswith("http") else url
+                            link = _shorten_url(safe) if safe.startswith("http") else safe
+                            items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><a href='{link}' target='_blank' rel='noopener noreferrer'><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></a>" + (f"<div style='font-size:12px;color:#94a3b8;word-break:break-all'>{link}</div>" if link and isinstance(link, str) and link.startswith('http') else "") + "</div>")
+                    except Exception:
+                        continue
+                if items:
+                    sigs_html = "<div style='margin-top:12px'><div style='font-weight:600;margin-bottom:6px'>Signatures</div>" + "".join(items) + "</div>"
+
+            html = render_email("base.html", {
+                "subject": subject,
+                "title": subject,
+                "intro": f"You received a new submission for {form_title}.",
+                "content_html": (preview or "") + sigs_html,
+                "preheader": f"New submission for {form_title}",
+            })
+            send_email_html(owner_email, subject, html)
+    except Exception:
+        logger.exception("owner email notify failed form_id=%s", form_id)
+    # Server-side mirrors to Firestore for submissions, markers and notifications (no client writes)
+    try:
+        if _FS_AVAILABLE:
+            fs = _fs.client()
+            # Submissions collection: store minimal snapshot for dashboards/maps
+            try:
+                owner_id_safe = owner_id or ""
+            except Exception:
+                owner_id_safe = ""
+            try:
+                # Use responseId as document id for idempotency
+                sub_ref = fs.collection("submissions").document(response_id)
+                # Build preview text from first string-like answer
+                preview_text = ""
+                try:
+                    for _k, _v in (answers or {}).items():
+                        if isinstance(_v, str) and _v.strip():
+                            preview_text = _v.strip()[:140]
+                            break
+                except Exception:
+                    preview_text = ""
+                sub_ref.set({
+                    "formId": form_id,
+                    "ownerId": owner_id_safe,
+                    "responseId": response_id,
+                    "submittedAt": _fs.SERVER_TIMESTAMP,
+                    "country": country_code,
+                    "lat": lat,
+                    "lng": lon,
+                    "values": answers,
+                    "preview": preview_text,
+                }, merge=True)
+            except Exception:
+                pass
+            # Submissions markers: append marker entry for map rendering
+            try:
+                mr_ref = fs.collection("submissions_markers").document(form_id)
+                markers_doc = mr_ref.get()
+                markers = []
+                try:
+                    if markers_doc.exists:
+                        data_doc = markers_doc.to_dict() or {}
+                        if isinstance(data_doc.get("markers"), list):
+                            markers = data_doc.get("markers")
+                except Exception:
+                    markers = []
+                marker_entry = {
+                    "id": response_id,
+                    "position": [lat, lon] if (isinstance(lat, (int, float)) and isinstance(lon, (int, float))) else None,
+                    "country": country_code,
+                }
+                # Avoid duplicates
+                try:
+                    if not any(isinstance(m, dict) and str(m.get("id")) == response_id for m in (markers or [])):
+                        markers.append(marker_entry)
+                except Exception:
+                    markers.append(marker_entry)
+                mr_ref.set({"markers": markers, "updatedAt": _fs.SERVER_TIMESTAMP}, merge=True)
+            except Exception:
+                pass
+            # Creator notifications: notifications/{ownerId}/items/*
+            try:
+                if owner_id_safe:
+                    items_ref = fs.collection("notifications").document(owner_id_safe).collection("items").document()
+                    items_ref.set({
+                        "formId": form_id,
+                        "formTitle": str(form_data.get("title") or "Form"),
+                        "preview": (preview_text if isinstance(preview_text, str) else ""),
+                        "submittedAt": _fs.SERVER_TIMESTAMP,
+                        "read": False,
+                    }, merge=True)
+            except Exception:
+                pass
+    except Exception:
+        # Never fail submission on Firestore mirror errors
+        pass
+
+    # Include geo hints in response for client-side use without extra roundtrips
+    try:
+        if isinstance(lat, (int, float)):
+            resp["lat"] = float(lat)
+        if isinstance(lon, (int, float)):
+            resp["lon"] = float(lon)
+        if country_code:
+            resp["country"] = country_code
+    except Exception:
+        pass
+
+    # Optionally return responseId to the client
+    resp["responseId"] = response_id  # type: ignore
 
     # Increment monthly usage for Free plans
     try:

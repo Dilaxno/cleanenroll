@@ -58,9 +58,9 @@ async def list_notifications(
             query = (
                 text("""
                     SELECT id, user_id, title, message, type, data, 
-                           read, read_at, created_at
+                           is_read, created_at
                     FROM notifications
-                    WHERE user_id = :uid AND read = false
+                    WHERE user_id = :uid AND is_read = false
                     ORDER BY created_at DESC
                     LIMIT :limit_val OFFSET :offset_val
                 """)
@@ -75,7 +75,7 @@ async def list_notifications(
             query = (
                 text("""
                     SELECT id, user_id, title, message, type, data,
-                           read, read_at, created_at
+                           is_read, created_at
                     FROM notifications
                     WHERE user_id = :uid
                     ORDER BY created_at DESC
@@ -93,7 +93,7 @@ async def list_notifications(
         
         # Get total count
         if unread_only:
-            count_query = text("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = :uid AND read = false").bindparams(bindparam("uid", type_=String))
+            count_query = text("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = :uid AND is_read = false").bindparams(bindparam("uid", type_=String))
         else:
             count_query = text("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = :uid").bindparams(bindparam("uid", type_=String))
         
@@ -108,8 +108,8 @@ async def list_notifications(
                 "title": row.get("title"),
                 "message": row.get("message"),
                 "type": row.get("type"),
-                "read": bool(row.get("read")),
-                "readAt": row.get("read_at").isoformat() if row.get("read_at") else None,
+                "read": bool(row.get("is_read")),
+                "readAt": None,  # Schema doesn't have read_at column
                 "createdAt": row.get("created_at").isoformat() if row.get("created_at") else None,
             }
             # Parse data JSON field
@@ -154,7 +154,7 @@ async def mark_notification_read(notification_id: str, request: Request):
         result = await session.execute(
             text("""
                 UPDATE notifications
-                SET read = true, read_at = NOW()
+                SET is_read = true
                 WHERE id = :id AND user_id = :uid
                 RETURNING id
             """),
@@ -180,8 +180,8 @@ async def mark_all_notifications_read(request: Request):
         await session.execute(
             text("""
                 UPDATE notifications
-                SET read = true, read_at = NOW()
-                WHERE user_id = :uid AND read = false
+                SET is_read = true
+                WHERE user_id = :uid AND is_read = false
             """),
             {"uid": uid}
         )

@@ -245,16 +245,16 @@ async def _analytics_increment_country(session, form_id: str, country_iso2: Opti
             return
         # Derive day (UTC) from submitted_at (can be datetime or string)
         if isinstance(submitted_at, datetime):
-            day_key = submitted_at.date().isoformat()
+            day_obj = submitted_at.date()
         else:
             s = str(submitted_at or "").strip()
             try:
                 if s.endswith("Z"):
                     s = s[:-1] + "+00:00"
                 dt = datetime.fromisoformat(s)
-                day_key = dt.date().isoformat()
+                day_obj = dt.date()
             except Exception:
-                day_key = s[:10] if s else datetime.utcnow().date().isoformat()
+                day_obj = datetime.utcnow().date()
         await session.execute(
             text(
                 """
@@ -264,7 +264,7 @@ async def _analytics_increment_country(session, form_id: str, country_iso2: Opti
                 DO UPDATE SET count = form_countries_analytics.count + 1
                 """
             ),
-            {"fid": form_id, "day": day_key, "iso": iso},
+            {"fid": form_id, "day": day_obj, "iso": iso},
         )
     except Exception:
         logger.exception("analytics countries increment error form_id=%s", form_id)

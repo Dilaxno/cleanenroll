@@ -2406,7 +2406,7 @@ async def presign_form_bg(request: Request, payload: Dict[str, Any] | None = Non
 @limiter.limit("60/minute")
 async def presign_submission_file(request: Request, payload: Dict[str, Any] | None = None):
     """Create a presigned URL to upload a submission attachment to R2.
-    Returns a clean short link instead of exposing raw R2 URL.
+    Returns R2 public URL shortened with pyshorteners.
 
     Body: { formId?: string, fieldId?: string, filename: string, contentType: string }
     """
@@ -2424,7 +2424,7 @@ async def presign_submission_file(request: Request, payload: Dict[str, Any] | No
     suffix = f"_{field_id}" if field_id else ""
     key = f"submissions/{owner}/{uid}{suffix}{ext}"
     
-    # Generate clean file ID (8 chars base62)
+    # Generate file ID for tracking
     file_id = uuid.uuid4().hex[:12]
     
     try:
@@ -2433,7 +2433,22 @@ async def presign_submission_file(request: Request, payload: Dict[str, Any] | No
         params = {"Bucket": R2_BUCKET, "Key": key, "ContentType": content_type}
         upload_url = s3.generate_presigned_url('put_object', Params=params, ExpiresIn=900)
         
-        # Store file metadata in database for clean URL mapping
+        # Generate R2 public URL
+        r2_public_url = _public_url_for_key(key)
+        
+        # Shorten URL with pyshorteners (TinyURL - free, no API key needed)
+        shortened_url = r2_public_url
+        try:
+            import pyshorteners
+            s = pyshorteners.Shortener()
+            shortened_url = s.tinyurl.short(r2_public_url)
+            logger.info(f"Shortened URL: {r2_public_url} -> {shortened_url}")
+        except Exception as e:
+            logger.warning(f"URL shortening failed, using R2 public URL: {e}")
+            # Fallback to public URL if shortening fails
+            shortened_url = r2_public_url
+        
+        # Store file metadata in database
         async with async_session_maker() as session:
             await session.execute(
                 text("""
@@ -2452,12 +2467,9 @@ async def presign_submission_file(request: Request, payload: Dict[str, Any] | No
             )
             await session.commit()
         
-        # Return clean short link instead of raw R2 URL
-        clean_url = f"https://cleanenroll.com/submission/{file_id}"
-        
         return {
             "uploadUrl": upload_url,
-            "publicUrl": clean_url,  # Clean link for frontend
+            "publicUrl": shortened_url,  # Shortened R2 public URL
             "key": file_id,  # File ID for tracking
             "headers": {"Content-Type": content_type}
         }

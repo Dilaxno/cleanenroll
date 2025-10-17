@@ -2961,16 +2961,19 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         resp["redirectUrl"] = redir.get("url")
 
     # Persist submission in Neon (store answers and metadata)
-    try:
-        # Use a real datetime object so Postgres stores TIMESTAMPTZ and comparisons work
-        submitted_at = datetime.utcnow()
-        response_id = uuid.uuid4().hex
+    # Use a real datetime object so Postgres stores TIMESTAMPTZ and comparisons work
+    submitted_at = datetime.utcnow()
+    response_id = uuid.uuid4().hex
 
-        # Only persist answers for known fields, keyed by field id
-        answers: Dict[str, object] = {}
-        signatures: Dict[str, Dict[str, str]] = {}
-        fields_def = form_data.get("fields") or []
-        payload = payload or {}
+    # Only persist answers for known fields, keyed by field id
+    answers: Dict[str, object] = {}
+    signatures: Dict[str, Dict[str, str]] = {}
+    fields_def = form_data.get("fields") or []
+    payload = payload or {}
+    
+    logger.info("Processing submission form_id=%s fields_count=%d payload_keys=%s", form_id, len(fields_def), list(payload.keys()))
+    
+    try:
         for f in fields_def:
             try:
                 fid = str(f.get("id"))
@@ -3102,9 +3105,12 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         except Exception:
             # Fail closed on malformed validation config
             raise HTTPException(status_code=400, detail="Validation failed for one or more fields")
-    except Exception:
-        # Unexpected error in signature/answer processing
+    except Exception as e:
+        # Log but re-raise to prevent submission with empty answers
         logger.exception("submit_form answer processing error id=%s", form_id)
+        raise HTTPException(status_code=500, detail=f"Failed to process form submission: {str(e)}")
+    
+    logger.info("Collected answers form_id=%s answer_count=%d answer_keys=%s", form_id, len(answers), list(answers.keys()))
     
     # Build a small ZIP manifest of file URLs (best-effort)
     files_zip_meta = None

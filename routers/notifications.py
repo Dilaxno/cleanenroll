@@ -3,7 +3,7 @@ Notifications API router for reading notifications from Neon PostgreSQL
 """
 from fastapi import APIRouter, HTTPException, Request, Query
 from typing import Optional
-from sqlalchemy import text
+from sqlalchemy import text, String, Integer, bindparam
 from db.database import async_session_maker
 from slowapi import Limiter
 from utils.limiter import forwarded_for_ip
@@ -55,32 +55,47 @@ async def list_notifications(
     async with async_session_maker() as session:
         # Build query based on unread filter
         if unread_only:
-            query = text("""
-                SELECT id, user_id, title, message, type, data, 
-                       read, read_at, created_at
-                FROM notifications
-                WHERE user_id = :uid AND read = false
-                ORDER BY created_at DESC
-                LIMIT :limit OFFSET :offset
-            """)
+            query = (
+                text("""
+                    SELECT id, user_id, title, message, type, data, 
+                           read, read_at, created_at
+                    FROM notifications
+                    WHERE user_id = :uid AND read = false
+                    ORDER BY created_at DESC
+                    LIMIT :limit_val OFFSET :offset_val
+                """)
+                .bindparams(
+                    bindparam("uid", type_=String),
+                    bindparam("limit_val", type_=Integer),
+                    bindparam("offset_val", type_=Integer),
+                )
+            )
+            result = await session.execute(query, {"uid": uid, "limit_val": limit, "offset_val": offset})
         else:
-            query = text("""
-                SELECT id, user_id, title, message, type, data,
-                       read, read_at, created_at
-                FROM notifications
-                WHERE user_id = :uid
-                ORDER BY created_at DESC
-                LIMIT :limit OFFSET :offset
-            """)
+            query = (
+                text("""
+                    SELECT id, user_id, title, message, type, data,
+                           read, read_at, created_at
+                    FROM notifications
+                    WHERE user_id = :uid
+                    ORDER BY created_at DESC
+                    LIMIT :limit_val OFFSET :offset_val
+                """)
+                .bindparams(
+                    bindparam("uid", type_=String),
+                    bindparam("limit_val", type_=Integer),
+                    bindparam("offset_val", type_=Integer),
+                )
+            )
+            result = await session.execute(query, {"uid": uid, "limit_val": limit, "offset_val": offset})
         
-        result = await session.execute(query, {"uid": uid, "limit": limit, "offset": offset})
         rows = result.mappings().all()
         
         # Get total count
         if unread_only:
-            count_query = text("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = :uid AND read = false")
+            count_query = text("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = :uid AND read = false").bindparams(bindparam("uid", type_=String))
         else:
-            count_query = text("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = :uid")
+            count_query = text("SELECT COUNT(*) as cnt FROM notifications WHERE user_id = :uid").bindparams(bindparam("uid", type_=String))
         
         count_result = await session.execute(count_query, {"uid": uid})
         total = int((count_result.mappings().first() or {}).get("cnt") or 0)

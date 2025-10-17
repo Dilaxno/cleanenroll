@@ -18,11 +18,13 @@ def _verify_firebase_uid(request: Request) -> str:
     """Extract and verify Firebase UID from Authorization header."""
     try:
         from firebase_admin import auth as _admin_auth  # type: ignore
-    except Exception:
+    except Exception as e:
+        logger.error(f"Firebase Admin import failed: {e}")
         raise HTTPException(status_code=500, detail="Firebase Admin not available on server")
     
     authz = request.headers.get("authorization") or request.headers.get("Authorization")
     if not authz or not authz.lower().startswith("bearer "):
+        logger.warning(f"Missing or invalid auth header: {authz[:20] if authz else 'None'}...")
         raise HTTPException(status_code=401, detail="Missing Authorization token")
     
     token = authz.split(" ", 1)[1].strip()
@@ -30,10 +32,13 @@ def _verify_firebase_uid(request: Request) -> str:
         decoded = _admin_auth.verify_id_token(token)
         uid = decoded.get("uid")
         if not uid:
+            logger.error("Token decoded but no uid found")
             raise HTTPException(status_code=401, detail="Invalid token")
         return uid
-    except Exception:
-        logger.exception("Firebase token verification failed")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Firebase token verification failed: {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @router.get("/{form_id}/analytics/countries")

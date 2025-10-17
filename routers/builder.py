@@ -2301,10 +2301,76 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
         subject = "Notification"
     if not html:
         if text_fallback:
-            html = f"<pre style='font-family:monospace;white-space:pre-wrap'>{text_fallback}</pre>"
-        else:
-            html = "<p>You have a new notification.</p>"
-
+            html = f"<pre style=\
+                            """
+                            SELECT auto_reply_email_field_id
+                            FROM forms
+                            WHERE id = :fid
+                            LIMIT 1
+                            """
+                        ),
+                        {"fid": form_id},
+                    )
+                    row = res.mappings().first()
+                    auto_field = (row or {}).get("auto_reply_email_field_id")
+                    if auto_field and auto_field in values:
+                        cand = values.get(auto_field)
+                        if isinstance(cand, list):
+                            cand = cand[0] if cand else ""
+                        to_raw = str(cand or "").strip()
+            # Final fallback: scan form fields to find an email field and try its id/label
+            if not to_raw and values:
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text(
+                            """
+                            SELECT fields
+                            FROM forms
+                            WHERE id = :fid
+                            LIMIT 1
+                            """
+                        ),
+                        {"fid": form_id},
+                    )
+                    row = res.mappings().first()
+                    fields = None
+                    try:
+                        fields = row.get("fields") if row else None
+                        if isinstance(fields, str):
+                            fields = json.loads(fields)
+                    except Exception:
+                        fields = None
+                    if isinstance(fields, list):
+                        # Find first field with type 'email'
+                        email_field = None
+                        for f in fields:
+                            try:
+                                if str((f or {}).get("type") or "").lower() == "email":
+                                    email_field = f
+                                    break
+                            except Exception:
+                                continue
+                        if email_field:
+                            try_ids = []
+                            fid1 = (email_field.get("id") or "").strip()
+                            if fid1:
+                                try_ids.append(fid1)
+                            label = (email_field.get("label") or "").strip()
+                            if label:
+                                try_ids.append(label)
+                                try_ids.append(label.lower())
+                            for k in try_ids:
+                                if not k:
+                                    continue
+                                if k in values:
+                                    cand = values.get(k)
+                                    if isinstance(cand, list):
+                                        cand = cand[0] if cand else ""
+                                    to_raw = str(cand or "").strip()
+                                    if to_raw:
+                                        break
+        except Exception:
+            pass
     if not to_raw:
         raise HTTPException(status_code=400, detail="Missing recipient. Provide 'to' or 'email', or include { values, fieldId } or configure auto-reply email field on the form.")
     # Validate email format
@@ -3105,8 +3171,6 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     continue
         except HTTPException:
             raise
-        except Exception:
-            pass
     
     # Build a small ZIP manifest of file URLs (best-effort)
     files_zip_meta = None

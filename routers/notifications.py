@@ -15,24 +15,25 @@ logger = logging.getLogger("backend.notifications")
 
 def _verify_firebase_uid(request: Request) -> str:
     """Extract and verify Firebase UID from Authorization header."""
-    from utils.firebase_auth import verify_firebase_token
     try:
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-        token = auth_header.replace("Bearer ", "").strip()
-        if not token:
-            raise HTTPException(status_code=401, detail="Missing token")
-        decoded = verify_firebase_token(token)
+        from firebase_admin import auth as _admin_auth  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="Firebase Admin not available on server")
+    
+    authz = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not authz or not authz.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization token")
+    
+    token = authz.split(" ", 1)[1].strip()
+    try:
+        decoded = _admin_auth.verify_id_token(token)
         uid = decoded.get("uid")
         if not uid:
-            raise HTTPException(status_code=401, detail="Invalid token: missing uid")
-        return str(uid)
-    except HTTPException:
-        raise
-    except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return uid
+    except Exception:
         logger.exception("Firebase token verification failed")
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 @router.get("/")
 @limiter.limit("120/minute")

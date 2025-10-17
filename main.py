@@ -79,6 +79,7 @@ from routers.url_validation import router as url_validation_router  # type: igno
 from routers.uploads import router as uploads_router  # type: ignore
 from routers.forms_validated import router as forms_validated_router  # type: ignore
 from routers.notifications import router as notifications_router  # type: ignore
+from routers.analytics import router as analytics_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -246,6 +247,7 @@ app.include_router(url_validation_router)
 app.include_router(uploads_router)
 app.include_router(forms_validated_router, prefix="/api/v1")
 app.include_router(notifications_router)
+app.include_router(analytics_router)
 
 
 if __name__ == "__main__":

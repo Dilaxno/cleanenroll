@@ -28,10 +28,7 @@ R2_BUCKET = os.getenv("R2_BUCKET", "cleanenroll")
 R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else ""
 
 # Import database session
-try:
-    from ..db.database import async_session_maker
-except ImportError:
-    from backend.db.database import async_session_maker
+from db.database import async_session_maker
 
 
 def _r2_client():

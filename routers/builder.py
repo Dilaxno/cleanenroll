@@ -21,7 +21,8 @@ from botocore.client import Config as BotoConfig
 import socket
 import threading
 import time
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
+from sqlalchemy.types import Integer
 # Optional URL shortener
 try:
     import pyshorteners  # type: ignore
@@ -3668,6 +3669,26 @@ async def list_form_responses(form_id: str, request: Request, limit: int = 50, o
             raise HTTPException(status_code=403, detail="Forbidden")
 
         # Total count with optional date filters
+        # Parse 'from' and 'to' query params (ISO8601). Accepts 'Z' timezone.
+        th_from = None
+        th_to = None
+        try:
+            if from_:
+                s = str(from_).strip()
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                th_from = datetime.fromisoformat(s)
+        except Exception:
+            th_from = None
+        try:
+            if to:
+                s = str(to).strip()
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                th_to = datetime.fromisoformat(s)
+        except Exception:
+            th_to = None
+
         if th_from and th_to:
             res_total = await session.execute(
                 text("SELECT COUNT(*) AS cnt FROM submissions WHERE form_id = :fid AND submitted_at BETWEEN :f AND :t"),

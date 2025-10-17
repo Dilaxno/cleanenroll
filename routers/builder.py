@@ -3095,6 +3095,12 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     continue
         except HTTPException:
             raise
+        except Exception:
+            # Fail closed on malformed validation config
+            raise HTTPException(status_code=400, detail="Validation failed for one or more fields")
+    except Exception:
+        # Unexpected error in signature/answer processing
+        logger.exception("submit_form answer processing error id=%s", form_id)
     
     # Build a small ZIP manifest of file URLs (best-effort)
     files_zip_meta = None

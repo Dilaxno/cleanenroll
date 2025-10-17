@@ -3054,6 +3054,10 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         signatures[fid] = meta
                     except Exception:
                         continue
+            else:
+                # Store all other field types (text, email, number, etc.)
+                if val is not None:
+                    answers[fid] = val
         # Server-side price min/max validation using built answers
         try:
             for f in fields_def:
@@ -3663,7 +3667,51 @@ async def list_form_responses(form_id: str, request: Request, limit: int = 50, o
             bindparam("off", type_=Integer),
         )
         res_items = await session.execute(sql_items, params)
-        items = [dict(r) for r in res_items.mappings().all()]
+        raw_items = [dict(r) for r in res_items.mappings().all()]
+        
+        # Parse JSONB fields and format for client
+        items = []
+        for r in raw_items:
+            item = {
+                "id": r.get("id"),
+                "formId": r.get("form_id"),
+                "submittedAt": r.get("submitted_at").isoformat() if r.get("submitted_at") else None,
+                "clientIp": r.get("ip_address"),
+                "country": r.get("country_code"),
+                "userAgent": r.get("user_agent"),
+            }
+            # Parse data field (JSONB containing answers)
+            try:
+                data = r.get("data")
+                if isinstance(data, str):
+                    item["answers"] = json.loads(data)
+                elif isinstance(data, dict):
+                    item["answers"] = data
+                else:
+                    item["answers"] = {}
+            except Exception:
+                item["answers"] = {}
+            
+            # Parse metadata field (JSONB)
+            try:
+                metadata = r.get("metadata")
+                if isinstance(metadata, str):
+                    meta = json.loads(metadata)
+                elif isinstance(metadata, dict):
+                    meta = metadata
+                else:
+                    meta = {}
+                # Expose useful metadata fields
+                if meta.get("lat"):
+                    item["lat"] = meta.get("lat")
+                if meta.get("lon"):
+                    item["lon"] = meta.get("lon")
+                if meta.get("signatures"):
+                    item["signatures"] = meta.get("signatures")
+            except Exception:
+                pass
+            
+            items.append(item)
 
     # Back-compat: some clients expect 'responses'
     return {"items": items, "responses": items, "total": total, "limit": limit, "offset": offset}
@@ -3706,9 +3754,50 @@ async def get_form_response(form_id: str, response_id: str, request: Request):
         sub = res_sub.mappings().first()
         if not sub:
             raise HTTPException(status_code=404, detail="Response not found")
+        
+        # Parse JSONB fields to proper format
+        r = dict(sub)
+        item = {
+            "id": r.get("id"),
+            "formId": r.get("form_id"),
+            "submittedAt": r.get("submitted_at").isoformat() if r.get("submitted_at") else None,
+            "clientIp": r.get("ip_address"),
+            "country": r.get("country_code"),
+            "userAgent": r.get("user_agent"),
+        }
+        # Parse data field (JSONB containing answers)
+        try:
+            data = r.get("data")
+            if isinstance(data, str):
+                item["answers"] = json.loads(data)
+            elif isinstance(data, dict):
+                item["answers"] = data
+            else:
+                item["answers"] = {}
+        except Exception:
+            item["answers"] = {}
+        
+        # Parse metadata field (JSONB)
+        try:
+            metadata = r.get("metadata")
+            if isinstance(metadata, str):
+                meta = json.loads(metadata)
+            elif isinstance(metadata, dict):
+                meta = metadata
+            else:
+                meta = {}
+            # Expose useful metadata fields
+            if meta.get("lat"):
+                item["lat"] = meta.get("lat")
+            if meta.get("lon"):
+                item["lon"] = meta.get("lon")
+            if meta.get("signatures"):
+                item["signatures"] = meta.get("signatures")
+        except Exception:
+            pass
+        
         # Back-compat alias 'responses' with single-element array
-        payload = dict(sub)
-        return {"response": payload, "responses": [payload]}
+        return {"response": item, "responses": [item]}
 
 @router.post("/forms/{form_id}/custom-domain/verify")
 async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optional[str] = None):

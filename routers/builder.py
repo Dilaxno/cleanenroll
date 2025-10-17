@@ -2405,7 +2405,8 @@ async def presign_form_bg(request: Request, payload: Dict[str, Any] | None = Non
 @router.post("/uploads/submissions/presign")
 @limiter.limit("60/minute")
 async def presign_submission_file(request: Request, payload: Dict[str, Any] | None = None):
-    """Create a presigned URL to upload a submission attachment to R2 and return its public URL.
+    """Create a presigned URL to upload a submission attachment to R2.
+    Returns a clean short link instead of exposing raw R2 URL.
 
     Body: { formId?: string, fieldId?: string, filename: string, contentType: string }
     """
@@ -2422,12 +2423,44 @@ async def presign_submission_file(request: Request, payload: Dict[str, Any] | No
     # Include field id when available to help later auditing
     suffix = f"_{field_id}" if field_id else ""
     key = f"submissions/{owner}/{uid}{suffix}{ext}"
+    
+    # Generate clean file ID (8 chars base62)
+    file_id = uuid.uuid4().hex[:12]
+    
     try:
+        # Create presigned upload URL
         s3 = _r2_client()
         params = {"Bucket": R2_BUCKET, "Key": key, "ContentType": content_type}
         upload_url = s3.generate_presigned_url('put_object', Params=params, ExpiresIn=900)
-        public_url = _public_url_for_key(key)
-        return {"uploadUrl": upload_url, "publicUrl": public_url, "headers": {"Content-Type": content_type}}
+        
+        # Store file metadata in database for clean URL mapping
+        async with async_session_maker() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO submission_files (id, form_id, response_id, r2_key, filename, content_type, size_bytes)
+                    VALUES (:id, :form_id, :response_id, :r2_key, :filename, :content_type, 0)
+                    ON CONFLICT (id) DO NOTHING
+                """),
+                {
+                    "id": file_id,
+                    "form_id": form_id or "unknown",
+                    "response_id": "pending",  # Updated after submission
+                    "r2_key": key,
+                    "filename": filename,
+                    "content_type": content_type,
+                }
+            )
+            await session.commit()
+        
+        # Return clean short link instead of raw R2 URL
+        clean_url = f"https://cleanenroll.com/submission/{file_id}"
+        
+        return {
+            "uploadUrl": upload_url,
+            "publicUrl": clean_url,  # Clean link for frontend
+            "key": file_id,  # File ID for tracking
+            "headers": {"Content-Type": content_type}
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -3062,13 +3095,35 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         if raw:
                             # Always store as PNG for consistency
                             key = f"submissions/{form_id}/{response_id}_{fid}.png"
+                            sig_id = uuid.uuid4().hex[:12]  # Clean signature ID
+                            
                             try:
+                                # Upload signature to R2
                                 s3 = _r2_client()
                                 s3.put_object(Bucket=R2_BUCKET, Key=key, Body=raw, ContentType="image/png")
-                                url = _public_url_for_key(key)
-                                short = _shorten_url(url)
-                                # Store structured signature metadata, include canonical pngUrl
-                                sig = {"status": "signed", "url": url, "pngUrl": url, "shortUrl": short, "key": key}
+                                
+                                # Store signature metadata in database
+                                async with async_session_maker() as sig_session:
+                                    await sig_session.execute(
+                                        text("""
+                                            INSERT INTO submission_signatures (id, form_id, response_id, field_id, r2_key, filename)
+                                            VALUES (:id, :form_id, :response_id, :field_id, :r2_key, :filename)
+                                            ON CONFLICT (id) DO NOTHING
+                                        """),
+                                        {
+                                            "id": sig_id,
+                                            "form_id": form_id,
+                                            "response_id": response_id,
+                                            "field_id": fid,
+                                            "r2_key": key,
+                                            "filename": f"signature_{fid}.png",
+                                        }
+                                    )
+                                    await sig_session.commit()
+                                
+                                # Return clean short link
+                                clean_url = f"https://cleanenroll.com/signature/{sig_id}"
+                                sig = {"status": "signed", "url": clean_url, "pngUrl": clean_url, "key": sig_id}
                                 signatures[fid] = sig
                                 answers[fid] = sig
                                 continue

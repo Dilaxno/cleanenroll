@@ -4133,6 +4133,103 @@ async def upload_session_chunk(form_id: str, session_id: str, payload: Dict):
         logger.exception("session upload failed form_id=%s session_id=%s", form_id, session_id)
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
+@router.get("/forms/{form_id}/sessions")
+async def list_form_sessions(form_id: str):
+    """List all unique sessions for a form with metadata.
+    Returns: { sessions: [{ sessionId, firstChunkAt, lastChunkAt, chunkCount }] }
+    """
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT 
+                        session_id,
+                        MIN(created_at) as first_chunk_at,
+                        MAX(created_at) as last_chunk_at,
+                        COUNT(*) as chunk_count
+                    FROM form_sessions
+                    WHERE form_id = :fid
+                    GROUP BY session_id
+                    ORDER BY MAX(created_at) DESC
+                    """
+                ),
+                {"fid": form_id}
+            )
+            rows = result.mappings().all()
+            sessions = [
+                {
+                    "sessionId": row["session_id"],
+                    "firstChunkAt": row["first_chunk_at"].isoformat() if row["first_chunk_at"] else None,
+                    "lastChunkAt": row["last_chunk_at"].isoformat() if row["last_chunk_at"] else None,
+                    "chunkCount": row["chunk_count"],
+                }
+                for row in rows
+            ]
+        return {"sessions": sessions}
+    except Exception as e:
+        logger.exception("list sessions failed form_id=%s", form_id)
+        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {e}")
+
+@router.get("/forms/{form_id}/sessions/{session_id}/chunks")
+async def get_session_chunks(form_id: str, session_id: str):
+    """Fetch all chunks for a specific session.
+    Returns: { chunks: [{ idx, data }] } sorted by idx
+    """
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT idx, data
+                    FROM form_sessions
+                    WHERE form_id = :fid AND session_id = :sid
+                    ORDER BY idx ASC
+                    """
+                ),
+                {"fid": form_id, "sid": session_id}
+            )
+            rows = result.mappings().all()
+            chunks = [
+                {"idx": row["idx"], "data": row["data"]}
+                for row in rows
+            ]
+        return {"chunks": chunks}
+    except Exception as e:
+        logger.exception("get chunks failed form_id=%s session_id=%s", form_id, session_id)
+        raise HTTPException(status_code=500, detail=f"Failed to get chunks: {e}")
+
+@router.post("/forms/{form_id}/sessions/delete-batch")
+async def delete_sessions_batch(form_id: str, payload: Dict):
+    """Delete multiple sessions by session_id.
+    Body: { ids: [session_id1, session_id2, ...] }
+    Returns: { deleted: count }
+    """
+    try:
+        ids = payload.get("ids", [])
+        if not isinstance(ids, list) or len(ids) == 0:
+            raise HTTPException(status_code=400, detail="Missing or invalid ids array")
+        
+        async with async_session_maker() as session:
+            result = await session.execute(
+                text(
+                    """
+                    DELETE FROM form_sessions
+                    WHERE form_id = :fid AND session_id = ANY(:sids)
+                    """
+                ),
+                {"fid": form_id, "sids": ids}
+            )
+            await session.commit()
+            deleted_count = result.rowcount if result.rowcount else 0
+        
+        return {"deleted": deleted_count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("delete sessions failed form_id=%s", form_id)
+        raise HTTPException(status_code=500, detail=f"Failed to delete sessions: {e}")
+
 @router.get("/forms/{form_id}/responses")
 async def list_responses(
     form_id: str,

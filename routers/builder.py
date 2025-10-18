@@ -408,6 +408,99 @@ async def analytics_events(request: Request, payload: Dict[str, Any] | None = No
         pass
     return {"ok": True}
 
+@router.get("/brand/colors")
+@limiter.limit("30/minute")
+async def get_brand_colors(request: Request, url: str = Query(...)):
+    """Extract brand colors from a website URL."""
+    try:
+        if not url or not url.strip():
+            raise HTTPException(status_code=400, detail="URL is required")
+        
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        
+        # Fetch the website with timeout
+        try:
+            response = requests.get(url, timeout=10, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            response.raise_for_status()
+            html_content = response.text
+        except Exception as e:
+            logger.warning(f"Failed to fetch URL {url}: {e}")
+            raise HTTPException(status_code=400, detail="Failed to fetch website")
+        
+        # Extract colors from HTML content using regex
+        colors = set()
+        
+        # Match hex colors (#fff, #ffffff)
+        hex_pattern = r'#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b'
+        hex_matches = re.findall(hex_pattern, html_content)
+        for match in hex_matches:
+            if len(match) == 3:
+                # Convert 3-digit to 6-digit hex
+                colors.add(f"#{match[0]}{match[0]}{match[1]}{match[1]}{match[2]}{match[2]}")
+            else:
+                colors.add(f"#{match}")
+        
+        # Match rgb/rgba colors
+        rgb_pattern = r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*[\d.]+)?\s*\)'
+        rgb_matches = re.findall(rgb_pattern, html_content)
+        for r, g, b in rgb_matches:
+            try:
+                hex_color = f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+                colors.add(hex_color)
+            except Exception:
+                pass
+        
+        # Filter out common colors (white, black, transparent-like)
+        filtered_colors = []
+        for color in colors:
+            color_lower = color.lower()
+            # Skip very light colors (near white) and very dark colors (near black)
+            if color_lower not in ['#ffffff', '#fff', '#000000', '#000', '#f0f0f0', '#fafafa']:
+                try:
+                    # Parse hex to check brightness
+                    hex_val = color_lower.replace('#', '')
+                    if len(hex_val) == 6:
+                        r = int(hex_val[0:2], 16)
+                        g = int(hex_val[2:4], 16)
+                        b = int(hex_val[4:6], 16)
+                        brightness = (r * 299 + g * 587 + b * 114) / 1000
+                        # Skip very light (>240) or very dark (<20) colors
+                        if 20 < brightness < 240:
+                            filtered_colors.append(color)
+                except Exception:
+                    pass
+        
+        # Sort by frequency (most common first) and return top 8
+        color_counts = {}
+        for color in filtered_colors:
+            color_counts[color] = html_content.count(color)
+        
+        sorted_colors = sorted(color_counts.items(), key=lambda x: x[1], reverse=True)
+        palette = [color for color, _ in sorted_colors[:8]]
+        
+        # If we have colors, return them with a primary suggestion
+        if palette:
+            return {
+                "palette": palette,
+                "colors": {"primary": palette[0]},
+                "suggestions": {
+                    "theme": {"primaryColor": palette[0]}
+                }
+            }
+        else:
+            # Return empty palette if no colors found
+            return {"palette": [], "colors": {}, "suggestions": {}}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Brand colors extraction failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to extract colors")
+
 # Models aligned with the front-end builder
 class SubmitButton(BaseModel):
     label: str = "Submit"
@@ -625,6 +718,7 @@ EXTENDED_ALLOWED_TYPES = {
     "time",
     "count",
     "linear-scale",
+    "range-slider",
     # Media display (non-interactive)
     "image",
     "video",
@@ -1916,12 +2010,26 @@ async def public_get_form(form_id: str):
             except Exception:
                 # Fallback to original data shape
                 return data
-            # Best-effort: increment views in Neon as well (in case client didn't POST /view)
+            # Best-effort: increment views in Neon and log to analytics table
             try:
                 async with async_session_maker() as session2:
+                    # Increment cached counter in forms table
                     await session2.execute(
                         text("UPDATE forms SET views = COALESCE(views,0) + 1, updated_at = NOW() WHERE id = :fid"),
                         {"fid": form_id},
+                    )
+                    # Log view event to analytics table for accurate tracking
+                    await session2.execute(
+                        text("""
+                            INSERT INTO analytics (id, form_id, event_type, data, created_at)
+                            VALUES (:id, :form_id, :event_type, :data, NOW())
+                        """),
+                        {
+                            "id": _create_id(),
+                            "form_id": form_id,
+                            "event_type": "view",
+                            "data": json.dumps({"source": "form_load"})
+                        }
                     )
                     await session2.commit()
             except Exception:
@@ -3180,7 +3288,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     submitted_at = datetime.utcnow()
     response_id = uuid.uuid4().hex
 
-    # Only persist answers for known fields, keyed by field id
+    # Only persist answers for known fields, keyed by field LABEL for readability
     answers: Dict[str, object] = {}
     signatures: Dict[str, Dict[str, str]] = {}
     fields_def = form_data.get("fields") or []
@@ -3192,7 +3300,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         for f in fields_def:
             try:
                 fid = str(f.get("id"))
-                label = str(f.get("label") or "")
+                label = str(f.get("label") or "Untitled")
             except Exception:
                 continue
             val = payload.get(fid)
@@ -3224,9 +3332,9 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     except Exception:
                         return str(v)
                 if isinstance(val, list):
-                    answers[fid] = [_file_to_url(x) for x in val]
+                    answers[label] = [_file_to_url(x) for x in val]
                 else:
-                    answers[fid] = _file_to_url(val)
+                    answers[label] = _file_to_url(val)
             elif ftype == "signature" and val is not None:
                 # Persist signature PNG to R2 when provided as a data URL and return status 'signed' with a PNG URL
                 try:
@@ -3274,8 +3382,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                                 # Return direct R2 public URL
                                 r2_url = _public_url_for_key(key)
                                 sig = {"status": "signed", "url": r2_url, "pngUrl": r2_url, "key": sig_id}
-                                signatures[fid] = sig
-                                answers[fid] = sig
+                                signatures[label] = sig
+                                answers[label] = sig
                                 continue
                             except Exception:
                                 # Fall through to store data URL if upload fails
@@ -3285,13 +3393,13 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     # Alias as pngDataUrl for consumers expecting a PNG field
                     if data_url:
                         meta["pngDataUrl"] = data_url
-                    signatures[fid] = meta
-                    answers[fid] = meta
+                    signatures[label] = meta
+                    answers[label] = meta
                 except Exception:
                     # On unexpected error, still record that a signature was provided
                     try:
                         meta = {"status": "signed", "value": str(val)}
-                        signatures[fid] = meta
+                        signatures[label] = meta
                     except Exception:
                         continue
             else:
@@ -3306,25 +3414,25 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                             # Remove trailing .00 if amount is whole number
                             amt_float = float(str(amount))
                             if amt_float == int(amt_float):
-                                answers[fid] = f"{currency}{int(amt_float)}"
+                                answers[label] = f"{currency}{int(amt_float)}"
                             else:
-                                answers[fid] = f"{currency}{amount}"
+                                answers[label] = f"{currency}{amount}"
                         except Exception:
                             # Fallback to direct concatenation
-                            answers[fid] = f"{currency}{amount}"
+                            answers[label] = f"{currency}{amount}"
                     else:
-                        answers[fid] = val
+                        answers[label] = val
         # Server-side price min/max validation using built answers
         try:
             for f in fields_def:
                 try:
                     if str((f.get("type") or "")).strip().lower() != "price":
                         continue
-                    fid = str(f.get("id") or "")
-                    if not fid:
+                    label = str(f.get("label") or "Price")
+                    if not label:
                         continue
                     amt_raw = None
-                    v = answers.get(fid)
+                    v = answers.get(label)
                     if isinstance(v, dict):
                         amt_raw = v.get("amount")
                     elif isinstance(v, (str, int, float)):
@@ -3344,7 +3452,6 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     except Exception:
                         min_v = None
                         max_v = None
-                    label = str(f.get("label") or "Price")
                     if (min_v is not None) and (amount < min_v):
                         raise HTTPException(status_code=400, detail=f"Minimum allowed is {min_v} for '{label}'.")
                     if (max_v is not None) and (amount > max_v):
@@ -3377,8 +3484,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 try:
                     if str((f.get("type") or "")).strip().lower() != "file":
                         continue
-                    fid2 = str(f.get("id"))
-                    av2 = answers.get(fid2)
+                    label = str(f.get("label") or "Untitled")
+                    av2 = answers.get(label)
                     srcs = av2 if isinstance(av2, list) else ([av2] if av2 is not None else [])
                     for idx, v2 in enumerate(srcs):
                         url2 = None
@@ -3388,7 +3495,9 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                             url2 = str(v2.get("url"))
                         if not url2:
                             continue
-                        zf.writestr(f"{fid2}_{idx+1}.txt", url2)
+                        # Use label-based filename for better readability
+                        safe_label = label.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"{safe_label}_{idx+1}.txt", url2)
                         added += 1
                 except Exception:
                     continue

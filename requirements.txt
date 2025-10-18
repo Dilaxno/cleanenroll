@@ -40,5 +40,4 @@ validators>=0.22.0
 # Ensure public suffix list updates for tldextract in production
 publicsuffixlist>=0.10.0
 pyshorteners>=1.0.1
-# ClamAV virus scanning client
-clamd>=1.0.2
+# Cloudmersive virus scanning API (uses requests library already included)

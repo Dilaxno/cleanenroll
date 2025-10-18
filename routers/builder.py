@@ -1972,6 +1972,30 @@ async def public_get_form(form_id: str):
                     except Exception:
                         return default
 
+                # Best-effort: increment views in Neon and log to analytics table BEFORE returning
+                try:
+                    # Increment cached counter in forms table
+                    await session.execute(
+                        text("UPDATE forms SET views = COALESCE(views,0) + 1, updated_at = NOW() WHERE id = :fid"),
+                        {"fid": form_id},
+                    )
+                    # Log view event to analytics table for accurate tracking
+                    await session.execute(
+                        text("""
+                            INSERT INTO analytics (id, form_id, event_type, data, created_at)
+                            VALUES (:id, :form_id, :event_type, :data, NOW())
+                        """),
+                        {
+                            "id": _create_id(),
+                            "form_id": form_id,
+                            "event_type": "view",
+                            "data": json.dumps({"source": "form_load"})
+                        }
+                    )
+                    await session.commit()
+                except Exception:
+                    pass
+
                 # Build camelCase payload
                 out = {
                     "id": data.get("id"),
@@ -2010,31 +2034,6 @@ async def public_get_form(form_id: str):
             except Exception:
                 # Fallback to original data shape
                 return data
-            # Best-effort: increment views in Neon and log to analytics table
-            try:
-                async with async_session_maker() as session2:
-                    # Increment cached counter in forms table
-                    await session2.execute(
-                        text("UPDATE forms SET views = COALESCE(views,0) + 1, updated_at = NOW() WHERE id = :fid"),
-                        {"fid": form_id},
-                    )
-                    # Log view event to analytics table for accurate tracking
-                    await session2.execute(
-                        text("""
-                            INSERT INTO analytics (id, form_id, event_type, data, created_at)
-                            VALUES (:id, :form_id, :event_type, :data, NOW())
-                        """),
-                        {
-                            "id": _create_id(),
-                            "form_id": form_id,
-                            "event_type": "view",
-                            "data": json.dumps({"source": "form_load"})
-                        }
-                    )
-                    await session2.commit()
-            except Exception:
-                pass
-            return data
     except HTTPException:
         raise
     except Exception:
@@ -3289,9 +3288,10 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     response_id = uuid.uuid4().hex
 
     # Only persist answers for known fields, keyed by field LABEL for readability
-    answers: Dict[str, object] = {}
+    # Iterate through fields_def in the exact order they appear in forms.fields to preserve field order
+    answers: Dict[str, object] = {}  # Python 3.7+ dicts maintain insertion order
     signatures: Dict[str, Dict[str, str]] = {}
-    fields_def = form_data.get("fields") or []
+    fields_def = form_data.get("fields") or []  # This is already ordered from DB
     payload = payload or {}
     
     logger.info("Processing submission form_id=%s fields_count=%d payload_keys=%s", form_id, len(fields_def), list(payload.keys()))
@@ -3548,8 +3548,9 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 "id": response_id,
                 "form_id": form_id,
                 "owner_id": owner_id,
-                "data": json.dumps(answers or {}),
-                "metadata": json.dumps(meta_payload),
+                # Preserve field order: sort_keys=False maintains insertion order from fields_def iteration
+                "data": json.dumps(answers or {}, ensure_ascii=False, sort_keys=False),
+                "metadata": json.dumps(meta_payload, ensure_ascii=False, sort_keys=False),
                 "ip": ip,
                 "country": (country_code or "").upper() or None,
                 "ua": str(request.headers.get("user-agent") or ""),

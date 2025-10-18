@@ -20,17 +20,35 @@ class AsyncFormsService:
     
     @staticmethod
     async def get_forms_by_user(session: AsyncSession, user_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-        """Get forms for a specific user"""
+        """Get forms for a specific user with actual submission and view counts from database"""
         # Normalize pagination values and bind explicit types to avoid driver ambiguity
         safe_limit = int(limit) if isinstance(limit, int) else 100
         safe_offset = max(0, int(offset) if isinstance(offset, int) else 0)
 
+        # Query forms with actual counts from submissions and analytics tables
+        # This ensures we show ALL submissions/views from Neon DB, not cached counters
         query = (
             text(
                 """
-                SELECT * FROM forms 
-                WHERE user_id = :user_id
-                ORDER BY created_at DESC
+                SELECT 
+                    f.*,
+                    COALESCE(s.submission_count, 0) as submissions,
+                    COALESCE(v.view_count, 0) as views,
+                    s.last_submission_at
+                FROM forms f
+                LEFT JOIN (
+                    SELECT form_id, COUNT(*) as submission_count, MAX(submitted_at) as last_submission_at
+                    FROM submissions
+                    GROUP BY form_id
+                ) s ON f.id = s.form_id
+                LEFT JOIN (
+                    SELECT form_id, COUNT(*) as view_count
+                    FROM analytics
+                    WHERE event_type = 'view'
+                    GROUP BY form_id
+                ) v ON f.id = v.form_id
+                WHERE f.user_id = :user_id
+                ORDER BY f.created_at DESC
                 LIMIT :limit_val OFFSET :offset_val
                 """
             )

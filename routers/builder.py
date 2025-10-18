@@ -112,6 +112,7 @@ try:
     from utils.limiter import forwarded_for_ip
     from utils.encryption import decrypt_submission_data  # type: ignore
     from db.database import async_session_maker  # type: ignore
+    limiter = Limiter(key_func=forwarded_for_ip)
 except Exception:
     from utils.limiter import limiter  # type: ignore
     from db.database import async_session_maker  # type: ignore

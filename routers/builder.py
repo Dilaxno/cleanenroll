@@ -2809,6 +2809,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     On success returns {success: True, message, redirectUrl?}.
     """
     # Load the form from Neon (PostgreSQL); require that it's published
+    owner_email = None  # Will be fetched early to avoid transaction conflicts
     try:
         async with async_session_maker() as session:
             res = await session.execute(
@@ -2825,6 +2826,24 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         if not row or not bool(row.get("is_published")):
             raise HTTPException(status_code=404, detail="Form not found")
         form_data = dict(row)
+        
+        # Fetch owner email from Neon early (before transactions) to use for notifications later
+        owner_id = str(form_data.get("userId") or "").strip() or None
+        if owner_id:
+            try:
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text("SELECT email FROM users WHERE id = :uid LIMIT 1"),
+                        {"uid": owner_id}
+                    )
+                    row = res.mappings().first()
+                    if row and row.get("email"):
+                        em = str(row.get("email")).strip()
+                        if "@" in em:
+                            owner_email = em
+                            logger.debug("Fetched owner email for notifications owner_id=%s", owner_id)
+            except Exception as e:
+                logger.warning("Failed to fetch owner email owner_id=%s: %s", owner_id, str(e))
         # Normalize JSON fields that may be stored as text
         for k in ("theme", "branding"):
             v = form_data.get(k)
@@ -3537,43 +3556,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             try_notify_slack_for_form(owner_id, form_id, record)
     except Exception:
         logger.exception("slack notify failed form_id=%s", form_id)
-    # Email notification to form owner (best-effort)
+    # Email notification to form owner (best-effort, using pre-fetched owner_email)
     try:
-        owner_id = str(form_data.get("userId") or "").strip() or None
-        owner_email = None
-        
-        # Try to get email from Firestore first
-        if _FS_AVAILABLE and owner_id:
-            try:
-                snap = _fs.client().collection("users").document(owner_id).get()
-                d = snap.to_dict() or {}
-                em = d.get("email")
-                if isinstance(em, str) and "@" in em:
-                    owner_email = em.strip()
-                    logger.info("Got owner email from Firestore for owner_id=%s", owner_id)
-            except Exception as e:
-                logger.warning("Failed to get owner email from Firestore owner_id=%s: %s", owner_id, str(e))
-        
-        # Fallback: get email from Neon users table
-        if not owner_email and owner_id:
-            try:
-                async with async_session_maker() as session:
-                    res = await session.execute(
-                        text("SELECT email FROM users WHERE id = :uid LIMIT 1"),
-                        {"uid": owner_id}
-                    )
-                    row = res.mappings().first()
-                    if row and row.get("email"):
-                        em = str(row.get("email")).strip()
-                        if "@" in em:
-                            owner_email = em
-                            logger.info("Got owner email from Neon database for owner_id=%s", owner_id)
-            except Exception as e:
-                logger.warning("Failed to get owner email from Neon owner_id=%s: %s", owner_id, str(e))
-        
-        if not owner_email:
-            logger.warning("No owner email found for owner_id=%s, skipping notification", owner_id)
-        
         if owner_email:
             form_title = str(form_data.get("title") or "Form").strip() or "Form"
             subject = f"New submission — {form_title}"

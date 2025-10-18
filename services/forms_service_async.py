@@ -254,6 +254,39 @@ class AsyncFormsService:
         existing_form = await AsyncFormsService.get_form_by_id(session, form_id, user_id)
         if not existing_form:
             return None
+        
+        # Save current version before updating
+        try:
+            import uuid
+            # Get the next version number
+            version_query = text("""
+                SELECT COALESCE(MAX(version_number), 0) + 1 as next_version
+                FROM form_versions
+                WHERE form_id = :form_id
+            """)
+            version_result = await session.execute(version_query, {"form_id": form_id})
+            next_version = version_result.scalar() or 1
+            
+            # Save the current form state as a version
+            version_id = str(uuid.uuid4())
+            version_data = {
+                k: v for k, v in existing_form.items() 
+                if k not in ['id', 'user_id', 'created_at', 'updated_at', 'views', 'submissions']
+            }
+            
+            save_version_query = text("""
+                INSERT INTO form_versions (id, form_id, version_number, data, created_at)
+                VALUES (:id, :form_id, :version_number, :data, NOW())
+            """)
+            await session.execute(save_version_query, {
+                "id": version_id,
+                "form_id": form_id,
+                "version_number": next_version,
+                "data": json.dumps(version_data)
+            })
+        except Exception as e:
+            # Don't fail the update if version saving fails
+            print(f"Version saving error: {e}")
             
         # Merge existing data with updates
         update_data = {**existing_form, **form_data, 'id': form_id, 'user_id': user_id}

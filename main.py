@@ -81,6 +81,7 @@ from routers.forms_validated import router as forms_validated_router  # type: ig
 from routers.notifications import router as notifications_router  # type: ignore
 from routers.analytics import router as analytics_router  # type: ignore
 from routers.file_proxy import router as file_proxy_router  # type: ignore
+from routers.form_versions import router as form_versions_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -250,6 +251,7 @@ app.include_router(forms_validated_router, prefix="/api/v1")
 app.include_router(notifications_router)
 app.include_router(analytics_router)
 app.include_router(file_proxy_router)
+app.include_router(form_versions_router)
 
 
 if __name__ == "__main__":

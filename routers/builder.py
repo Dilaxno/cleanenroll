@@ -2400,6 +2400,33 @@ async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = 
         raise HTTPException(status_code=500, detail="Failed to save SMTP settings")
 
 # -----------------------------
+# reCAPTCHA verification endpoint
+# -----------------------------
+
+@router.post("/recaptcha/verify")
+@limiter.limit("60/minute")
+async def verify_recaptcha_endpoint(request: Request, payload: Dict[str, Any] | None = None):
+    """Verify a reCAPTCHA token from the frontend (used during signup).
+    Body: { token: string }
+    Returns: { success: true } or raises HTTPException
+    """
+    payload = payload or {}
+    token = (payload.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing reCAPTCHA token")
+    
+    # Get client IP for verification
+    client_ip = _client_ip(request)
+    
+    # Verify the token
+    is_valid = _verify_recaptcha(token, client_ip)
+    
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
+    
+    return {"success": True}
+
+# -----------------------------
 # Upload presign endpoints for R2 + theme updates persisted to Neon
 # -----------------------------
 
@@ -3514,6 +3541,8 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     try:
         owner_id = str(form_data.get("userId") or "").strip() or None
         owner_email = None
+        
+        # Try to get email from Firestore first
         if _FS_AVAILABLE and owner_id:
             try:
                 snap = _fs.client().collection("users").document(owner_id).get()
@@ -3521,8 +3550,30 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 em = d.get("email")
                 if isinstance(em, str) and "@" in em:
                     owner_email = em.strip()
-            except Exception:
-                owner_email = None
+                    logger.info("Got owner email from Firestore for owner_id=%s", owner_id)
+            except Exception as e:
+                logger.warning("Failed to get owner email from Firestore owner_id=%s: %s", owner_id, str(e))
+        
+        # Fallback: get email from Neon users table
+        if not owner_email and owner_id:
+            try:
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text("SELECT email FROM users WHERE id = :uid LIMIT 1"),
+                        {"uid": owner_id}
+                    )
+                    row = res.mappings().first()
+                    if row and row.get("email"):
+                        em = str(row.get("email")).strip()
+                        if "@" in em:
+                            owner_email = em
+                            logger.info("Got owner email from Neon database for owner_id=%s", owner_id)
+            except Exception as e:
+                logger.warning("Failed to get owner email from Neon owner_id=%s: %s", owner_id, str(e))
+        
+        if not owner_email:
+            logger.warning("No owner email found for owner_id=%s, skipping notification", owner_id)
+        
         if owner_email:
             form_title = str(form_data.get("title") or "Form").strip() or "Form"
             subject = f"New submission — {form_title}"

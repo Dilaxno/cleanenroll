@@ -72,6 +72,44 @@ class SubmissionsService:
             # Increment form submission count
             FormsService.increment_form_submissions(form_id)
             
+            # Record analytics data
+            try:
+                from datetime import date
+                today = date.today()
+                
+                # Update country analytics (aggregate per day)
+                if country_code:
+                    analytics_query = """
+                        INSERT INTO form_countries_analytics (form_id, day, country_iso2, count)
+                        VALUES (%s, %s, %s, 1)
+                        ON CONFLICT (form_id, day, country_iso2)
+                        DO UPDATE SET count = form_countries_analytics.count + 1
+                    """
+                    cursor.execute(analytics_query, (form_id, today, country_code.upper()))
+                
+                # Record submission marker for map visualization
+                lat = metadata.get('lat') if metadata else None
+                lon = metadata.get('lon') if metadata else None
+                if lat is not None and lon is not None:
+                    marker_query = """
+                        INSERT INTO submission_markers (
+                            id, form_id, response_id, lat, lon, country_code, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """
+                    marker_id = str(uuid.uuid4())
+                    cursor.execute(marker_query, (
+                        marker_id,
+                        form_id,
+                        submission_id,
+                        float(lat),
+                        float(lon),
+                        country_code.upper() if country_code else None,
+                        now
+                    ))
+            except Exception as e:
+                # Don't fail submission if analytics fails
+                print(f"Analytics recording error: {e}")
+            
             return {"success": True, "submission": cursor.fetchone()}
     
     @staticmethod

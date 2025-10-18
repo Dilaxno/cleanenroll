@@ -134,3 +134,101 @@ async def get_form_countries_analytics(
                 countries[str(iso).upper()] = total
         
         return {"countries": countries}
+
+@router.get("/{form_id}/analytics/markers")
+@limiter.limit("120/minute")
+async def get_form_submission_markers(
+    form_id: str,
+    request: Request,
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    limit: int = Query(1000, le=5000)
+):
+    """
+    Get submission markers (lat/lon) for map visualization.
+    Returns array of {lat, lon, country_code, created_at}.
+    """
+    try:
+        uid = _verify_firebase_uid(request)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    async with async_session_maker() as session:
+        # Verify form ownership
+        form_check = await session.execute(
+            text("SELECT user_id FROM forms WHERE id = :fid LIMIT 1"),
+            {"fid": form_id}
+        )
+        form_row = form_check.mappings().first()
+        if not form_row or form_row.get("user_id") != uid:
+            raise HTTPException(status_code=404, detail="Form not found")
+        
+        # Parse date range
+        try:
+            if from_date:
+                from_dt = datetime.fromisoformat(from_date.replace('Z', '+00:00'))
+            else:
+                from_dt = None
+            
+            if to_date:
+                to_dt = datetime.fromisoformat(to_date.replace('Z', '+00:00'))
+            else:
+                to_dt = None
+        except Exception:
+            from_dt = None
+            to_dt = None
+        
+        # Build query based on date range
+        if from_dt and to_dt:
+            query = text("""
+                SELECT lat, lon, country_code, created_at
+                FROM submission_markers
+                WHERE form_id = :fid AND created_at >= :from_dt AND created_at <= :to_dt
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            result = await session.execute(query, {"fid": form_id, "from_dt": from_dt, "to_dt": to_dt, "limit": limit})
+        elif from_dt:
+            query = text("""
+                SELECT lat, lon, country_code, created_at
+                FROM submission_markers
+                WHERE form_id = :fid AND created_at >= :from_dt
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            result = await session.execute(query, {"fid": form_id, "from_dt": from_dt, "limit": limit})
+        elif to_dt:
+            query = text("""
+                SELECT lat, lon, country_code, created_at
+                FROM submission_markers
+                WHERE form_id = :fid AND created_at <= :to_dt
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            result = await session.execute(query, {"fid": form_id, "to_dt": to_dt, "limit": limit})
+        else:
+            query = text("""
+                SELECT lat, lon, country_code, created_at
+                FROM submission_markers
+                WHERE form_id = :fid
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            result = await session.execute(query, {"fid": form_id, "limit": limit})
+        
+        rows = result.mappings().all()
+        
+        # Format markers
+        markers = []
+        for row in rows:
+            lat = row.get("lat")
+            lon = row.get("lon")
+            if lat is not None and lon is not None:
+                markers.append({
+                    "lat": float(lat),
+                    "lon": float(lon),
+                    "country_code": row.get("country_code"),
+                    "created_at": row.get("created_at").isoformat() if row.get("created_at") else None
+                })
+        
+        return {"markers": markers}

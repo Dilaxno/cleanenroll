@@ -1067,16 +1067,6 @@ async def verify_confirm(token: str):
                         except Exception:
                             # Do not fail verification if Neon update fails
                             pass
-                    # Best-effort Firestore mirror (if admin Firestore available)
-                    try:
-                        from backend.utils.firebase_admin_adapter import admin_firestore  # type: ignore
-                        if admin_firestore is not None and getattr(user, "uid", None):
-                            try:
-                                admin_firestore.document(f"users/{user.uid}").set({"emailVerified": True}, merge=True)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
                 except Exception:
                     pass
         except Exception:

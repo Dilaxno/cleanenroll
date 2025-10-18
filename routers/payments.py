@@ -41,13 +41,7 @@ except Exception:
     Webhook = None  # type: ignore
     _STDWEBHOOKS_AVAILABLE = False
 
-# Firestore (optional) for subscription_id resolution in cancel/resume flows
-try:
-    from utils.firebase_admin_adapter import admin_firestore as _fs  # type: ignore
-    _FS_AVAILABLE = True
-except Exception:
-    _fs = None  # type: ignore
-    _FS_AVAILABLE = False
+# Firestore removed - all user data now stored in Neon database
 
 
 def _verify_id_token_from_header(request: Request) -> Optional[str]:
@@ -544,22 +538,26 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
     if not uid:
         raise HTTPException(status_code=401, detail='Unauthorized')
 
-    # Resolve subscription_id from Firestore
+    # Resolve subscription_id from Neon database
     subscription_id = None
-    if _FS_AVAILABLE:
-        try:
-            ref = _fs.client().collection('users').document(uid)
-            snap = ref.get()
-            data = snap.to_dict() or {}
-            # prefer core webhook's mapping
-            plan_details = data.get('planDetails') or {}
-            subscription_id = plan_details.get('subscription_id') or plan_details.get('id')
-            if not subscription_id:
-                # legacy storage fallback
-                billing = data.get('billing') or {}
-                subscription_id = billing.get('subscriptionId') or billing.get('subscription_id')
-        except Exception:
-            logger.exception('[dodo-cancel] failed to resolve subscription_id for uid=%s', uid)
+    try:
+        from db.database import async_session_maker
+        from sqlalchemy import text as _text
+        async with async_session_maker() as session:
+            res = await session.execute(
+                _text("SELECT subscription_id, plan_details FROM users WHERE uid = :uid LIMIT 1"),
+                {"uid": uid}
+            )
+            row = res.mappings().first()
+            if row:
+                # Direct subscription_id column (preferred)
+                subscription_id = row.get('subscription_id')
+                # Fallback to plan_details JSON if subscription_id not set
+                if not subscription_id and row.get('plan_details'):
+                    plan_details = row.get('plan_details') or {}
+                    subscription_id = plan_details.get('subscription_id') or plan_details.get('id')
+    except Exception:
+        logger.exception('[dodo-cancel] failed to resolve subscription_id for uid=%s', uid)
 
     if not subscription_id:
         # Without a subscription id, we cannot update provider

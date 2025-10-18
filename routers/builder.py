@@ -108,7 +108,9 @@ from typing import Optional as _Optional
 
 # Shared limiter and async DB session must be defined before any route decorators
 try:
-    from utils.limiter import limiter  # type: ignore
+    from slowapi import Limiter
+    from utils.limiter import forwarded_for_ip
+    from utils.encryption import decrypt_submission_data  # type: ignore
     from db.database import async_session_maker  # type: ignore
 except Exception:
     from utils.limiter import limiter  # type: ignore
@@ -3249,7 +3251,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 # Store all other field types (text, email, number, etc.)
                 if val is not None:
                     # Transform price fields from JSON to simple string format (e.g., USD2000.00)
-                    if field_type == "price" and isinstance(val, dict):
+                    if ftype == "price" and isinstance(val, dict):
                         amount = val.get("amount", "")
                         currency = val.get("currency", "USD")
                         # Format as CURRENCY + AMOUNT (e.g., USD2000.00 or USD2000)
@@ -3890,11 +3892,22 @@ async def list_form_responses(form_id: str, request: Request, limit: int = 50, o
                 "country": r.get("country_code"),
                 "userAgent": r.get("user_agent"),
             }
-            # Parse data field (JSONB containing answers)
+            # Parse data field (encrypted submission data)
             try:
                 data = r.get("data")
+                # Data is stored encrypted, decrypt it first
                 if isinstance(data, str):
-                    item["answers"] = json.loads(data)
+                    try:
+                        # Decrypt the encrypted data
+                        decrypted = decrypt_submission_data(data)
+                        if isinstance(decrypted, dict):
+                            item["answers"] = decrypted
+                        else:
+                            # If decrypted data is a string, try parsing as JSON
+                            item["answers"] = json.loads(decrypted) if isinstance(decrypted, str) else {}
+                    except Exception as decrypt_err:
+                        logger.error(f"Decryption failed for submission {r.get('id')}: {decrypt_err}")
+                        item["answers"] = {}
                 elif isinstance(data, dict):
                     item["answers"] = data
                 else:
@@ -3975,11 +3988,22 @@ async def get_form_response(form_id: str, response_id: str, request: Request):
             "country": r.get("country_code"),
             "userAgent": r.get("user_agent"),
         }
-        # Parse data field (JSONB containing answers)
+        # Parse data field (encrypted submission data)
         try:
             data = r.get("data")
+            # Data is stored encrypted, decrypt it first
             if isinstance(data, str):
-                item["answers"] = json.loads(data)
+                try:
+                    # Decrypt the encrypted data
+                    decrypted = decrypt_submission_data(data)
+                    if isinstance(decrypted, dict):
+                        item["answers"] = decrypted
+                    else:
+                        # If decrypted data is a string, try parsing as JSON
+                        item["answers"] = json.loads(decrypted) if isinstance(decrypted, str) else {}
+                except Exception as decrypt_err:
+                    logger.error(f"Decryption failed for submission {r.get('id')}: {decrypt_err}")
+                    item["answers"] = {}
             elif isinstance(data, dict):
                 item["answers"] = data
             else:

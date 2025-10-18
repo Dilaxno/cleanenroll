@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 from ..db.database import get_cursor
 from .forms_service import FormsService
+from ..utils.encryption import encrypt_submission_data, decrypt_submission_data
 
 class SubmissionsService:
     """Service for handling form submissions with PostgreSQL"""
@@ -46,7 +47,14 @@ class SubmissionsService:
                 country_code = metadata.get('countryCode')
                 user_agent = metadata.get('userAgent')
             
-            # Insert submission
+            # Encrypt submission data before storing
+            try:
+                encrypted_data = encrypt_submission_data(submission_data)
+            except Exception as e:
+                print(f"Encryption error: {e}")
+                return {"success": False, "error": "Failed to encrypt submission data"}
+            
+            # Insert submission with encrypted data
             query = """
                 INSERT INTO submissions (
                     id, form_id, form_owner_id, data, metadata,
@@ -61,7 +69,7 @@ class SubmissionsService:
                 submission_id,
                 form_id,
                 form['user_id'],
-                json.dumps(submission_data),
+                encrypted_data,  # Store encrypted data instead of plaintext
                 json.dumps(metadata or {}),
                 ip_address,
                 country_code,
@@ -128,7 +136,23 @@ class SubmissionsService:
                 params.append(user_id)
                 
             cursor.execute(query, params)
-            return cursor.fetchone()
+            submission = cursor.fetchone()
+            
+            # Decrypt submission data before returning
+            if submission and submission.get('data'):
+                try:
+                    encrypted_data = submission['data']
+                    # Data is stored as encrypted string, decrypt it
+                    if isinstance(encrypted_data, str):
+                        decrypted_data = decrypt_submission_data(encrypted_data)
+                        submission['data'] = json.dumps(decrypted_data) if isinstance(decrypted_data, dict) else decrypted_data
+                except Exception as e:
+                    print(f"Decryption error: {e}")
+                    # Return None or original data based on security policy
+                    # For security, we don't return encrypted data
+                    submission['data'] = None
+            
+            return submission
     
     @staticmethod
     def delete_submission(submission_id, user_id):

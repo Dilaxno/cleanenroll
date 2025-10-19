@@ -401,10 +401,11 @@ async def signup_check(request: Request):
     Enforces a 24h gap between signups from the same IP.
     Returns {allowed: true} if allowed, else raises 429 with detail.
     """
-    ip = _ip_from_req(request)
-    allowed, retry = _can_signup_ip(ip, window_hours=24)
-    if not allowed:
-        raise HTTPException(status_code=429, detail=f"Too many signups from this IP. Try again in {retry} seconds.")
+    # TEMPORARILY DISABLED: IP-based signup rate limiting
+    # ip = _ip_from_req(request)
+    # allowed, retry = _can_signup_ip(ip, window_hours=24)
+    # if not allowed:
+    #     raise HTTPException(status_code=429, detail=f"Too many signups from this IP. Try again in {retry} seconds.")
     return {"allowed": True, "retry_after": None}
 
 @router.post("/api/auth/signup/record")

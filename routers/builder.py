@@ -3255,11 +3255,11 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     if allowed:
         _, country = _country_from_ip(ip)
         if country and country not in allowed:
-            raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+            raise HTTPException(status_code=403, detail="We're sorry, but submissions from your country are currently restricted due to regional limitations.")
     if restricted:
         _, country = _country_from_ip(ip)
         if country and country in restricted:
-            raise HTTPException(status_code=403, detail="Your IP location is restricted from submitting the form, We're sorry about that")
+            raise HTTPException(status_code=403, detail="We're sorry, but submissions from your country are currently restricted due to regional limitations.")
 
     # Enforce role-based email block (server-side) even if client validation is bypassed
     try:

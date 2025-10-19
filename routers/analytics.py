@@ -52,6 +52,7 @@ async def get_form_countries_analytics(
     """
     Get aggregated country submission counts for a form within a date range.
     Returns country_iso2 codes and their submission counts.
+    Counts directly from submissions table to ensure ALL submissions are included.
     """
     try:
         uid = _verify_firebase_uid(request)
@@ -72,53 +73,56 @@ async def get_form_countries_analytics(
         try:
             if from_date:
                 from_dt = datetime.fromisoformat(from_date.replace('Z', '+00:00'))
-                from_day = from_dt.date()
             else:
-                from_day = None
+                from_dt = None
             
             if to_date:
                 to_dt = datetime.fromisoformat(to_date.replace('Z', '+00:00'))
-                to_day = to_dt.date()
             else:
-                to_day = None
+                to_dt = None
         except Exception:
-            from_day = None
-            to_day = None
+            from_dt = None
+            to_dt = None
         
-        # Build query based on date range
-        if from_day and to_day:
+        # Count directly from submissions table to show ALL submissions (not cached aggregates)
+        if from_dt and to_dt:
             query = text("""
-                SELECT country_iso2, SUM(count) as total
-                FROM form_countries_analytics
-                WHERE form_id = :fid AND day >= :from_day AND day <= :to_day
-                GROUP BY country_iso2
+                SELECT country_code, COUNT(*) as total
+                FROM submissions
+                WHERE form_id = :fid AND submitted_at >= :from_dt AND submitted_at <= :to_dt
+                  AND country_code IS NOT NULL AND country_code != ''
+                GROUP BY country_code
                 ORDER BY total DESC
             """)
-            result = await session.execute(query, {"fid": form_id, "from_day": from_day, "to_day": to_day})
-        elif from_day:
+            result = await session.execute(query, {"fid": form_id, "from_dt": from_dt, "to_dt": to_dt})
+        elif from_dt:
             query = text("""
-                SELECT country_iso2, SUM(count) as total
-                FROM form_countries_analytics
-                WHERE form_id = :fid AND day >= :from_day
-                GROUP BY country_iso2
+                SELECT country_code, COUNT(*) as total
+                FROM submissions
+                WHERE form_id = :fid AND submitted_at >= :from_dt
+                  AND country_code IS NOT NULL AND country_code != ''
+                GROUP BY country_code
                 ORDER BY total DESC
             """)
-            result = await session.execute(query, {"fid": form_id, "from_day": from_day})
-        elif to_day:
+            result = await session.execute(query, {"fid": form_id, "from_dt": from_dt})
+        elif to_dt:
             query = text("""
-                SELECT country_iso2, SUM(count) as total
-                FROM form_countries_analytics
-                WHERE form_id = :fid AND day <= :to_day
-                GROUP BY country_iso2
+                SELECT country_code, COUNT(*) as total
+                FROM submissions
+                WHERE form_id = :fid AND submitted_at <= :to_dt
+                  AND country_code IS NOT NULL AND country_code != ''
+                GROUP BY country_code
                 ORDER BY total DESC
             """)
-            result = await session.execute(query, {"fid": form_id, "to_day": to_day})
+            result = await session.execute(query, {"fid": form_id, "to_dt": to_dt})
         else:
+            # No date filter: show ALL submissions from Neon DB
             query = text("""
-                SELECT country_iso2, SUM(count) as total
-                FROM form_countries_analytics
+                SELECT country_code, COUNT(*) as total
+                FROM submissions
                 WHERE form_id = :fid
-                GROUP BY country_iso2
+                  AND country_code IS NOT NULL AND country_code != ''
+                GROUP BY country_code
                 ORDER BY total DESC
             """)
             result = await session.execute(query, {"fid": form_id})
@@ -128,7 +132,7 @@ async def get_form_countries_analytics(
         # Format as { "US": 10, "CA": 5, ... }
         countries = {}
         for row in rows:
-            iso = row.get("country_iso2")
+            iso = row.get("country_code")
             total = int(row.get("total") or 0)
             if iso and total > 0:
                 countries[str(iso).upper()] = total

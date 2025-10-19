@@ -474,10 +474,10 @@ async def create_and_export(
                 if first_name:
                     mf["FNAME"] = first_name[:255]
                 if last_name:
-                        mf["LNAME"] = last_name[:255]
-                    members.append({"email_address": email, "status": status, "merge_fields": mf})
-            except Exception:
-                continue
+                    mf["LNAME"] = last_name[:255]
+                members.append({"email_address": email, "status": status, "merge_fields": mf})
+        except Exception:
+            continue
 
     auth = _get_mailchimp_auth(userId)
 

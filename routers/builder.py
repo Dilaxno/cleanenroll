@@ -1699,9 +1699,18 @@ async def upsert_abandon(request: Request, payload: Dict[str, Any] | None = None
 
     # Upsert
     try:
+        # First ensure table exists and commit DDL operations separately
+        async with async_session_maker() as ddl_session:
+            try:
+                await _ensure_form_abandons_table(ddl_session)
+                await ddl_session.commit()
+            except Exception:
+                await ddl_session.rollback()
+                pass  # Best effort; subsequent operations may fail if DDL is not permitted
+        
+        # Now use a fresh transaction for data operations
         async with async_session_maker() as session:
             try:
-                await _ensure_form_abandons_table(session)
                 # Detect available columns for form_abandons to handle environments with older schema
                 try:
                     cols_res = await session.execute(
@@ -1714,6 +1723,7 @@ async def upsert_abandon(request: Request, payload: Dict[str, Any] | None = None
                     )
                     fa_cols = {str(r[0]) for r in cols_res}
                 except Exception:
+                    await session.rollback()
                     fa_cols = set()
 
                 extended_cols = {

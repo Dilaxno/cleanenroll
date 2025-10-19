@@ -664,6 +664,14 @@ class SignupUpsertPayload(BaseModel):
     email: Optional[EmailStr] = None
     displayName: Optional[str] = None
     photoURL: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+    accountType: Optional[str] = None
+    useCases: Optional[List[str]] = None
+    otherUseCase: Optional[str] = None
+    heardAboutUs: Optional[str] = None
+    heardAboutUsOther: Optional[str] = None
+    business: Optional[Dict] = None
 
 
 @router.options("/api/auth/signup/upsert")
@@ -710,6 +718,17 @@ async def signup_upsert(request: Request, body: SignupUpsertPayload):
     email = (body.email or claim_email) or None
     display_name = (body.displayName or "").strip() or None
     photo_url = (body.photoURL or "").strip() or None
+    first_name = (body.firstName or "").strip() or None
+    last_name = (body.lastName or "").strip() or None
+    account_type = (body.accountType or "").strip() or None
+    other_use_case = (body.otherUseCase or "").strip() or None
+    heard_about_us = (body.heardAboutUs or "").strip() or None
+    heard_about_us_other = (body.heardAboutUsOther or "").strip() or None
+    
+    # Serialize JSONB fields
+    import json as _json
+    use_cases_json = _json.dumps(body.useCases) if body.useCases else None
+    business_json = _json.dumps(body.business) if body.business else None
 
     # Upsert into Neon
     try:
@@ -717,12 +736,30 @@ async def signup_upsert(request: Request, body: SignupUpsertPayload):
             await session.execute(
                 _text(
                     """
-                    INSERT INTO users (uid, email, display_name, photo_url, created_at, updated_at)
-                    VALUES (:uid, :email, :display_name, :photo_url, NOW(), NOW())
+                    INSERT INTO users (
+                        uid, email, display_name, photo_url, 
+                        first_name, last_name, account_type, 
+                        use_cases, other_use_case, heard_about_us, heard_about_us_other, 
+                        business_info, created_at, updated_at
+                    )
+                    VALUES (
+                        :uid, :email, :display_name, :photo_url,
+                        :first_name, :last_name, :account_type,
+                        CAST(:use_cases AS JSONB), :other_use_case, :heard_about_us, :heard_about_us_other,
+                        CAST(:business_info AS JSONB), NOW(), NOW()
+                    )
                     ON CONFLICT (uid) DO UPDATE SET
                       email = COALESCE(EXCLUDED.email, users.email),
                       display_name = COALESCE(EXCLUDED.display_name, users.display_name),
                       photo_url = COALESCE(EXCLUDED.photo_url, users.photo_url),
+                      first_name = COALESCE(EXCLUDED.first_name, users.first_name),
+                      last_name = COALESCE(EXCLUDED.last_name, users.last_name),
+                      account_type = COALESCE(EXCLUDED.account_type, users.account_type),
+                      use_cases = COALESCE(EXCLUDED.use_cases, users.use_cases),
+                      other_use_case = COALESCE(EXCLUDED.other_use_case, users.other_use_case),
+                      heard_about_us = COALESCE(EXCLUDED.heard_about_us, users.heard_about_us),
+                      heard_about_us_other = COALESCE(EXCLUDED.heard_about_us_other, users.heard_about_us_other),
+                      business_info = COALESCE(EXCLUDED.business_info, users.business_info),
                       updated_at = NOW()
                     """
                 ),
@@ -731,6 +768,14 @@ async def signup_upsert(request: Request, body: SignupUpsertPayload):
                     "email": email,
                     "display_name": display_name,
                     "photo_url": photo_url,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "account_type": account_type,
+                    "use_cases": use_cases_json,
+                    "other_use_case": other_use_case,
+                    "heard_about_us": heard_about_us,
+                    "heard_about_us_other": heard_about_us_other,
+                    "business_info": business_json,
                 },
             )
             await session.commit()

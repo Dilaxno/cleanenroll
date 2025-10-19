@@ -582,35 +582,38 @@ async def ipqs_check(request: Request):
         fraud_score = 0
 
     reasons: list[str] = []
-    blocked = False
+    risk_signals = []
     if proxy:
-        blocked = True; reasons.append("proxy")
+        risk_signals.append("proxy")
     if vpn or active_vpn:
-        blocked = True; reasons.append("vpn")
+        risk_signals.append("vpn")
     if tor or active_tor:
-        blocked = True; reasons.append("tor")
+        risk_signals.append("tor")
     if recent_abuse:
-        blocked = True; reasons.append("recent_abuse")
+        risk_signals.append("recent_abuse")
     if bot:
-        blocked = True; reasons.append("automation")
+        risk_signals.append("automation")
     if fraud_score >= max_score:
-        blocked = True; reasons.append(f"fraud_score>={max_score}")
+        risk_signals.append(f"fraud_score>={max_score}")
 
     country = data.get("country_code") or data.get("country")
 
-    # Respond according to decision
-    if blocked:
-        # Keep message user-friendly and actionable
-        msg = "Signup blocked due to VPN/proxy or high IP risk. Disable VPN/proxy or try another network."
-        # Return 403 to align with frontend's error handling pattern
-        raise HTTPException(status_code=403, detail=msg)
+    # Log risk signals for monitoring but DO NOT BLOCK
+    # This prevents false positives from blocking legitimate users
+    if risk_signals:
+        logger.warning(
+            f"IPQS risk signals detected for IP {ip}: {', '.join(risk_signals)} "
+            f"(fraud_score={fraud_score}, country={country}) - ALLOWING signup for monitoring"
+        )
 
+    # Always allow - IPQS is in monitoring-only mode to prevent false positives
     return {
         "enabled": True,
         "allowed": True,
         "ip": ip,
         "country": (str(country).upper() if isinstance(country, str) and country else None),
         "fraud_score": fraud_score,
+        "risk_signals": risk_signals,  # Include for frontend logging if needed
     }
 
 # -----------------------------

@@ -86,43 +86,75 @@ def _write_integration(user_id: str, payload: Dict[str, Any]) -> None:
         logger.exception("Failed to write Google Sheets integration for %s", user_id)
 
 
-def _read_form_schema(form_id: str) -> Dict[str, Any]:
-    path = os.path.join(os.getcwd(), "data", "forms", f"{form_id}.json")
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Form not found")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+async def _read_form_schema(form_id: str) -> Dict[str, Any]:
+    """Read form schema from Neon DB."""
+    try:
+        from db.database import async_session_maker
+        from sqlalchemy import text as _text
+    except Exception:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                _text("SELECT id, user_id, title, name, fields, theme FROM forms WHERE id = :form_id LIMIT 1"),
+                {"form_id": form_id}
+            )
+            row = result.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Form not found")
+            
+            return {
+                "id": row[0],
+                "userId": row[1],
+                "title": row[2] or "",
+                "name": row[3] or "",
+                "fields": row[4] or [],
+                "theme": row[5] or {}
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to read form schema from Neon")
+        raise HTTPException(status_code=500, detail="Failed to read form")
 
 
-def _list_responses(form_id: str) -> List[Dict[str, Any]]:
-    d = os.path.join(os.getcwd(), "data", "responses", form_id)
-    items: List[Dict[str, Any]] = []
-    if os.path.exists(d):
-        for name in os.listdir(d):
-            if not name.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(d, name), "r", encoding="utf-8") as f:
-                    items.append(json.load(f))
-            except Exception:
-                continue
-    # sort by submittedAt asc
-    def _ms(rec: Dict[str, Any]) -> int:
-        ts = rec.get("submittedAt") or ""
-        try:
-            # Handle both with and without timezone
-            s = str(ts)
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
-            import datetime
-            dt = datetime.datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=datetime.timezone.utc)
-            return int(dt.timestamp() * 1000)
-        except Exception:
-            return 0
-    items.sort(key=_ms)
-    return items
+async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
+    """Read form submissions from Neon DB."""
+    try:
+        from db.database import async_session_maker
+        from sqlalchemy import text as _text
+    except Exception:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                _text(
+                    "SELECT id, data, metadata, submitted_at FROM submissions "
+                    "WHERE form_id = :form_id ORDER BY submitted_at ASC"
+                ),
+                {"form_id": form_id}
+            )
+            rows = result.fetchall()
+            
+            items = []
+            for row in rows:
+                submission = {
+                    "id": row[0],
+                    "data": row[1] or {},
+                    "metadata": row[2] or {},
+                    "submittedAt": row[3].isoformat() if row[3] else None
+                }
+                # Flatten data into submission for compatibility
+                if isinstance(submission.get("data"), dict):
+                    submission.update(submission["data"])
+                items.append(submission)
+            
+            return items
+    except Exception as e:
+        logger.exception("Failed to read submissions from Neon")
+        return []
 
 
 def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
@@ -254,7 +286,7 @@ def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
 
 
 @router.post("/create")
-def create_sheet(userId: str = Query(...), formId: str = Query(...), payload: Dict[str, Any] = None):
+async def create_sheet(userId: str = Query(...), formId: str = Query(...), payload: Dict[str, Any] = None):
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     if not isinstance(payload, dict):
@@ -263,7 +295,7 @@ def create_sheet(userId: str = Query(...), formId: str = Query(...), payload: Di
     sync_enabled = bool(payload.get("sync"))
 
     # Build headers and rows from form schema + responses
-    form = _read_form_schema(formId)
+    form = await _read_form_schema(formId)
     fields = form.get("fields") or []
     # Order headers: submittedAt then field labels
     field_order: List[str] = []
@@ -274,7 +306,7 @@ def create_sheet(userId: str = Query(...), formId: str = Query(...), payload: Di
         field_order.append(fid)
         headers.append(label)
 
-    responses = _list_responses(formId)
+    responses = await _list_responses(formId)
     def _flatten(val: Any) -> str:
         if val is None:
             return ""

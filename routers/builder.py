@@ -2940,7 +2940,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             try:
                 async with async_session_maker() as session:
                     res = await session.execute(
-                        text("SELECT email FROM users WHERE id = :uid LIMIT 1"),
+                        text("SELECT email FROM users WHERE uid = :uid LIMIT 1"),
                         {"uid": owner_id}
                     )
                     row = res.mappings().first()
@@ -4410,23 +4410,29 @@ async def upload_session_chunk(form_id: str, session_id: str, payload: Dict):
 
 @router.get("/forms/{form_id}/sessions")
 async def list_form_sessions(form_id: str):
-    """List all unique sessions for a form with metadata.
-    Returns: { sessions: [{ sessionId, firstChunkAt, lastChunkAt, chunkCount }] }
+    """List all unique sessions for a form with metadata from both form_sessions and sessions tables.
+    Returns: { sessions: [{ sessionId, firstChunkAt, lastChunkAt, chunkCount, r2Url, recordingName, duration, country }] }
     """
     try:
         async with async_session_maker() as session:
+            # Get chunk metadata from form_sessions
             result = await session.execute(
                 text(
                     """
                     SELECT 
-                        session_id,
-                        MIN(created_at) as first_chunk_at,
-                        MAX(created_at) as last_chunk_at,
-                        COUNT(*) as chunk_count
-                    FROM form_sessions
-                    WHERE form_id = :fid
-                    GROUP BY session_id
-                    ORDER BY MAX(created_at) DESC
+                        fs.session_id,
+                        MIN(fs.created_at) as first_chunk_at,
+                        MAX(fs.created_at) as last_chunk_at,
+                        COUNT(*) as chunk_count,
+                        s.r2_url,
+                        s.recording_name,
+                        s.duration,
+                        s.country_code
+                    FROM form_sessions fs
+                    LEFT JOIN sessions s ON s.id = fs.session_id AND s.form_id = fs.form_id
+                    WHERE fs.form_id = :fid
+                    GROUP BY fs.session_id, s.r2_url, s.recording_name, s.duration, s.country_code
+                    ORDER BY MAX(fs.created_at) DESC
                     """
                 ),
                 {"fid": form_id}
@@ -4438,6 +4444,10 @@ async def list_form_sessions(form_id: str):
                     "firstChunkAt": row["first_chunk_at"].isoformat() if row["first_chunk_at"] else None,
                     "lastChunkAt": row["last_chunk_at"].isoformat() if row["last_chunk_at"] else None,
                     "chunkCount": row["chunk_count"],
+                    "r2Url": row["r2_url"],
+                    "recordingName": row["recording_name"],
+                    "duration": row["duration"],
+                    "country": row["country_code"],
                 }
                 for row in rows
             ]
@@ -4473,6 +4483,88 @@ async def get_session_chunks(form_id: str, session_id: str):
     except Exception as e:
         logger.exception("get chunks failed form_id=%s session_id=%s", form_id, session_id)
         raise HTTPException(status_code=500, detail=f"Failed to get chunks: {e}")
+
+@router.post("/forms/{form_id}/sessions/{session_id}/finalize")
+async def finalize_session_recording(form_id: str, session_id: str, payload: Dict):
+    """Finalize a session recording by storing R2 URL and metadata in Neon.
+    Body: { r2Url: string, recordingName?: string, duration?: number, country?: string }
+    Returns: { ok: True }
+    """
+    try:
+        r2_url = (payload or {}).get("r2Url", "").strip()
+        if not r2_url:
+            raise HTTPException(status_code=400, detail="Missing r2Url")
+        
+        recording_name = (payload or {}).get("recordingName", "").strip() or None
+        duration = payload.get("duration") if payload else None
+        country = (payload or {}).get("country", "").strip() or None
+        
+        # Convert duration to integer if provided
+        if duration is not None:
+            try:
+                duration = int(duration)
+            except (ValueError, TypeError):
+                duration = None
+        
+        # Update or insert session record in Neon
+        async with async_session_maker() as session:
+            # Check if session exists
+            result = await session.execute(
+                text(
+                    "SELECT id FROM sessions WHERE id = :sid AND form_id = :fid LIMIT 1"
+                ),
+                {"sid": session_id, "fid": form_id}
+            )
+            existing = result.first()
+            
+            if existing:
+                # Update existing session
+                await session.execute(
+                    text(
+                        """
+                        UPDATE sessions 
+                        SET r2_url = :r2_url, 
+                            recording_name = :recording_name, 
+                            duration = :duration,
+                            country_code = COALESCE(:country, country_code)
+                        WHERE id = :sid AND form_id = :fid
+                        """
+                    ),
+                    {
+                        "sid": session_id,
+                        "fid": form_id,
+                        "r2_url": r2_url,
+                        "recording_name": recording_name,
+                        "duration": duration,
+                        "country": country
+                    }
+                )
+            else:
+                # Create new session record
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO sessions (id, form_id, r2_url, recording_name, duration, country_code, created_at)
+                        VALUES (:sid, :fid, :r2_url, :recording_name, :duration, :country, NOW())
+                        """
+                    ),
+                    {
+                        "sid": session_id,
+                        "fid": form_id,
+                        "r2_url": r2_url,
+                        "recording_name": recording_name,
+                        "duration": duration,
+                        "country": country
+                    }
+                )
+            await session.commit()
+        
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("finalize session failed form_id=%s session_id=%s", form_id, session_id)
+        raise HTTPException(status_code=500, detail=f"Failed to finalize session: {e}")
 
 @router.post("/forms/{form_id}/sessions/delete-batch")
 async def delete_sessions_batch(form_id: str, payload: Dict):

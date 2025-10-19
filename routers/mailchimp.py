@@ -309,7 +309,7 @@ def list_audiences(userId: str = Query(...)):
 
 
 @router.post("/export")
-def export_members(
+async def export_members(
     userId: str = Query(...),
     formId: str = Query(...),
     listId: str = Query(...),
@@ -317,27 +317,37 @@ def export_members(
 ):
     """
     Export subscribers collected for a form to a Mailchimp audience.
-    Reads stored responses for that form and submits members to /lists/{list_id}/members
+    Reads submissions from Neon DB and submits members to /lists/{list_id}/members
     """
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Mailchimp integration is available on Pro plans.")
     if status not in ("subscribed", "pending"):
         raise HTTPException(status_code=400, detail="Invalid status")
 
-    # Read responses from filesystem store used by builder router
-    responses_dir = os.path.join(os.getcwd(), "data", "responses", formId)
-    if not os.path.exists(responses_dir):
+    # Read responses from Neon DB
+    try:
+        from db.database import async_session_maker
+        from sqlalchemy import text as _text
+    except Exception:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                _text("SELECT data FROM submissions WHERE form_id = :form_id"),
+                {"form_id": formId}
+            )
+            rows = result.fetchall()
+    except Exception as e:
+        logger.exception("Failed to read submissions from Neon")
         return {"exported": 0, "skipped": 0}
 
     # Gather emails and merge fields heuristically from stored answers
     members: List[Dict[str, Any]] = []
-    for name in os.listdir(responses_dir):
-        if not name.endswith('.json'):
-            continue
+    for row in rows:
         try:
-            with open(os.path.join(responses_dir, name), 'r', encoding='utf-8') as f:
-                rec = json.load(f)
-            answers = rec.get('answers') or {}
+            # Data is stored as JSONB with field labels as keys
+            answers = row[0] or {}
             email = None
             merge_fields: Dict[str, Any] = {}
             # Try typical keys
@@ -386,7 +396,7 @@ def export_members(
 
 
 @router.post("/create-and-export")
-def create_and_export(
+async def create_and_export(
     userId: str = Query(...),
     formId: str = Query(...),
     audienceName: str = Query(...),
@@ -405,56 +415,65 @@ def create_and_export(
     if not audienceName:
         raise HTTPException(status_code=400, detail="audienceName is required")
 
-    # Read responses from filesystem store used by builder router
-    responses_dir = os.path.join(os.getcwd(), "data", "responses", formId)
-    if not os.path.exists(responses_dir):
-        # Nothing to export; still create the audience
-        members: List[Dict[str, Any]] = []
-    else:
-        # Gather emails and name fields heuristically from stored answers
-        members = []
-        for name in os.listdir(responses_dir):
-            if not name.endswith('.json'):
-                continue
-            try:
-                with open(os.path.join(responses_dir, name), 'r', encoding='utf-8') as f:
-                    rec = json.load(f)
-                answers = rec.get('answers') or {}
-                email = None
-                first_name: Optional[str] = None
-                last_name: Optional[str] = None
-                full_name: Optional[str] = None
-                # Try typical keys
-                for k, v in answers.items():
-                    lk = str(k).lower()
-                    try:
-                        sv = v if isinstance(v, str) else (v[0] if isinstance(v, list) and v else None)
-                    except Exception:
-                        sv = None
-                    if not sv:
-                        continue
-                    ssv = str(sv).strip()
-                    if ("email" in lk) and (not email):
-                        email = ssv
-                    elif ("first" in lk and "name" in lk) and not first_name:
-                        first_name = ssv
-                    elif ("last" in lk and "name" in lk) and not last_name:
-                        last_name = ssv
-                    elif any(x in lk for x in ["full-name", "fullname"]) or (lk == "name"):
-                        full_name = ssv
-                # Derive first/last from full name when split fields missing
-                if (not first_name or not last_name) and full_name:
-                    parts = [p for p in full_name.split() if p.strip()]
-                    if len(parts) == 1:
-                        first_name = first_name or parts[0]
-                    elif len(parts) >= 2:
-                        first_name = first_name or parts[0]
-                        last_name = last_name or " ".join(parts[1:])
-                if email:
-                    mf: Dict[str, Any] = {}
-                    if first_name:
-                        mf["FNAME"] = first_name[:255]
-                    if last_name:
+    # Read responses from Neon DB
+    try:
+        from db.database import async_session_maker
+        from sqlalchemy import text as _text
+    except Exception:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                _text("SELECT data FROM submissions WHERE form_id = :form_id"),
+                {"form_id": formId}
+            )
+            rows = result.fetchall()
+    except Exception as e:
+        logger.exception("Failed to read submissions from Neon")
+        rows = []
+
+    # Gather emails and name fields heuristically from stored answers
+    members: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            # Data is stored as JSONB with field labels as keys
+            answers = row[0] or {}
+            email = None
+            first_name: Optional[str] = None
+            last_name: Optional[str] = None
+            full_name: Optional[str] = None
+            # Try typical keys
+            for k, v in answers.items():
+                lk = str(k).lower()
+                try:
+                    sv = v if isinstance(v, str) else (v[0] if isinstance(v, list) and v else None)
+                except Exception:
+                    sv = None
+                if not sv:
+                    continue
+                ssv = str(sv).strip()
+                if ("email" in lk) and (not email):
+                    email = ssv
+                elif ("first" in lk and "name" in lk) and not first_name:
+                    first_name = ssv
+                elif ("last" in lk and "name" in lk) and not last_name:
+                    last_name = ssv
+                elif any(x in lk for x in ["full-name", "fullname"]) or (lk == "name"):
+                    full_name = ssv
+            # Derive first/last from full name when split fields missing
+            if (not first_name or not last_name) and full_name:
+                parts = [p for p in full_name.split() if p.strip()]
+                if len(parts) == 1:
+                    first_name = first_name or parts[0]
+                elif len(parts) >= 2:
+                    first_name = first_name or parts[0]
+                    last_name = last_name or " ".join(parts[1:])
+            if email:
+                mf: Dict[str, Any] = {}
+                if first_name:
+                    mf["FNAME"] = first_name[:255]
+                if last_name:
                         mf["LNAME"] = last_name[:255]
                     members.append({"email_address": email, "status": status, "merge_fields": mf})
             except Exception:

@@ -4572,7 +4572,8 @@ async def finalize_session_recording(form_id: str, session_id: str, payload: Dic
 
 @router.post("/forms/{form_id}/sessions/delete-batch")
 async def delete_sessions_batch(form_id: str, payload: Dict):
-    """Delete multiple sessions by session_id.
+    """Delete multiple sessions by session_id permanently from Neon DB.
+    Removes both session metadata (sessions table) and chunks (form_sessions table).
     Body: { ids: [session_id1, session_id2, ...] }
     Returns: { deleted: count }
     """
@@ -4582,17 +4583,34 @@ async def delete_sessions_batch(form_id: str, payload: Dict):
             raise HTTPException(status_code=400, detail="Missing or invalid ids array")
         
         async with async_session_maker() as session:
-            result = await session.execute(
-                text(
-                    """
-                    DELETE FROM form_sessions
-                    WHERE form_id = :fid AND session_id = ANY(:sids)
-                    """
-                ),
-                {"fid": form_id, "sids": ids}
-            )
-            await session.commit()
-            deleted_count = result.rowcount if result.rowcount else 0
+            try:
+                # Delete from sessions table (metadata: r2_url, recording_name, duration, country)
+                await session.execute(
+                    text(
+                        """
+                        DELETE FROM sessions
+                        WHERE form_id = :fid AND id = ANY(:sids)
+                        """
+                    ),
+                    {"fid": form_id, "sids": ids}
+                )
+                
+                # Delete from form_sessions table (chunks)
+                result = await session.execute(
+                    text(
+                        """
+                        DELETE FROM form_sessions
+                        WHERE form_id = :fid AND session_id = ANY(:sids)
+                        """
+                    ),
+                    {"fid": form_id, "sids": ids}
+                )
+                
+                await session.commit()
+                deleted_count = result.rowcount if result.rowcount else 0
+            except Exception as e:
+                await session.rollback()
+                raise
         
         return {"deleted": deleted_count}
     except HTTPException:

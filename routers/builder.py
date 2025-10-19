@@ -1700,94 +1700,98 @@ async def upsert_abandon(request: Request, payload: Dict[str, Any] | None = None
     # Upsert
     try:
         async with async_session_maker() as session:
-            await _ensure_form_abandons_table(session)
-            # Detect available columns for form_abandons to handle environments with older schema
             try:
-                cols_res = await session.execute(
-                    text(
-                        """
-                        SELECT column_name FROM information_schema.columns
-                        WHERE table_name = 'form_abandons'
-                        """
-                    )
-                )
-                fa_cols = {str(r[0]) for r in cols_res}
-            except Exception:
-                fa_cols = set()
-
-            extended_cols = {
-                "id","form_id","session_id","user_id","values","filled_count","total_fields",
-                "progress","step","total_steps","submitted","abandoned","abandoned_at",
-                "last_activity_at","updated_at","created_at"
-            }
-
-            if extended_cols.issubset(fa_cols):
-                # Use extended schema upsert
-                await session.execute(
-                    text(
-                        """
-                        INSERT INTO form_abandons (
-                            id, form_id, session_id, user_id, values, filled_count, total_fields, progress,
-                            step, total_steps, submitted, abandoned, abandoned_at, last_activity_at, updated_at
-                        ) VALUES (
-                            :id, :form_id, :session_id, :user_id, CAST(:values AS JSONB), :filled_count, :total_fields, :progress,
-                            :step, :total_steps, :submitted, :abandoned, :abandoned_at, :last_activity_at, :updated_at
+                await _ensure_form_abandons_table(session)
+                # Detect available columns for form_abandons to handle environments with older schema
+                try:
+                    cols_res = await session.execute(
+                        text(
+                            """
+                            SELECT column_name FROM information_schema.columns
+                            WHERE table_name = 'form_abandons'
+                            """
                         )
-                        ON CONFLICT (id) DO UPDATE SET
-                            user_id = EXCLUDED.user_id,
-                            values = EXCLUDED.values,
-                            filled_count = EXCLUDED.filled_count,
-                            total_fields = EXCLUDED.total_fields,
-                            progress = EXCLUDED.progress,
-                            step = EXCLUDED.step,
-                            total_steps = EXCLUDED.total_steps,
-                            submitted = EXCLUDED.submitted,
-                            abandoned = EXCLUDED.abandoned,
-                            abandoned_at = COALESCE(EXCLUDED.abandoned_at, form_abandons.abandoned_at),
-                            last_activity_at = COALESCE(EXCLUDED.last_activity_at, form_abandons.last_activity_at),
-                            updated_at = EXCLUDED.updated_at
-                        """
-                    ),
-                    {
-                        **rec,
-                        # Ensure JSONB binding works across drivers by serializing dict/list to text
-                        "values": json.dumps(rec["values"]) if isinstance(rec["values"], (dict, list)) else None,
-                    },
-                )
-            else:
-                # Fallback to compact schema: id, form_id, data, created_at
-                payload = {
-                    "sessionId": session_id,
-                    "userId": rec["user_id"],
-                    "values": rec["values"],
-                    "filledCount": rec["filled_count"],
-                    "totalFields": rec["total_fields"],
-                    "progress": rec["progress"],
-                    "step": rec["step"],
-                    "totalSteps": rec["total_steps"],
-                    "submitted": rec["submitted"],
-                    "abandoned": rec["abandoned"],
-                    "abandonedAt": body.get("abandonedAt"),
-                    "lastActivityAt": body.get("lastActivityAt"),
-                    "updatedAt": rec["updated_at"].isoformat() if hasattr(rec["updated_at"], "isoformat") else str(rec["updated_at"]),
+                    )
+                    fa_cols = {str(r[0]) for r in cols_res}
+                except Exception:
+                    fa_cols = set()
+
+                extended_cols = {
+                    "id","form_id","session_id","user_id","values","filled_count","total_fields",
+                    "progress","step","total_steps","submitted","abandoned","abandoned_at",
+                    "last_activity_at","updated_at","created_at"
                 }
-                await session.execute(
-                    text(
-                        """
-                        INSERT INTO form_abandons (id, form_id, data, created_at)
-                        VALUES (:id, :form_id, CAST(:data AS JSONB), NOW())
-                        ON CONFLICT (id) DO UPDATE SET
-                            data = EXCLUDED.data,
-                            created_at = form_abandons.created_at
-                        """
-                    ),
-                    {
-                        "id": rec["id"],
-                        "form_id": rec["form_id"],
-                        "data": json.dumps(payload),
-                    },
-                )
-            await session.commit()
+
+                if extended_cols.issubset(fa_cols):
+                    # Use extended schema upsert
+                    await session.execute(
+                        text(
+                            """
+                            INSERT INTO form_abandons (
+                                id, form_id, session_id, user_id, values, filled_count, total_fields, progress,
+                                step, total_steps, submitted, abandoned, abandoned_at, last_activity_at, updated_at
+                            ) VALUES (
+                                :id, :form_id, :session_id, :user_id, CAST(:values AS JSONB), :filled_count, :total_fields, :progress,
+                                :step, :total_steps, :submitted, :abandoned, :abandoned_at, :last_activity_at, :updated_at
+                            )
+                            ON CONFLICT (id) DO UPDATE SET
+                                user_id = EXCLUDED.user_id,
+                                values = EXCLUDED.values,
+                                filled_count = EXCLUDED.filled_count,
+                                total_fields = EXCLUDED.total_fields,
+                                progress = EXCLUDED.progress,
+                                step = EXCLUDED.step,
+                                total_steps = EXCLUDED.total_steps,
+                                submitted = EXCLUDED.submitted,
+                                abandoned = EXCLUDED.abandoned,
+                                abandoned_at = COALESCE(EXCLUDED.abandoned_at, form_abandons.abandoned_at),
+                                last_activity_at = COALESCE(EXCLUDED.last_activity_at, form_abandons.last_activity_at),
+                                updated_at = EXCLUDED.updated_at
+                            """
+                        ),
+                        {
+                            **rec,
+                            # Ensure JSONB binding works across drivers by serializing dict/list to text
+                            "values": json.dumps(rec["values"]) if isinstance(rec["values"], (dict, list)) else None,
+                        },
+                    )
+                else:
+                    # Fallback to compact schema: id, form_id, data, created_at
+                    payload = {
+                        "sessionId": session_id,
+                        "userId": rec["user_id"],
+                        "values": rec["values"],
+                        "filledCount": rec["filled_count"],
+                        "totalFields": rec["total_fields"],
+                        "progress": rec["progress"],
+                        "step": rec["step"],
+                        "totalSteps": rec["total_steps"],
+                        "submitted": rec["submitted"],
+                        "abandoned": rec["abandoned"],
+                        "abandonedAt": body.get("abandonedAt"),
+                        "lastActivityAt": body.get("lastActivityAt"),
+                        "updatedAt": rec["updated_at"].isoformat() if hasattr(rec["updated_at"], "isoformat") else str(rec["updated_at"]),
+                    }
+                    await session.execute(
+                        text(
+                            """
+                            INSERT INTO form_abandons (id, form_id, data, created_at)
+                            VALUES (:id, :form_id, CAST(:data AS JSONB), NOW())
+                            ON CONFLICT (id) DO UPDATE SET
+                                data = EXCLUDED.data,
+                                created_at = form_abandons.created_at
+                            """
+                        ),
+                        {
+                            "id": rec["id"],
+                            "form_id": rec["form_id"],
+                            "data": json.dumps(payload),
+                        },
+                    )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                raise
         return {"ok": True}
     except HTTPException:
         raise

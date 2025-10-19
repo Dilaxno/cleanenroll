@@ -2421,11 +2421,23 @@ async def _ensure_email_integrations_table(session):
                 smtp_host TEXT,
                 smtp_port INTEGER,
                 smtp_username TEXT,
+                smtp_password TEXT,
+                smtp_from_email TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             );
             """
         ))
+        # Add smtp_password and smtp_from_email columns if they don't exist (for existing tables)
+        try:
+            await session.execute(text(
+                "ALTER TABLE email_integrations ADD COLUMN IF NOT EXISTS smtp_password TEXT"
+            ))
+            await session.execute(text(
+                "ALTER TABLE email_integrations ADD COLUMN IF NOT EXISTS smtp_from_email TEXT"
+            ))
+        except Exception:
+            pass
     except Exception:
         # Best-effort; subsequent queries may fail if DDL is not permitted
         pass
@@ -2467,8 +2479,8 @@ async def get_email_integration_status(request: Request, userId: Optional[str] =
 @router.post("/email/smtp/save")
 @limiter.limit("30/minute")
 async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = None, userId: Optional[str] = Query(default=None)):
-    """Save SMTP settings status for a user in Neon and mark SMTP as enabled.
-    Expects JSON body: { host, port, username, password } (password not persisted).
+    """Save SMTP settings for a user in Neon DB including encrypted password.
+    Expects JSON body: { host, port, username, password, fromEmail }
     Returns: { success: true }
     """
     try:
@@ -2481,26 +2493,37 @@ async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = 
         except Exception:
             port = 0
         username = str(payload.get("username") or "").strip()
-        # Basic validation aligned with frontend
-        if not host or port not in (465, 587) or not username:
+        password = str(payload.get("password") or "").strip()
+        from_email = str(payload.get("fromEmail") or "").strip() or username
+        
+        # Basic validation
+        if not host or port not in (465, 587) or not username or not password:
             raise HTTPException(status_code=400, detail="Enter SMTP host, port (465/587), username and password")
+        
+        # Encrypt password using Fernet
+        encryption_key = os.getenv("SMTP_ENCRYPTION_KEY") or Fernet.generate_key().decode()
+        fernet = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
+        encrypted_password = fernet.encrypt(password.encode()).decode()
+        
         async with async_session_maker() as session:
             await _ensure_email_integrations_table(session)
-            # Upsert status and metadata; do not store password server-side in this endpoint
+            # Upsert SMTP settings with encrypted password
             await session.execute(
                 text(
                     """
-                    INSERT INTO email_integrations (uid, smtp_enabled, smtp_host, smtp_port, smtp_username, updated_at)
-                    VALUES (:uid, TRUE, :host, :port, :username, NOW())
+                    INSERT INTO email_integrations (uid, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, updated_at)
+                    VALUES (:uid, TRUE, :host, :port, :username, :password, :from_email, NOW())
                     ON CONFLICT (uid) DO UPDATE SET
                         smtp_enabled = EXCLUDED.smtp_enabled,
                         smtp_host = EXCLUDED.smtp_host,
                         smtp_port = EXCLUDED.smtp_port,
                         smtp_username = EXCLUDED.smtp_username,
+                        smtp_password = EXCLUDED.smtp_password,
+                        smtp_from_email = EXCLUDED.smtp_from_email,
                         updated_at = NOW()
                     """
                 ),
-                {"uid": userId, "host": host, "port": port, "username": username}
+                {"uid": userId, "host": host, "port": port, "username": username, "password": encrypted_password, "from_email": from_email}
             )
             await session.commit()
             return {"success": True}
@@ -2509,6 +2532,95 @@ async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = 
     except Exception as e:
         logger.exception("save_smtp_settings failed uid=%s", userId)
         raise HTTPException(status_code=500, detail="Failed to save SMTP settings")
+
+async def _get_user_smtp_settings(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve user's SMTP settings from Neon DB and decrypt password."""
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text(
+                    """
+                    SELECT smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email
+                    FROM email_integrations
+                    WHERE uid = :uid AND smtp_enabled = TRUE
+                    LIMIT 1
+                    """
+                ),
+                {"uid": user_id}
+            )
+            row = res.mappings().first()
+            if not row or not row.get("smtp_password"):
+                return None
+            
+            # Decrypt password
+            encryption_key = os.getenv("SMTP_ENCRYPTION_KEY")
+            if not encryption_key:
+                logger.warning("SMTP_ENCRYPTION_KEY not set; cannot decrypt password")
+                return None
+            
+            fernet = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
+            decrypted_password = fernet.decrypt(row["smtp_password"].encode()).decode()
+            
+            return {
+                "host": row["smtp_host"],
+                "port": row["smtp_port"],
+                "username": row["smtp_username"],
+                "password": decrypted_password,
+                "from_email": row["smtp_from_email"] or row["smtp_username"]
+            }
+    except Exception as e:
+        logger.exception("Failed to retrieve SMTP settings for user_id=%s", user_id)
+        return None
+
+def _send_email_via_user_smtp(smtp_config: Dict[str, Any], to_email: str, subject: str, html_body: str) -> bool:
+    """Send email using user's custom SMTP settings.
+    Returns True if sent successfully, False otherwise.
+    """
+    try:
+        host = smtp_config["host"]
+        port = smtp_config["port"]
+        username = smtp_config["username"]
+        password = smtp_config["password"]
+        from_email = smtp_config["from_email"]
+        
+        # Build MIME email
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = from_email
+        msg["To"] = to_email
+        msg.set_content("Please view this email in an HTML-compatible email client.")
+        msg.add_alternative(html_body, subtype="html")
+        
+        # Send via SMTP
+        import ssl
+        if port == 465:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=context, timeout=15) as server:
+                server.login(username, password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=15) as server:
+                server.ehlo()
+                context = ssl.create_default_context()
+                server.starttls(context=context)
+                server.ehlo()
+                server.login(username, password)
+                server.send_message(msg)
+        
+        logger.info("Email sent via user SMTP host=%s port=%s from=%s to=%s", host, port, from_email, to_email)
+        return True
+    except Exception as e:
+        logger.exception("Failed to send email via user SMTP: %s", e)
+        return False
+
+async def _send_email_via_integration(user_id: str, to_email: str, subject: str, html_body: str) -> bool:
+    """Try to send email using user's configured SMTP integration.
+    Returns True if sent successfully, False otherwise.
+    """
+    smtp_config = await _get_user_smtp_settings(user_id)
+    if not smtp_config:
+        return False
+    return _send_email_via_user_smtp(smtp_config, to_email, subject, html_body)
 
 # -----------------------------
 # reCAPTCHA verification endpoint

@@ -131,13 +131,47 @@ class AsyncFormsService:
 
     @staticmethod
     async def delete_form(session: AsyncSession, form_id: str, user_id: str) -> bool:
-        """Delete a form owned by user_id and cascade related data via FK. Returns True if deleted."""
+        """Delete a form owned by user_id and permanently remove all related data from Neon DB. Returns True if deleted."""
         # Verify exists and ownership
         existing = await AsyncFormsService.get_form_by_id(session, form_id, user_id)
         if not existing:
             return False
-        # Delete the form and decrement user's forms_count in a single transaction
+        # Delete the form and all related data in a single transaction
         try:
+            # Delete from all related tables to ensure complete cleanup
+            # Even if FK constraints exist, explicit deletion ensures no orphaned data
+            
+            # Delete session recordings metadata
+            await session.execute(text(
+                "DELETE FROM sessions WHERE form_id = :form_id"
+            ), {"form_id": form_id})
+            
+            # Delete session chunks/events
+            await session.execute(text(
+                "DELETE FROM form_sessions WHERE form_id = :form_id"
+            ), {"form_id": form_id})
+            
+            # Delete form abandonment records
+            await session.execute(text(
+                "DELETE FROM form_abandons WHERE form_id = :form_id"
+            ), {"form_id": form_id})
+            
+            # Delete submissions
+            await session.execute(text(
+                "DELETE FROM submissions WHERE form_id = :form_id"
+            ), {"form_id": form_id})
+            
+            # Delete analytics events
+            await session.execute(text(
+                "DELETE FROM analytics WHERE form_id = :form_id"
+            ), {"form_id": form_id})
+            
+            # Delete form versions
+            await session.execute(text(
+                "DELETE FROM form_versions WHERE form_id = :form_id"
+            ), {"form_id": form_id})
+            
+            # Finally delete the form itself
             res = await session.execute(text(
                 """
                 DELETE FROM forms 
@@ -149,6 +183,8 @@ class AsyncFormsService:
             if not row:
                 await session.rollback()
                 return False
+            
+            # Decrement user's forms count
             await AsyncFormsService.decrement_user_forms_count(session, user_id)
             await session.commit()
             return True

@@ -4526,12 +4526,12 @@ async def upload_session_chunk(form_id: str, session_id: str, payload: Dict):
 
 @router.get("/forms/{form_id}/sessions")
 async def list_form_sessions(form_id: str):
-    """List all unique sessions for a form with metadata from both form_sessions and sessions tables.
-    Returns: { sessions: [{ sessionId, firstChunkAt, lastChunkAt, chunkCount, r2Url, recordingName, duration, country }] }
+    """List all unique sessions for a form with metadata from Neon DB (sessions + form_sessions tables).
+    Returns: { sessions: [{ id, startedAt, durationMs, country, userAgent, chunks, r2Url, recordingName }] }
     """
     try:
         async with async_session_maker() as session:
-            # Get chunk metadata from form_sessions
+            # Join form_sessions chunks with sessions metadata from Neon
             result = await session.execute(
                 text(
                     """
@@ -4543,12 +4543,13 @@ async def list_form_sessions(form_id: str):
                         s.r2_url,
                         s.recording_name,
                         s.duration,
-                        s.country_code
+                        s.country_code,
+                        s.created_at as session_created_at
                     FROM form_sessions fs
                     LEFT JOIN sessions s ON s.id = fs.session_id AND s.form_id = fs.form_id
                     WHERE fs.form_id = :fid
-                    GROUP BY fs.session_id, s.r2_url, s.recording_name, s.duration, s.country_code
-                    ORDER BY MAX(fs.created_at) DESC
+                    GROUP BY fs.session_id, s.r2_url, s.recording_name, s.duration, s.country_code, s.created_at
+                    ORDER BY COALESCE(s.created_at, MAX(fs.created_at)) DESC
                     """
                 ),
                 {"fid": form_id}
@@ -4556,14 +4557,16 @@ async def list_form_sessions(form_id: str):
             rows = result.mappings().all()
             sessions = [
                 {
-                    "sessionId": row["session_id"],
-                    "firstChunkAt": row["first_chunk_at"].isoformat() if row["first_chunk_at"] else None,
-                    "lastChunkAt": row["last_chunk_at"].isoformat() if row["last_chunk_at"] else None,
-                    "chunkCount": row["chunk_count"],
+                    # Frontend expects these field names
+                    "id": row["session_id"],
+                    "startedAt": (row["session_created_at"] or row["first_chunk_at"]).isoformat() if (row["session_created_at"] or row["first_chunk_at"]) else None,
+                    "durationMs": row["duration"] if row["duration"] else 0,
+                    "country": (row["country_code"] or "").upper(),
+                    "userAgent": "",  # Not stored in sessions table, can add if needed
+                    "chunks": row["chunk_count"],
+                    # Additional metadata
                     "r2Url": row["r2_url"],
                     "recordingName": row["recording_name"],
-                    "duration": row["duration"],
-                    "country": row["country_code"],
                 }
                 for row in rows
             ]

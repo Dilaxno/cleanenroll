@@ -263,6 +263,50 @@ async def get_user_info(request: Request, userId: str = Query(..., description="
             raise HTTPException(status_code=500, detail=str(e))
 
 
+class UpdateUserProfileRequest(BaseModel):
+    displayName: Optional[str] = None
+    photoURL: Optional[str] = None
+
+
+@router.post("/api/user/profile")
+@limiter.limit("30/minute")
+async def update_user_profile(request: Request, userId: str = Query(..., description="Firebase Auth UID"), req: UpdateUserProfileRequest = None):
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if not req:
+        raise HTTPException(status_code=400, detail="Missing request body")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    
+    # Build dynamic update query based on provided fields
+    updates = []
+    params = {"uid": userId}
+    
+    if req.displayName is not None:
+        updates.append("display_name = :display_name")
+        params["display_name"] = req.displayName.strip() if req.displayName else None
+    
+    if req.photoURL is not None:
+        updates.append("photo_url = :photo_url")
+        params["photo_url"] = req.photoURL.strip() if req.photoURL else None
+    
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    
+    updates.append("updated_at = NOW()")
+    update_query = f"UPDATE users SET {', '.join(updates)} WHERE uid = :uid"
+    
+    async with async_session_maker() as session:
+        from sqlalchemy import text as _text  # type: ignore
+        try:
+            await session.execute(_text(update_query), params)
+            await session.commit()
+            return {"success": True}
+        except Exception as e:
+            await session.rollback()
+            raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/api/user/preferences")
 @limiter.limit("60/minute")
 async def get_user_preferences(request: Request, userId: str = Query(..., description="Firebase Auth UID")):

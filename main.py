@@ -132,6 +132,14 @@ async def custom_domain_routing(request: Request, call_next):
         pass
     return await call_next(request)
 
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add Content-Security-Policy header to allow video embeds from YouTube, Vimeo, and Loom."""
+    response = await call_next(request)
+    # Allow iframe embeds from trusted video platforms
+    response.headers["Content-Security-Policy"] = "frame-src 'self' https://www.youtube.com https://player.vimeo.com https://www.loom.com;"
+    return response
+
 # Production-safe error responses
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse

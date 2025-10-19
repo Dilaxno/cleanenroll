@@ -2844,6 +2844,69 @@ async def presign_media(request: Request, payload: Dict[str, Any] | None = None)
         logger.exception("presign_media failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to create upload URL")
 
+@router.post("/uploads/profile-photo/presign")
+@limiter.limit("30/minute")
+async def presign_profile_photo(request: Request, payload: Dict[str, Any] | None = None):
+    """Create a presigned URL to upload a profile photo to R2 and return its public URL."""
+    payload = payload or {}
+    filename = str(payload.get('filename') or 'profile.jpg')
+    content_type = str(payload.get('contentType') or 'image/jpeg')
+    ext = _ext_from_name_and_type(filename, content_type)
+    key = f"profile-photos/{uuid.uuid4().hex}{ext}"
+    try:
+        s3 = _r2_client()
+        params = {"Bucket": R2_BUCKET, "Key": key, "ContentType": content_type}
+        upload_url = s3.generate_presigned_url('put_object', Params=params, ExpiresIn=900)
+        public_url = _public_url_for_key(key)
+        return {"uploadUrl": upload_url, "publicUrl": public_url, "headers": {"Content-Type": content_type}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("presign_profile_photo failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create upload URL")
+
+@router.post("/uploads/profile-photo/upload")
+@limiter.limit("30/minute")
+async def upload_profile_photo(request: Request):
+    """Fallback server-side upload for profile photo when direct upload fails (CORS issues)."""
+    try:
+        # Parse multipart form data
+        form = await request.form()
+        file = form.get('file')
+        if not file:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        # Read file content
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty file")
+        
+        # Determine content type and extension
+        content_type = file.content_type or 'image/jpeg'
+        filename = getattr(file, 'filename', 'profile.jpg')
+        ext = _ext_from_name_and_type(filename, content_type)
+        
+        # Generate R2 key
+        key = f"profile-photos/{uuid.uuid4().hex}{ext}"
+        
+        # Upload directly to R2
+        s3 = _r2_client()
+        s3.put_object(
+            Bucket=R2_BUCKET,
+            Key=key,
+            Body=content,
+            ContentType=content_type
+        )
+        
+        # Return public URL
+        public_url = _public_url_for_key(key)
+        return {"publicUrl": public_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("upload_profile_photo failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to upload photo")
+
 @router.post("/forms/{form_id}/theme/page-bg")
 @limiter.limit("120/minute")
 async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str, Any] | None = None):

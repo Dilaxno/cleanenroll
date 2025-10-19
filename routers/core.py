@@ -266,6 +266,7 @@ async def get_user_info(request: Request, userId: str = Query(..., description="
 class UpdateUserProfileRequest(BaseModel):
     displayName: Optional[str] = None
     photoURL: Optional[str] = None
+    email: Optional[EmailStr] = None
 
 
 @router.post("/api/user/profile")
@@ -289,6 +290,10 @@ async def update_user_profile(request: Request, userId: str = Query(..., descrip
     if req.photoURL is not None:
         updates.append("photo_url = :photo_url")
         params["photo_url"] = req.photoURL.strip() if req.photoURL else None
+    
+    if req.email is not None:
+        updates.append("email = :email")
+        params["email"] = req.email.strip().lower() if req.email else None
     
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -380,6 +385,45 @@ async def set_marketing_opt_in(request: Request, userId: str = Query(..., descri
             return {"success": True}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/user/account")
+@limiter.limit("5/minute")
+async def delete_user_account(request: Request, userId: str = Query(..., description="Firebase Auth UID")):
+    """Delete user account and all associated data from Neon DB.
+    This will CASCADE delete all forms, submissions, analytics, sessions, abandons, etc.
+    Should be called BEFORE deleting the Firebase auth account.
+    """
+    if not userId:
+        raise HTTPException(status_code=400, detail="userId is required")
+    
+    try:
+        async with async_session_maker() as session:
+            from sqlalchemy import text
+            
+            # Delete user from Neon - CASCADE will handle all related data:
+            # - forms (and their submissions, analytics, sessions, abandons, versions via CASCADE)
+            # - notifications
+            # All tables with REFERENCES users(uid) ON DELETE CASCADE will auto-delete
+            result = await session.execute(
+                text("DELETE FROM users WHERE uid = :uid"),
+                {"uid": userId}
+            )
+            await session.commit()
+            
+            deleted_count = result.rowcount
+            logger.info(f"Deleted user account {userId} from Neon DB (rows affected: {deleted_count})")
+            
+            return {
+                "status": "ok",
+                "userId": userId,
+                "deleted": deleted_count > 0,
+                "message": "All user data deleted from database"
+            }
+    except Exception as e:
+        logger.exception(f"Failed to delete user account {userId}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete account: {str(e)}")
+
 
 class SignupCheckResponse(BaseModel):
     allowed: bool

@@ -234,20 +234,36 @@ async def get_live_visitors(form_id: str):
         threshold = datetime.utcnow() - timedelta(seconds=30)
         
         async with async_session_maker() as session:
-            result = await session.execute(
-                text("""
-                    SELECT 
-                        session_id, ip_address, city, country, country_code,
-                        latitude, longitude, user_agent, referrer,
-                        screen_width, screen_height, first_seen, last_seen
-                    FROM live_visitors
-                    WHERE form_id = :form_id 
-                        AND is_active = true 
-                        AND last_seen >= :threshold
-                    ORDER BY last_seen DESC
-                """),
-                {'form_id': form_id, 'threshold': threshold}
-            )
+            # Handle 'all' form_id by fetching visitors across all forms
+            if form_id == 'all':
+                result = await session.execute(
+                    text("""
+                        SELECT 
+                            session_id, ip_address, city, country, country_code,
+                            latitude, longitude, user_agent, referrer,
+                            screen_width, screen_height, first_seen, last_seen
+                        FROM live_visitors
+                        WHERE is_active = true 
+                            AND last_seen >= :threshold
+                        ORDER BY last_seen DESC
+                    """),
+                    {'threshold': threshold}
+                )
+            else:
+                result = await session.execute(
+                    text("""
+                        SELECT 
+                            session_id, ip_address, city, country, country_code,
+                            latitude, longitude, user_agent, referrer,
+                            screen_width, screen_height, first_seen, last_seen
+                        FROM live_visitors
+                        WHERE form_id = :form_id 
+                            AND is_active = true 
+                            AND last_seen >= :threshold
+                        ORDER BY last_seen DESC
+                    """),
+                    {'form_id': form_id, 'threshold': threshold}
+                )
             
             rows = result.fetchall()
         

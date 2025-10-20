@@ -216,7 +216,8 @@ async def get_live_visitors(form_id: str):
     """
     try:
         # Consider visitors active if last_seen within 30 seconds
-        threshold = (datetime.utcnow() - timedelta(seconds=30)).isoformat()
+        # Pass datetime object, not ISO string, for asyncpg
+        threshold = datetime.utcnow() - timedelta(seconds=30)
         
         async with async_session_maker() as session:
             result = await session.execute(
@@ -273,7 +274,8 @@ async def cleanup_old_visitors(form_id: str):
     """
     try:
         # Delete records older than 1 hour
-        threshold = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+        # Pass datetime object, not ISO string, for asyncpg
+        threshold = datetime.utcnow() - timedelta(hours=1)
         
         async with async_session_maker() as session:
             result = await session.execute(

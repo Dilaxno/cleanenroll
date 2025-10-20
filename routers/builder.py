@@ -2066,10 +2066,26 @@ async def public_get_form(form_id: str):
                 except Exception:
                     pass
 
+                # Fetch owner's plan for upload limits
+                owner_plan = "free"
+                user_id = data.get("user_id") or data.get("userId")
+                if user_id:
+                    try:
+                        plan_res = await session.execute(
+                            text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"),
+                            {"uid": user_id}
+                        )
+                        plan_row = plan_res.mappings().first()
+                        if plan_row and plan_row.get("plan"):
+                            owner_plan = str(plan_row.get("plan")).strip().lower()
+                    except Exception:
+                        pass
+
                 # Build camelCase payload
                 out = {
                     "id": data.get("id"),
                     "userId": data.get("user_id") or data.get("userId"),
+                    "ownerPlan": owner_plan,  # Include owner's plan for upload size limits
                     "title": data.get("title"),
                     "subtitle": data.get("subtitle"),
                     "description": data.get("description"),

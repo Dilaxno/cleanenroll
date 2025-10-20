@@ -5,13 +5,13 @@ uvicorn[standard]>=0.23.0
 pydantic>=2.0.0
 email-validator>=2.1.0.post1
 dnspython>=2.6.1
+
 # ip2geotools kept as fallback; remove if you fully deprecate it
 ip2geotools>=0.1.6
-# GeoIP2 for MaxMind GeoLite2 database (live visitor location tracking)
-geoip2>=4.7.0
 firebase-admin>=6.5.0
 Jinja2>=3.1.4
 bleach>=6.1.0
+
 # Disposable email domains list (5000+)
 disposable-email-domains>=0.0.89
 

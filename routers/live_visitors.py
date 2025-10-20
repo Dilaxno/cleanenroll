@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, Literal
 from datetime import datetime, timedelta
-import geoip2.database
 import os
+import requests
 from sqlalchemy import text
 
 # Support both package and flat imports for the session maker
@@ -49,13 +49,14 @@ def _get_client_ip(request: Request) -> str:
 
 def _get_location_from_ip(ip: str) -> dict:
     """
-    Get city, country, coordinates from IP using GeoLite2 database
+    Get city, country, coordinates from IP using IPinfo API
     """
     try:
-        # Path to GeoLite2 City database
-        db_path = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'geoip', 'GeoLite2-City.mmdb')
+        # Get IPinfo API token from environment
+        ipinfo_token = os.getenv('IPINFO_API_TOKEN', '')
         
-        if not os.path.exists(db_path):
+        if not ipinfo_token:
+            print("Warning: IPINFO_API_TOKEN not set in environment")
             return {
                 'city': None,
                 'country': None,
@@ -64,18 +65,48 @@ def _get_location_from_ip(ip: str) -> dict:
                 'longitude': None,
             }
         
-        with geoip2.database.Reader(db_path) as reader:
-            response = reader.city(ip)
-            
+        # Skip localhost/private IPs
+        if ip in ('127.0.0.1', 'localhost') or ip.startswith('192.168.') or ip.startswith('10.'):
             return {
-                'city': response.city.name if response.city.name else None,
-                'country': response.country.name if response.country.name else None,
-                'country_code': response.country.iso_code if response.country.iso_code else None,
-                'latitude': response.location.latitude if response.location.latitude else None,
-                'longitude': response.location.longitude if response.location.longitude else None,
+                'city': 'Local',
+                'country': 'Local Network',
+                'country_code': 'XX',
+                'latitude': None,
+                'longitude': None,
             }
+        
+        # Call IPinfo API
+        response = requests.get(
+            f'https://ipinfo.io/{ip}/json',
+            params={'token': ipinfo_token},
+            timeout=3
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"IPinfo API returned {response.status_code}")
+        
+        data = response.json()
+        
+        # Parse location coordinates (format: "lat,lng")
+        latitude = None
+        longitude = None
+        if 'loc' in data and data['loc']:
+            try:
+                lat_str, lng_str = data['loc'].split(',')
+                latitude = float(lat_str)
+                longitude = float(lng_str)
+            except Exception:
+                pass
+        
+        return {
+            'city': data.get('city'),
+            'country': data.get('country_name') or data.get('country'),
+            'country_code': data.get('country'),
+            'latitude': latitude,
+            'longitude': longitude,
+        }
     except Exception as e:
-        print(f"GeoIP lookup failed for {ip}: {e}")
+        print(f"IPinfo lookup failed for {ip}: {e}")
         return {
             'city': None,
             'country': None,

@@ -3657,14 +3657,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                             u = v.get("url") or v.get("publicUrl") or v.get("downloadUrl")
                             k = str(v.get("key") or v.get("r2Key") or "").strip()
                             
-                            # Generate short link for R2 files
-                            if k and _FILE_REDIRECTS_AVAILABLE:
-                                try:
-                                    short_id = await create_file_redirect(k, form_id, response_id, 'upload')
-                                    return get_short_url(short_id)
-                                except Exception:
-                                    pass
-                            
+                            # Always use direct R2 public URL
                             if u:
                                 return _normalize_bg_public_url(str(u))
                             if k:
@@ -3728,20 +3721,9 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                                     )
                                     await sig_session.commit()
                                 
-                                # Generate short link instead of full R2 URL
-                                try:
-                                    if _FILE_REDIRECTS_AVAILABLE:
-                                        short_id = await create_file_redirect(key, form_id, response_id, 'signature')
-                                        short_url = get_short_url(short_id)
-                                        sig = {"status": "signed", "url": short_url, "pngUrl": short_url, "key": sig_id}
-                                    else:
-                                        # Fallback to direct R2 URL
-                                        r2_url = _public_url_for_key(key)
-                                        sig = {"status": "signed", "url": r2_url, "pngUrl": r2_url, "key": sig_id}
-                                except Exception:
-                                    # Fallback to direct R2 URL on error
-                                    r2_url = _public_url_for_key(key)
-                                    sig = {"status": "signed", "url": r2_url, "pngUrl": r2_url, "key": sig_id}
+                                # Always use direct R2 public URL
+                                r2_url = _public_url_for_key(key)
+                                sig = {"status": "signed", "url": r2_url, "pngUrl": r2_url, "key": sig_id}
                                 
                                 signatures[label] = sig
                                 answers[label] = sig

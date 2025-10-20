@@ -88,66 +88,83 @@ async def track_live_visitor(
     Track live visitor activity on a form page
     Stores visitor session with geolocation data
     """
-    from ..db.database import get_db
+    from ..db.database import async_session_maker
+    from sqlalchemy import text
     
     try:
         # Get client IP and location
         ip = _get_client_ip(request)
         location = _get_location_from_ip(ip)
         
-        db = get_db()
-        cursor = db.cursor()
-        
-        # Upsert visitor session
-        if payload.action == 'enter':
-            # New visitor enters the form
-            cursor.execute("""
-                INSERT INTO live_visitors (
-                    form_id, session_id, ip_address, 
-                    city, country, country_code, latitude, longitude,
-                    user_agent, referrer, screen_width, screen_height,
-                    first_seen, last_seen, is_active
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (session_id) 
-                DO UPDATE SET
-                    last_seen = EXCLUDED.last_seen,
-                    is_active = true
-            """, (
-                form_id,
-                payload.sessionId,
-                ip,
-                location['city'],
-                location['country'],
-                location['country_code'],
-                location['latitude'],
-                location['longitude'],
-                payload.userAgent,
-                payload.referrer,
-                payload.screenWidth,
-                payload.screenHeight,
-                payload.timestamp,
-                payload.timestamp,
-                True
-            ))
-        
-        elif payload.action == 'heartbeat':
-            # Update last_seen timestamp to show visitor is still active
-            cursor.execute("""
-                UPDATE live_visitors 
-                SET last_seen = %s, is_active = true
-                WHERE session_id = %s AND form_id = %s
-            """, (payload.timestamp, payload.sessionId, form_id))
-        
-        elif payload.action == 'exit':
-            # Mark visitor as inactive when they leave
-            cursor.execute("""
-                UPDATE live_visitors 
-                SET is_active = false, last_seen = %s
-                WHERE session_id = %s AND form_id = %s
-            """, (payload.timestamp, payload.sessionId, form_id))
-        
-        db.commit()
-        cursor.close()
+        async with async_session_maker() as session:
+            # Upsert visitor session
+            if payload.action == 'enter':
+                # New visitor enters the form
+                await session.execute(
+                    text("""
+                        INSERT INTO live_visitors (
+                            form_id, session_id, ip_address, 
+                            city, country, country_code, latitude, longitude,
+                            user_agent, referrer, screen_width, screen_height,
+                            first_seen, last_seen, is_active
+                        ) VALUES (:form_id, :session_id, :ip_address, :city, :country, :country_code, 
+                                  :latitude, :longitude, :user_agent, :referrer, :screen_width, 
+                                  :screen_height, :first_seen, :last_seen, :is_active)
+                        ON CONFLICT (session_id) 
+                        DO UPDATE SET
+                            last_seen = EXCLUDED.last_seen,
+                            is_active = true
+                    """),
+                    {
+                        'form_id': form_id,
+                        'session_id': payload.sessionId,
+                        'ip_address': ip,
+                        'city': location['city'],
+                        'country': location['country'],
+                        'country_code': location['country_code'],
+                        'latitude': location['latitude'],
+                        'longitude': location['longitude'],
+                        'user_agent': payload.userAgent,
+                        'referrer': payload.referrer,
+                        'screen_width': payload.screenWidth,
+                        'screen_height': payload.screenHeight,
+                        'first_seen': payload.timestamp,
+                        'last_seen': payload.timestamp,
+                        'is_active': True
+                    }
+                )
+            
+            elif payload.action == 'heartbeat':
+                # Update last_seen timestamp to show visitor is still active
+                await session.execute(
+                    text("""
+                        UPDATE live_visitors 
+                        SET last_seen = :last_seen, is_active = true
+                        WHERE session_id = :session_id AND form_id = :form_id
+                    """),
+                    {
+                        'last_seen': payload.timestamp,
+                        'session_id': payload.sessionId,
+                        'form_id': form_id
+                    }
+                )
+            
+            elif payload.action == 'exit':
+                # Mark visitor as inactive when they leave
+                await session.execute(
+                    text("""
+                        UPDATE live_visitors 
+                        SET is_active = false, last_seen = :last_seen
+                        WHERE session_id = :session_id AND form_id = :form_id
+                    """),
+                    {
+                        'last_seen': payload.timestamp,
+                        'session_id': payload.sessionId,
+                        'form_id': form_id
+                    }
+                )
+            
+            await session.commit()
         
         return {'success': True, 'location': location}
     
@@ -162,29 +179,30 @@ async def get_live_visitors(form_id: str):
     Get list of currently active visitors on a form
     Returns visitors who were active in the last 30 seconds
     """
-    from ..db.database import get_db
+    from ..db.database import async_session_maker
+    from sqlalchemy import text
     
     try:
-        db = get_db()
-        cursor = db.cursor()
-        
         # Consider visitors active if last_seen within 30 seconds
         threshold = (datetime.utcnow() - timedelta(seconds=30)).isoformat()
         
-        cursor.execute("""
-            SELECT 
-                session_id, ip_address, city, country, country_code,
-                latitude, longitude, user_agent, referrer,
-                screen_width, screen_height, first_seen, last_seen
-            FROM live_visitors
-            WHERE form_id = %s 
-                AND is_active = true 
-                AND last_seen >= %s
-            ORDER BY last_seen DESC
-        """, (form_id, threshold))
-        
-        rows = cursor.fetchall()
-        cursor.close()
+        async with async_session_maker() as session:
+            result = await session.execute(
+                text("""
+                    SELECT 
+                        session_id, ip_address, city, country, country_code,
+                        latitude, longitude, user_agent, referrer,
+                        screen_width, screen_height, first_seen, last_seen
+                    FROM live_visitors
+                    WHERE form_id = :form_id 
+                        AND is_active = true 
+                        AND last_seen >= :threshold
+                    ORDER BY last_seen DESC
+                """),
+                {'form_id': form_id, 'threshold': threshold}
+            )
+            
+            rows = result.fetchall()
         
         visitors = []
         for row in rows:
@@ -221,23 +239,24 @@ async def cleanup_old_visitors(form_id: str):
     Clean up old visitor records (older than 1 hour)
     This can be called periodically to keep the table clean
     """
-    from ..db.database import get_db
+    from ..db.database import async_session_maker
+    from sqlalchemy import text
     
     try:
-        db = get_db()
-        cursor = db.cursor()
-        
         # Delete records older than 1 hour
         threshold = (datetime.utcnow() - timedelta(hours=1)).isoformat()
         
-        cursor.execute("""
-            DELETE FROM live_visitors
-            WHERE form_id = %s AND last_seen < %s
-        """, (form_id, threshold))
-        
-        deleted_count = cursor.rowcount
-        db.commit()
-        cursor.close()
+        async with async_session_maker() as session:
+            result = await session.execute(
+                text("""
+                    DELETE FROM live_visitors
+                    WHERE form_id = :form_id AND last_seen < :threshold
+                """),
+                {'form_id': form_id, 'threshold': threshold}
+            )
+            
+            deleted_count = result.rowcount
+            await session.commit()
         
         return {
             'success': True,

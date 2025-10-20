@@ -31,6 +31,14 @@ except Exception:
     pyshorteners = None  # type: ignore
     _PYSHORT_AVAILABLE = False
 
+# File redirect utilities for short links
+try:
+    from routers.file_redirects import create_file_redirect, get_short_url  # type: ignore
+    _FILE_REDIRECTS_AVAILABLE = True
+except Exception:
+    _FILE_REDIRECTS_AVAILABLE = False  # type: ignore
+    _PYSHORT_AVAILABLE = False
+
 # Email integrations: encryption and sending
 from cryptography.fernet import Fernet
 import base64
@@ -3643,13 +3651,22 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             except Exception:
                 ftype = ""
             if ftype == "file" and val is not None:
-                def _file_to_url(v):
+                async def _file_to_url(v):
                     try:
                         if isinstance(v, dict):
                             u = v.get("url") or v.get("publicUrl") or v.get("downloadUrl")
+                            k = str(v.get("key") or v.get("r2Key") or "").strip()
+                            
+                            # Generate short link for R2 files
+                            if k and _FILE_REDIRECTS_AVAILABLE:
+                                try:
+                                    short_id = await create_file_redirect(k, form_id, response_id, 'upload')
+                                    return get_short_url(short_id)
+                                except Exception:
+                                    pass
+                            
                             if u:
                                 return _normalize_bg_public_url(str(u))
-                            k = str(v.get("key") or v.get("r2Key") or "").strip()
                             if k:
                                 return _public_url_for_key(k)
                             # Fallback to provided name/filename or stringified dict
@@ -3663,9 +3680,10 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     except Exception:
                         return str(v)
                 if isinstance(val, list):
-                    answers[label] = [_file_to_url(x) for x in val]
+                    import asyncio
+                    answers[label] = await asyncio.gather(*[_file_to_url(x) for x in val])
                 else:
-                    answers[label] = _file_to_url(val)
+                    answers[label] = await _file_to_url(val)
             elif ftype == "signature" and val is not None:
                 # Persist signature PNG to R2 when provided as a data URL and return status 'signed' with a PNG URL
                 try:
@@ -3710,9 +3728,21 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                                     )
                                     await sig_session.commit()
                                 
-                                # Return direct R2 public URL
-                                r2_url = _public_url_for_key(key)
-                                sig = {"status": "signed", "url": r2_url, "pngUrl": r2_url, "key": sig_id}
+                                # Generate short link instead of full R2 URL
+                                try:
+                                    if _FILE_REDIRECTS_AVAILABLE:
+                                        short_id = await create_file_redirect(key, form_id, response_id, 'signature')
+                                        short_url = get_short_url(short_id)
+                                        sig = {"status": "signed", "url": short_url, "pngUrl": short_url, "key": sig_id}
+                                    else:
+                                        # Fallback to direct R2 URL
+                                        r2_url = _public_url_for_key(key)
+                                        sig = {"status": "signed", "url": r2_url, "pngUrl": r2_url, "key": sig_id}
+                                except Exception:
+                                    # Fallback to direct R2 URL on error
+                                    r2_url = _public_url_for_key(key)
+                                    sig = {"status": "signed", "url": r2_url, "pngUrl": r2_url, "key": sig_id}
+                                
                                 signatures[label] = sig
                                 answers[label] = sig
                                 continue

@@ -28,6 +28,60 @@ class LiveVisitorPayload(BaseModel):
     screenHeight: Optional[int] = None
 
 
+def _parse_device_info(user_agent: str) -> dict:
+    """Parse user agent string to extract device, OS, and browser info"""
+    if not user_agent:
+        return {
+            'device_type': 'Unknown',
+            'os': 'Unknown',
+            'browser': 'Unknown'
+        }
+    
+    ua_lower = user_agent.lower()
+    
+    # Detect device type
+    if 'mobile' in ua_lower or 'android' in ua_lower or 'iphone' in ua_lower:
+        device_type = 'Mobile'
+    elif 'tablet' in ua_lower or 'ipad' in ua_lower:
+        device_type = 'Tablet'
+    else:
+        device_type = 'Desktop'
+    
+    # Detect OS
+    if 'windows' in ua_lower:
+        os_name = 'Windows'
+    elif 'mac os x' in ua_lower or 'macos' in ua_lower or 'macintosh' in ua_lower:
+        os_name = 'macOS'
+    elif 'iphone' in ua_lower or 'ipad' in ua_lower:
+        os_name = 'iOS'
+    elif 'android' in ua_lower:
+        os_name = 'Android'
+    elif 'linux' in ua_lower:
+        os_name = 'Linux'
+    else:
+        os_name = 'Unknown'
+    
+    # Detect browser
+    if 'edg' in ua_lower:
+        browser = 'Edge'
+    elif 'chrome' in ua_lower:
+        browser = 'Chrome'
+    elif 'firefox' in ua_lower:
+        browser = 'Firefox'
+    elif 'safari' in ua_lower and 'chrome' not in ua_lower:
+        browser = 'Safari'
+    elif 'opera' in ua_lower or 'opr' in ua_lower:
+        browser = 'Opera'
+    else:
+        browser = 'Unknown'
+    
+    return {
+        'device_type': device_type,
+        'os': os_name,
+        'browser': browser
+    }
+
+
 def _get_client_ip(request: Request) -> str:
     """Extract real client IP from request headers"""
     # Check common proxy headers
@@ -134,6 +188,10 @@ async def track_live_visitor(
         location = _get_location_from_ip(ip)
         print(f"[LiveVisitor] Location lookup result: {location}")
         
+        # Parse device info from user agent
+        device_info = _parse_device_info(payload.userAgent or '')
+        print(f"[LiveVisitor] Device info: {device_info}")
+        
         # Convert ISO timestamp string to datetime object for asyncpg
         # Remove timezone info to match TIMESTAMP (not TIMESTAMPTZ) columns in DB
         try:
@@ -152,10 +210,12 @@ async def track_live_visitor(
                             form_id, session_id, ip_address, 
                             city, country, country_code, latitude, longitude,
                             user_agent, referrer, screen_width, screen_height,
+                            device_type, os, browser,
                             first_seen, last_seen, is_active
                         ) VALUES (:form_id, :session_id, :ip_address, :city, :country, :country_code, 
                                   :latitude, :longitude, :user_agent, :referrer, :screen_width, 
-                                  :screen_height, :first_seen, :last_seen, :is_active)
+                                  :screen_height, :device_type, :os, :browser,
+                                  :first_seen, :last_seen, :is_active)
                         ON CONFLICT (session_id) 
                         DO UPDATE SET
                             last_seen = EXCLUDED.last_seen,
@@ -174,6 +234,9 @@ async def track_live_visitor(
                         'referrer': payload.referrer,
                         'screen_width': payload.screenWidth,
                         'screen_height': payload.screenHeight,
+                        'device_type': device_info['device_type'],
+                        'os': device_info['os'],
+                        'browser': device_info['browser'],
                         'first_seen': timestamp_dt,
                         'last_seen': timestamp_dt,
                         'is_active': True
@@ -241,7 +304,8 @@ async def get_live_visitors(form_id: str):
                         SELECT 
                             session_id, ip_address, city, country, country_code,
                             latitude, longitude, user_agent, referrer,
-                            screen_width, screen_height, first_seen, last_seen
+                            screen_width, screen_height, first_seen, last_seen,
+                            device_type, os, browser
                         FROM live_visitors
                         WHERE is_active = true 
                             AND last_seen >= :threshold
@@ -255,7 +319,8 @@ async def get_live_visitors(form_id: str):
                         SELECT 
                             session_id, ip_address, city, country, country_code,
                             latitude, longitude, user_agent, referrer,
-                            screen_width, screen_height, first_seen, last_seen
+                            screen_width, screen_height, first_seen, last_seen,
+                            device_type, os, browser
                         FROM live_visitors
                         WHERE form_id = :form_id 
                             AND is_active = true 
@@ -283,6 +348,9 @@ async def get_live_visitors(form_id: str):
                 'screenHeight': row[10],
                 'firstSeen': row[11].isoformat() if row[11] else None,
                 'lastSeen': row[12].isoformat() if row[12] else None,
+                'deviceType': row[13],
+                'os': row[14],
+                'browser': row[15],
             })
         
         return {

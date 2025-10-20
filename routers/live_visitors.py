@@ -129,7 +129,17 @@ async def track_live_visitor(
     try:
         # Get client IP and location
         ip = _get_client_ip(request)
+        print(f"[LiveVisitor] Tracking {payload.action} for session {payload.sessionId}, IP: {ip}")
+        
         location = _get_location_from_ip(ip)
+        print(f"[LiveVisitor] Location lookup result: {location}")
+        
+        # Convert ISO timestamp string to datetime object for asyncpg
+        try:
+            timestamp_dt = datetime.fromisoformat(payload.timestamp.replace('Z', '+00:00'))
+        except Exception as e:
+            print(f"[LiveVisitor] Timestamp parsing failed: {e}, using current time")
+            timestamp_dt = datetime.utcnow()
         
         async with async_session_maker() as session:
             # Upsert visitor session
@@ -163,8 +173,8 @@ async def track_live_visitor(
                         'referrer': payload.referrer,
                         'screen_width': payload.screenWidth,
                         'screen_height': payload.screenHeight,
-                        'first_seen': payload.timestamp,
-                        'last_seen': payload.timestamp,
+                        'first_seen': timestamp_dt,
+                        'last_seen': timestamp_dt,
                         'is_active': True
                     }
                 )
@@ -178,7 +188,7 @@ async def track_live_visitor(
                         WHERE session_id = :session_id AND form_id = :form_id
                     """),
                     {
-                        'last_seen': payload.timestamp,
+                        'last_seen': timestamp_dt,
                         'session_id': payload.sessionId,
                         'form_id': form_id
                     }
@@ -193,7 +203,7 @@ async def track_live_visitor(
                         WHERE session_id = :session_id AND form_id = :form_id
                     """),
                     {
-                        'last_seen': payload.timestamp,
+                        'last_seen': timestamp_dt,
                         'session_id': payload.sessionId,
                         'form_id': form_id
                     }
@@ -201,10 +211,13 @@ async def track_live_visitor(
             
             await session.commit()
         
+        print(f"[LiveVisitor] Successfully tracked {payload.action} for session {payload.sessionId}")
         return {'success': True, 'location': location}
     
     except Exception as e:
-        print(f"Error tracking live visitor: {e}")
+        print(f"[LiveVisitor] ERROR tracking visitor: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 

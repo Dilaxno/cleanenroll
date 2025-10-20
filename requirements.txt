@@ -31,6 +31,11 @@ boto3>=1.34.0
 # Image MIME verification and safe re-encode
 python-magic>=0.4.27
 Pillow>=10.3.0
+# ColorThief for brand color extraction from images
+colorthief>=0.2.1
+# Selenium for taking website screenshots
+selenium>=4.15.0
+webdriver-manager>=4.0.1
 # Translation providers wrapper
 deep-translator>=1.11.4
 # For encrypting tokens and SMTP credentials (Fernet)

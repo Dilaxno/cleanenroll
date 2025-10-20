@@ -411,7 +411,16 @@ async def analytics_events(request: Request, payload: Dict[str, Any] | None = No
 @router.get("/brand/colors")
 @limiter.limit("30/minute")
 async def get_brand_colors(request: Request, url: str = Query(...)):
-    """Extract brand colors from a website URL."""
+    """Extract brand colors from a website URL using Selenium screenshots and ColorThief."""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from webdriver_manager.chrome import ChromeDriverManager
+    from colorthief import ColorThief
+    from PIL import Image
+    import tempfile
+    
+    driver = None
     try:
         if not url or not url.strip():
             raise HTTPException(status_code=400, detail="URL is required")
@@ -420,67 +429,103 @@ async def get_brand_colors(request: Request, url: str = Query(...)):
         if not url.startswith(("http://", "https://")):
             url = f"https://{url}"
         
-        # Fetch the website with timeout
-        try:
-            response = requests.get(url, timeout=10, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-            response.raise_for_status()
-            html_content = response.text
-        except Exception as e:
-            logger.warning(f"Failed to fetch URL {url}: {e}")
-            raise HTTPException(status_code=400, detail="Failed to fetch website")
+        # Set up headless Chrome
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
-        # Extract colors from HTML content using regex
-        colors = set()
+        # Initialize driver with webdriver-manager
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(15)
         
-        # Match hex colors (#fff, #ffffff)
-        hex_pattern = r'#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b'
-        hex_matches = re.findall(hex_pattern, html_content)
-        for match in hex_matches:
-            if len(match) == 3:
-                # Convert 3-digit to 6-digit hex
-                colors.add(f"#{match[0]}{match[0]}{match[1]}{match[1]}{match[2]}{match[2]}")
-            else:
-                colors.add(f"#{match}")
+        # Navigate to the website
+        logger.info(f"Taking screenshots of {url}")
+        driver.get(url)
         
-        # Match rgb/rgba colors
-        rgb_pattern = r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*[\d.]+)?\s*\)'
-        rgb_matches = re.findall(rgb_pattern, html_content)
-        for r, g, b in rgb_matches:
+        # Wait for page to load
+        import time
+        time.sleep(2)  # Give time for dynamic content to render
+        
+        all_colors = []
+        
+        # Take screenshots at different scroll positions to capture more of the page
+        scroll_positions = [0, 500, 1000]  # Top, middle-ish, lower sections
+        
+        for scroll_y in scroll_positions:
             try:
-                hex_color = f"#{int(r):02x}{int(g):02x}{int(b):02x}"
-                colors.add(hex_color)
+                # Scroll to position
+                driver.execute_script(f"window.scrollTo(0, {scroll_y});")
+                time.sleep(0.5)  # Brief pause for scroll to complete
+                
+                # Take screenshot to temporary file
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                    screenshot_path = tmp_file.name
+                    driver.save_screenshot(screenshot_path)
+                    
+                    # Extract colors using ColorThief
+                    try:
+                        color_thief = ColorThief(screenshot_path)
+                        
+                        # Get dominant color
+                        try:
+                            dominant_color = color_thief.get_color(quality=1)
+                            hex_color = f"#{dominant_color[0]:02x}{dominant_color[1]:02x}{dominant_color[2]:02x}"
+                            all_colors.append(hex_color)
+                        except Exception:
+                            pass
+                        
+                        # Get color palette (up to 8 colors per screenshot)
+                        try:
+                            color_palette = color_thief.get_palette(color_count=8, quality=1)
+                            for rgb in color_palette:
+                                hex_color = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+                                all_colors.append(hex_color)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logger.debug(f"Failed to extract colors from screenshot at position {scroll_y}: {e}")
+                    finally:
+                        # Clean up temporary file
+                        try:
+                            os.unlink(screenshot_path)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"Failed to capture screenshot at scroll position {scroll_y}: {e}")
+                continue
+        
+        # Filter out near-white and near-black colors
+        filtered_colors = []
+        for color in all_colors:
+            try:
+                hex_val = color.replace('#', '')
+                if len(hex_val) == 6:
+                    r = int(hex_val[0:2], 16)
+                    g = int(hex_val[2:4], 16)
+                    b = int(hex_val[4:6], 16)
+                    brightness = (r * 299 + g * 587 + b * 114) / 1000
+                    # Skip very light (>240) or very dark (<20) colors
+                    if 20 < brightness < 240:
+                        filtered_colors.append(color)
             except Exception:
                 pass
         
-        # Filter out common colors (white, black, transparent-like)
-        filtered_colors = []
-        for color in colors:
-            color_lower = color.lower()
-            # Skip very light colors (near white) and very dark colors (near black)
-            if color_lower not in ['#ffffff', '#fff', '#000000', '#000', '#f0f0f0', '#fafafa']:
-                try:
-                    # Parse hex to check brightness
-                    hex_val = color_lower.replace('#', '')
-                    if len(hex_val) == 6:
-                        r = int(hex_val[0:2], 16)
-                        g = int(hex_val[2:4], 16)
-                        b = int(hex_val[4:6], 16)
-                        brightness = (r * 299 + g * 587 + b * 114) / 1000
-                        # Skip very light (>240) or very dark (<20) colors
-                        if 20 < brightness < 240:
-                            filtered_colors.append(color)
-                except Exception:
-                    pass
-        
-        # Sort by frequency (most common first) and return top 8
-        color_counts = {}
+        # Remove duplicates while preserving order
+        seen = set()
+        palette = []
         for color in filtered_colors:
-            color_counts[color] = html_content.count(color)
-        
-        sorted_colors = sorted(color_counts.items(), key=lambda x: x[1], reverse=True)
-        palette = [color for color, _ in sorted_colors[:8]]
+            color_lower = color.lower()
+            if color_lower not in seen:
+                seen.add(color_lower)
+                palette.append(color)
+                if len(palette) >= 8:
+                    break
         
         # If we have colors, return them with a primary suggestion
         if palette:
@@ -492,14 +537,25 @@ async def get_brand_colors(request: Request, url: str = Query(...)):
                 }
             }
         else:
-            # Return empty palette if no colors found
-            return {"palette": [], "colors": {}, "suggestions": {}}
+            # Fallback: return default palette
+            return {
+                "palette": ["#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b"],
+                "colors": {"primary": "#3b82f6"},
+                "suggestions": {"theme": {"primaryColor": "#3b82f6"}}
+            }
             
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Brand colors extraction failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to extract colors")
+    finally:
+        # Always close the browser
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 # Models aligned with the front-end builder
 class SubmitButton(BaseModel):

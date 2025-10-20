@@ -20,12 +20,14 @@ router = APIRouter()
 
 class LiveVisitorPayload(BaseModel):
     sessionId: str
-    action: Literal['enter', 'heartbeat', 'exit']
+    action: Literal['enter', 'heartbeat', 'exit', 'field_focus']
     timestamp: str
     userAgent: Optional[str] = None
     referrer: Optional[str] = None
     screenWidth: Optional[int] = None
     screenHeight: Optional[int] = None
+    currentField: Optional[str] = None
+    currentFieldLabel: Optional[str] = None
 
 
 def _parse_device_info(user_agent: str) -> dict:
@@ -252,9 +254,29 @@ async def track_live_visitor(
                         WHERE session_id = :session_id AND form_id = :form_id
                     """),
                     {
-                        'last_seen': timestamp_dt,
                         'session_id': payload.sessionId,
-                        'form_id': form_id
+                        'form_id': form_id,
+                        'last_seen': timestamp_dt
+                    }
+                )
+            
+            elif payload.action == 'field_focus':
+                # Update current field being interacted with
+                await session.execute(
+                    text("""
+                        UPDATE live_visitors 
+                        SET last_seen = :last_seen, 
+                            is_active = true,
+                            current_field = :current_field,
+                            current_field_label = :current_field_label
+                        WHERE session_id = :session_id AND form_id = :form_id
+                    """),
+                    {
+                        'session_id': payload.sessionId,
+                        'form_id': form_id,
+                        'last_seen': timestamp_dt,
+                        'current_field': payload.currentField,
+                        'current_field_label': payload.currentFieldLabel
                     }
                 )
             
@@ -305,7 +327,7 @@ async def get_live_visitors(form_id: str):
                             session_id, ip_address, city, country, country_code,
                             latitude, longitude, user_agent, referrer,
                             screen_width, screen_height, first_seen, last_seen,
-                            device_type, os, browser
+                            device_type, os, browser, current_field, current_field_label
                         FROM live_visitors
                         WHERE is_active = true 
                             AND last_seen >= :threshold
@@ -320,7 +342,7 @@ async def get_live_visitors(form_id: str):
                             session_id, ip_address, city, country, country_code,
                             latitude, longitude, user_agent, referrer,
                             screen_width, screen_height, first_seen, last_seen,
-                            device_type, os, browser
+                            device_type, os, browser, current_field, current_field_label
                         FROM live_visitors
                         WHERE form_id = :form_id 
                             AND is_active = true 
@@ -351,6 +373,8 @@ async def get_live_visitors(form_id: str):
                 'deviceType': row[13],
                 'os': row[14],
                 'browser': row[15],
+                'currentField': row[16],
+                'currentFieldLabel': row[17],
             })
         
         return {

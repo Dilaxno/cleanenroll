@@ -135,8 +135,9 @@ async def track_live_visitor(
         print(f"[LiveVisitor] Location lookup result: {location}")
         
         # Convert ISO timestamp string to datetime object for asyncpg
+        # Remove timezone info to match TIMESTAMP (not TIMESTAMPTZ) columns in DB
         try:
-            timestamp_dt = datetime.fromisoformat(payload.timestamp.replace('Z', '+00:00'))
+            timestamp_dt = datetime.fromisoformat(payload.timestamp.replace('Z', '+00:00')).replace(tzinfo=None)
         except Exception as e:
             print(f"[LiveVisitor] Timestamp parsing failed: {e}, using current time")
             timestamp_dt = datetime.utcnow()

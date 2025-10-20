@@ -3098,6 +3098,76 @@ async def update_theme_split_image(request: Request, form_id: str, payload: Dict
         await session.commit()
     return {"ok": True, "publicUrl": url}
 
+@router.get("/forms/{form_id}/geo-check")
+async def check_geo_restriction(form_id: str, request: Request):
+    """Check if the visitor's country is allowed to view/submit the form.
+    Returns 200 if allowed, 403 if restricted.
+    """
+    try:
+        # Load form from Neon
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text("SELECT * FROM forms WHERE id = :fid LIMIT 1"),
+                {"fid": form_id},
+            )
+            row = res.mappings().first()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Form not found")
+        
+        form_data = dict(row)
+        
+        # Check if user is pro (geo restrictions are pro feature)
+        user_id = str(form_data.get("userId") or "").strip() or None
+        is_pro = False
+        if user_id:
+            try:
+                async with async_session_maker() as session:
+                    user_res = await session.execute(
+                        text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"),
+                        {"uid": user_id},
+                    )
+                    user_row = user_res.mappings().first()
+                    if user_row:
+                        plan = str(user_row.get("plan") or "").strip().lower()
+                        is_pro = plan in ("pro", "premium", "enterprise", "business")
+            except Exception:
+                pass
+        
+        # Get client IP and check restrictions
+        ip = _client_ip(request)
+        allowed = _normalize_country_list(form_data.get("allowedCountries") or []) if is_pro else []
+        restricted = _normalize_country_list(form_data.get("restrictedCountries") or []) if is_pro else []
+        
+        if allowed or restricted:
+            _, country = _country_from_ip(ip)
+            
+            # Allowed whitelist takes precedence
+            if allowed:
+                if country and country not in allowed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Your IP location is restricted from submitting the form. We're sorry about that"
+                    )
+            
+            # Check restricted list
+            if restricted:
+                if country and country in restricted:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Your IP location is restricted from submitting the form. We're sorry about that"
+                    )
+        
+        return {"ok": True, "message": "Access allowed"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("geo-check failed form_id=%s", form_id)
+        # Don't block on geo-check errors
+        return {"ok": True, "message": "Access allowed (check bypassed due to error)"}
+
+
 @router.post("/forms/{form_id}/submit")
 @limiter.limit("5/minute")
 async def submit_form(form_id: str, request: Request, payload: Dict = None):

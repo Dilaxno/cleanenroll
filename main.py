@@ -85,6 +85,7 @@ from routers.form_versions import router as form_versions_router  # type: ignore
 from routers.virus_scan import router as virus_scan_router  # type: ignore
 from routers.live_visitors import router as live_visitors_router  # type: ignore
 from routers.file_redirects import router as file_redirects_router  # type: ignore
+from routers.zoom import router as zoom_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -266,6 +267,7 @@ app.include_router(form_versions_router)
 app.include_router(virus_scan_router)
 app.include_router(live_visitors_router)
 app.include_router(file_redirects_router)
+app.include_router(zoom_router)
 
 
 if __name__ == "__main__":

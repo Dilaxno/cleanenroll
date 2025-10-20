@@ -3763,6 +3763,92 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         signatures[label] = meta
                     except Exception:
                         continue
+            elif ftype == "zoom-meeting" and val is not None:
+                # Create Zoom meeting automatically
+                try:
+                    meeting_data = val if isinstance(val, dict) else {}
+                    topic = meeting_data.get("topic", "Meeting")
+                    date = meeting_data.get("date", "")
+                    time = meeting_data.get("time", "")
+                    duration = int(meeting_data.get("duration", 30))
+                    agenda = meeting_data.get("agenda", "")
+                    
+                    # Only create if we have date and time
+                    if topic and date and time:
+                        # Get user's Zoom token
+                        async with async_session_maker() as zoom_session:
+                            zoom_result = await zoom_session.execute(
+                                text("""
+                                    SELECT access_token FROM zoom_integrations
+                                    WHERE uid = :uid
+                                """),
+                                {"uid": owner_id}
+                            )
+                            zoom_row = zoom_result.fetchone()
+                            
+                            if zoom_row and zoom_row[0]:
+                                access_token = zoom_row[0]
+                                
+                                # Combine date and time into ISO 8601 format
+                                start_time = f"{date}T{time}:00"
+                                
+                                # Create Zoom meeting via API
+                                import requests
+                                zoom_response = requests.post(
+                                    "https://api.zoom.us/v2/users/me/meetings",
+                                    headers={
+                                        "Authorization": f"Bearer {access_token}",
+                                        "Content-Type": "application/json"
+                                    },
+                                    json={
+                                        "topic": topic,
+                                        "type": 2,
+                                        "start_time": start_time,
+                                        "duration": duration,
+                                        "timezone": "UTC",
+                                        "agenda": agenda,
+                                        "settings": {
+                                            "host_video": True,
+                                            "participant_video": True,
+                                            "join_before_host": False,
+                                            "mute_upon_entry": True,
+                                            "waiting_room": True,
+                                            "audio": "both"
+                                        }
+                                    },
+                                    timeout=20
+                                )
+                                
+                                if zoom_response.status_code == 201:
+                                    meeting = zoom_response.json()
+                                    # Store meeting details in answers
+                                    answers[label] = {
+                                        "topic": topic,
+                                        "date": date,
+                                        "time": time,
+                                        "duration": duration,
+                                        "agenda": agenda,
+                                        "meeting_id": meeting.get("id"),
+                                        "join_url": meeting.get("join_url"),
+                                        "start_url": meeting.get("start_url"),
+                                        "password": meeting.get("password"),
+                                        "created": True
+                                    }
+                                    logger.info(f"Zoom meeting created: {meeting.get('id')} for form {form_id}")
+                                else:
+                                    # Failed to create meeting, store original data
+                                    answers[label] = {**meeting_data, "created": False, "error": "Failed to create meeting"}
+                                    logger.error(f"Zoom meeting creation failed: {zoom_response.status_code} - {zoom_response.text}")
+                            else:
+                                # Zoom not connected, store original data
+                                answers[label] = {**meeting_data, "created": False, "error": "Zoom not connected"}
+                    else:
+                        # Missing required fields
+                        answers[label] = {**meeting_data, "created": False}
+                except Exception as e:
+                    # Log error but don't fail submission
+                    logger.exception(f"Zoom meeting creation error: {e}")
+                    answers[label] = val
             else:
                 # Store all other field types (text, email, number, etc.)
                 if val is not None:

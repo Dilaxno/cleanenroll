@@ -8,6 +8,13 @@ from typing import Optional, Literal
 from datetime import datetime, timedelta
 import geoip2.database
 import os
+from sqlalchemy import text
+
+# Support both package and flat imports for the session maker
+try:
+    from db.database import async_session_maker  # type: ignore
+except Exception:
+    from ..db.database import async_session_maker  # type: ignore
 
 router = APIRouter()
 
@@ -88,9 +95,6 @@ async def track_live_visitor(
     Track live visitor activity on a form page
     Stores visitor session with geolocation data
     """
-    from ..db.database import async_session_maker
-    from sqlalchemy import text
-    
     try:
         # Get client IP and location
         ip = _get_client_ip(request)
@@ -179,9 +183,6 @@ async def get_live_visitors(form_id: str):
     Get list of currently active visitors on a form
     Returns visitors who were active in the last 30 seconds
     """
-    from ..db.database import async_session_maker
-    from sqlalchemy import text
-    
     try:
         # Consider visitors active if last_seen within 30 seconds
         threshold = (datetime.utcnow() - timedelta(seconds=30)).isoformat()
@@ -239,9 +240,6 @@ async def cleanup_old_visitors(form_id: str):
     Clean up old visitor records (older than 1 hour)
     This can be called periodically to keep the table clean
     """
-    from ..db.database import async_session_maker
-    from sqlalchemy import text
-    
     try:
         # Delete records older than 1 hour
         threshold = (datetime.utcnow() - timedelta(hours=1)).isoformat()

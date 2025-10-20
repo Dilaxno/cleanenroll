@@ -4116,11 +4116,13 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     # Email notification to form owner (best-effort, using pre-fetched owner_email)
     try:
         if owner_email:
+            logger.info("Preparing owner email notification to=%s form_id=%s", owner_email, form_id)
             form_title = str(form_data.get("title") or "Form").strip() or "Form"
             subject = f"New submission — {form_title}"
             preview = ""
             try:
                 ans = record.get("answers") or {}
+                logger.debug("Building email preview from %d answers", len(ans))
                 # Map field ids to labels for human-readable output
                 label_by_id = {}
                 try:
@@ -4137,17 +4139,18 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     try:
                         label = label_by_id.get(str(k), str(k))
                         if isinstance(v, str) and v.strip():
-                            preview = v.strip()[:140]
-                            break
-                        if isinstance(v, list):
-                            sv = next((str(x) for x in v if isinstance(x, str) and x.strip()), None)
-                            if sv:
-                                preview = sv.strip()[:140]
-                                break
+                            val_preview = v.strip()[:140]
+                            parts.append(f"<p><strong>{label}:</strong> {val_preview}</p>")
+                        elif isinstance(v, list) and v:
+                            list_str = ", ".join(str(x) for x in v if x)
+                            if list_str:
+                                parts.append(f"<p><strong>{label}:</strong> {list_str[:140]}</p>")
                     except Exception:
                         continue
                 preview = "".join(parts)
-            except Exception:
+                logger.debug("Email preview built with %d field parts", len(parts))
+            except Exception as e:
+                logger.warning("Failed to build email preview: %s", str(e))
                 preview = ""
             # If signatures are available, append thumbnails below the preview
             try:
@@ -4173,12 +4176,16 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 "subject": subject,
                 "title": subject,
                 "intro": f"You received a new submission for {form_title}.",
-                "content_html": (preview or "") + sigs_html,
+                "content_html": (preview or "<p>No preview available</p>") + sigs_html,
                 "preheader": f"New submission for {form_title}",
             })
+            logger.info("Sending owner notification email to=%s subject=%s", owner_email, subject)
             send_email_html(owner_email, subject, html)
-    except Exception:
-        logger.exception("owner email notify failed form_id=%s", form_id)
+            logger.info("Owner notification email sent successfully to=%s form_id=%s", owner_email, form_id)
+        else:
+            logger.warning("Owner email not available for notification form_id=%s owner_id=%s", form_id, str(form_data.get("userId") or ""))
+    except Exception as e:
+        logger.exception("owner email notify failed form_id=%s owner_email=%s error=%s", form_id, owner_email, str(e))
     # Server-side mirrors to Firestore for submissions, markers and notifications (no client writes)
     try:
         if _FS_AVAILABLE:

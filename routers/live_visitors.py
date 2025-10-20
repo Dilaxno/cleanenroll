@@ -18,6 +18,27 @@ except Exception:
 
 router = APIRouter()
 
+def _verify_firebase_uid(request: Request) -> str:
+    """Extract and verify Firebase UID from Authorization header."""
+    try:
+        from firebase_admin import auth as _admin_auth  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="Firebase Admin not available on server")
+    
+    authz = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not authz or not authz.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization token")
+    
+    token = authz.split(" ", 1)[1].strip()
+    try:
+        decoded = _admin_auth.verify_id_token(token)
+        uid = decoded.get("uid")
+        if not uid:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return uid
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 class LiveVisitorPayload(BaseModel):
     sessionId: str
     action: Literal['enter', 'heartbeat', 'exit', 'field_focus']
@@ -308,34 +329,63 @@ async def track_live_visitor(
 
 
 @router.get('/api/builder/forms/{form_id}/live-visitors')
-async def get_live_visitors(form_id: str):
+async def get_live_visitors(form_id: str, request: Request):
     """
     Get list of currently active visitors on a form
     Returns visitors who were active in the last 30 seconds
+    Requires authentication - users can only see visitors on their own forms
     """
     try:
+        # Verify user authentication
+        user_id = _verify_firebase_uid(request)
+        
         # Consider visitors active if last_seen within 30 seconds
         # Pass datetime object, not ISO string, for asyncpg
         threshold = datetime.utcnow() - timedelta(seconds=30)
         
         async with async_session_maker() as session:
-            # Handle 'all' form_id by fetching visitors across all forms
+            # Handle 'all' form_id by fetching visitors across all user's forms
             if form_id == 'all':
+                # Get all form IDs owned by this user
+                forms_result = await session.execute(
+                    text("""SELECT id FROM forms WHERE user_id = :user_id"""),
+                    {'user_id': user_id}
+                )
+                user_form_ids = [row[0] for row in forms_result.fetchall()]
+                
+                if not user_form_ids:
+                    return {'success': True, 'visitors': [], 'count': 0}
+                
+                # Fetch visitors only for user's forms
+                placeholders = ','.join([f':form_id_{i}' for i in range(len(user_form_ids))])
+                params = {'threshold': threshold}
+                params.update({f'form_id_{i}': fid for i, fid in enumerate(user_form_ids)})
+                
                 result = await session.execute(
-                    text("""
+                    text(f"""
                         SELECT 
                             session_id, ip_address, city, country, country_code,
                             latitude, longitude, user_agent, referrer,
                             screen_width, screen_height, first_seen, last_seen,
                             device_type, os, browser, current_field, current_field_label
                         FROM live_visitors
-                        WHERE is_active = true 
+                        WHERE form_id IN ({placeholders})
+                            AND is_active = true 
                             AND last_seen >= :threshold
                         ORDER BY last_seen DESC
                     """),
-                    {'threshold': threshold}
+                    params
                 )
             else:
+                # Verify user owns this specific form
+                form_check = await session.execute(
+                    text("""SELECT id FROM forms WHERE id = :form_id AND user_id = :user_id"""),
+                    {'form_id': form_id, 'user_id': user_id}
+                )
+                if not form_check.fetchone():
+                    raise HTTPException(status_code=403, detail="Access denied: Form not found or you don't own this form")
+                
+                # Get visitors for this specific form
                 result = await session.execute(
                     text("""
                         SELECT 

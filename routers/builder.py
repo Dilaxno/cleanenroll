@@ -2704,7 +2704,7 @@ async def _send_email_via_integration(user_id: str, to_email: str, subject: str,
 # AI Copilot endpoint
 # -----------------------------
 
-@router.post("/builder/ai/copilot")
+@router.post("/ai/copilot")
 @limiter.limit("30/minute")
 async def ai_copilot(request: Request, payload: Dict[str, Any] | None = None):
     """AI copilot for generating form field suggestions.

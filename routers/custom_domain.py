@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from typing import Dict, Optional
 from sqlalchemy import text
 import dns.resolver
+from backend.db.database import async_session_maker
 
 router = APIRouter()
 
@@ -115,7 +116,8 @@ async def issue_cert(form_id: str):
 
     if not row:
         raise HTTPException(status_code=404, detail="Form not found")
-domain_val = _normalize_domain(row.get("custom_domain"))
+    
+    domain_val = _normalize_domain(row.get("custom_domain"))
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
     if not bool(row.get("custom_domain_verified")):

@@ -69,7 +69,12 @@ CREATE INDEX idx_submissions_form_owner_id ON submissions(form_owner_id);
 CREATE TABLE analytics (
     id VARCHAR(128) PRIMARY KEY,
     form_id VARCHAR(128) NOT NULL REFERENCES forms(id) ON DELETE CASCADE,
-    event_type VARCHAR(50),
+    type VARCHAR(50),
+    user_id TEXT,
+    session_id TEXT,
+    visitor_id TEXT,
+    device_info JSONB,
+    ts TIMESTAMPTZ,
     data JSONB,
     ip_address VARCHAR(45),
     country_code VARCHAR(2),

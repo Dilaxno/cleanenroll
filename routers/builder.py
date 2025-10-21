@@ -2127,13 +2127,13 @@ async def public_get_form(form_id: str):
                     # Log view event to analytics table for accurate tracking
                     await session.execute(
                         text("""
-                            INSERT INTO analytics (id, form_id, event_type, data, created_at)
-                            VALUES (:id, :form_id, :event_type, :data, NOW())
+                            INSERT INTO analytics (id, form_id, type, data, created_at)
+                            VALUES (:id, :form_id, :type, :data, NOW())
                         """),
                         {
                             "id": _create_id(),
                             "form_id": form_id,
-                            "event_type": "view",
+                            "type": "view",
                             "data": json.dumps({"source": "form_load"})
                         }
                     )

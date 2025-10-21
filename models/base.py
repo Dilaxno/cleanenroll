@@ -178,7 +178,7 @@ class AnalyticsModel(BaseDBModel):
     """Analytics model for validation and sanitization"""
     id: Optional[str] = None
     form_id: str
-    event_type: str
+    type: str  # Renamed from event_type for consistency
     data: Dict[str, Any] = Field(default_factory=dict)
     ip_address: Optional[str] = None
     country_code: Optional[str] = None

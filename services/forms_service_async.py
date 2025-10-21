@@ -50,7 +50,7 @@ class AsyncFormsService:
                 LEFT JOIN (
                     SELECT form_id, COUNT(*) as view_count
                     FROM analytics
-                    WHERE event_type = 'view'
+                    WHERE type = 'view'
                     GROUP BY form_id
                 ) v ON f.id = v.form_id
                 WHERE f.user_id = :user_id

@@ -59,7 +59,7 @@ async def _is_pro_plan(user_id: str) -> bool:
 class LiveVisitorPayload(BaseModel):
     sessionId: str
     action: Literal['enter', 'heartbeat', 'exit', 'field_focus']
-    timestamp: str
+    timestamp: Optional[str] = None
     userAgent: Optional[str] = None
     referrer: Optional[str] = None
     screenWidth: Optional[int] = None
@@ -234,11 +234,13 @@ async def track_live_visitor(
         
         # Convert ISO timestamp string to datetime object for asyncpg
         # Remove timezone info to match TIMESTAMP (not TIMESTAMPTZ) columns in DB
-        try:
-            timestamp_dt = datetime.fromisoformat(payload.timestamp.replace('Z', '+00:00')).replace(tzinfo=None)
-        except Exception as e:
-            print(f"[LiveVisitor] Timestamp parsing failed: {e}, using current time")
-            timestamp_dt = datetime.utcnow()
+        timestamp_dt = datetime.utcnow()  # Default to current time
+        if payload.timestamp:
+            try:
+                timestamp_dt = datetime.fromisoformat(payload.timestamp.replace('Z', '+00:00')).replace(tzinfo=None)
+            except Exception as e:
+                print(f"[LiveVisitor] Timestamp parsing failed: {e}, using current time")
+                timestamp_dt = datetime.utcnow()
         
         async with async_session_maker() as session:
             # Upsert visitor session

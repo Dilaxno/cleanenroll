@@ -2086,6 +2086,8 @@ async def public_get_form(form_id: str):
                     "description": data.get("description"),
                     "language": data.get("language") or "en",
                     "thankYouMessage": data.get("thankYouMessage") or data.get("thank_you_message") or "Thank you for your submission! We'll get back to you soon.",
+                    "thankYouDisplay": data.get("thank_you_display") or data.get("thankYouDisplay") or "toast",
+                    "celebrationEnabled": bool(data.get("celebration_enabled") if data.get("celebration_enabled") is not None else data.get("celebrationEnabled")),
                     "redirect": _json_or(data.get("redirect"), {}) or {},
                     "emailValidationEnabled": bool(data.get("email_validation_enabled") if data.get("email_validation_enabled") is not None else data.get("emailValidationEnabled")),
                     "professionalEmailsOnly": bool(data.get("professional_emails_only") if data.get("professional_emails_only") is not None else data.get("professionalEmailsOnly")),
@@ -2281,6 +2283,24 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             params["duplicate_window_hours"] = dwh
     except Exception:
         pass
+
+    # Thank you page settings
+    thank_you_display = payload.get("thankYouDisplay") or payload.get("thank_you_display")
+    if isinstance(thank_you_display, str) and thank_you_display.strip():
+        sets.append("thank_you_display = :thank_you_display")
+        params["thank_you_display"] = thank_you_display.strip().lower()
+    
+    thank_you_message = payload.get("thankYouMessage") or payload.get("thank_you_message")
+    if isinstance(thank_you_message, str):
+        sets.append("thank_you_message = :thank_you_message")
+        params["thank_you_message"] = thank_you_message.strip()
+    
+    celebration_enabled = payload.get("celebrationEnabled")
+    if celebration_enabled is None:
+        celebration_enabled = payload.get("celebration_enabled")
+    if isinstance(celebration_enabled, bool):
+        sets.append("celebration_enabled = :celebration_enabled")
+        params["celebration_enabled"] = celebration_enabled
 
     # Branding: persist JSON and translate removePoweredBy -> show_powered_by
     # Also accept explicit showPoweredBy/show_powered_by at top-level

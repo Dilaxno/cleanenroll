@@ -39,6 +39,23 @@ def _verify_firebase_uid(request: Request) -> str:
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+
+async def _is_pro_plan(user_id: str) -> bool:
+    """Check if user has Pro, Business, or Enterprise plan access."""
+    if not user_id:
+        return False
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text("SELECT plan FROM users WHERE uid = :uid OR id = :uid LIMIT 1"),
+                {"uid": user_id},
+            )
+            row = res.mappings().first()
+            plan = str((row or {}).get("plan") or "").lower()
+            return plan in ("pro", "business", "enterprise")
+    except Exception:
+        return False
+
 class LiveVisitorPayload(BaseModel):
     sessionId: str
     action: Literal['enter', 'heartbeat', 'exit', 'field_focus']
@@ -338,6 +355,14 @@ async def get_live_visitors(form_id: str, request: Request):
     try:
         # Verify user authentication
         user_id = _verify_firebase_uid(request)
+        
+        # Check if user has Pro plan access
+        is_pro = await _is_pro_plan(user_id)
+        if not is_pro:
+            raise HTTPException(
+                status_code=403, 
+                detail="Live Visitors feature is only available for Pro, Business, and Enterprise plans. Please upgrade your plan to access this feature."
+            )
         
         # Consider visitors active if last_seen within 30 seconds
         # Pass datetime object, not ISO string, for asyncpg

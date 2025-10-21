@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from typing import Dict, Optional
 from sqlalchemy import text
 import dns.resolver
-from backend.db.database import async_session_maker
+from db.database import async_session_maker  # type: ignore
 
 router = APIRouter()
 

@@ -91,8 +91,10 @@ except Exception:
     _DBIPCITY_AVAILABLE = False
 
 GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY") or ""
+IPINFO_API_TOKEN = os.getenv("IPINFO_API_TOKEN") or ""
 _GEOAPIFY_AVAILABLE = bool(GEOAPIFY_API_KEY)
-_GEO_LOOKUP_AVAILABLE = bool(_GEOAPIFY_AVAILABLE or _DBIPCITY_AVAILABLE)
+_IPINFO_AVAILABLE = bool(IPINFO_API_TOKEN)
+_GEO_LOOKUP_AVAILABLE = bool(_IPINFO_AVAILABLE or _GEOAPIFY_AVAILABLE or _DBIPCITY_AVAILABLE)
 
 # Firestore (optional for legacy mirroring)
 try:
@@ -106,7 +108,7 @@ except Exception:
 logger = logging.getLogger("backend.builder")
 # Log geo lookup availability at import time
 try:
-    logger.info("geo: providers geoapify=%s dbipcity=%s", _GEOAPIFY_AVAILABLE, _DBIPCITY_AVAILABLE)
+    logger.info("geo: providers ipinfo=%s geoapify=%s dbipcity=%s", _IPINFO_AVAILABLE, _GEOAPIFY_AVAILABLE, _DBIPCITY_AVAILABLE)
     if not _GEO_LOOKUP_AVAILABLE:
         logger.warning("geo: no geolocation provider available; country/lat/lon enrichment disabled")
 except Exception:
@@ -1557,7 +1559,33 @@ def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
     if not ip:
         logger.debug("geo: _country_from_ip skipped ip=%s", ip)
         return False, None
-    # Prefer Geoapify when configured
+    
+    # Skip localhost/private IPs
+    if ip in ('127.0.0.1', 'localhost') or ip.startswith('192.168.') or ip.startswith('10.') or ip.startswith('172.'):
+        logger.debug("geo: _country_from_ip skipped private ip=%s", ip)
+        return False, None
+    
+    # Primary: IPinfo.io (matches live_visitors.py implementation)
+    if _IPINFO_AVAILABLE:
+        try:
+            url = f"https://ipinfo.io/{ip}/json?token={IPINFO_API_TOKEN}"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "CleanEnroll/1.0 (+https://cleanenroll.com)",
+                "Accept": "application/json",
+            })
+            with urllib.request.urlopen(req, timeout=6) as resp:  # type: ignore
+                raw = resp.read().decode("utf-8", errors="ignore")
+            data = json.loads(raw) if raw else {}
+            # IPinfo returns 'country' field with ISO-2 code
+            country = data.get("country") or data.get("country_code")
+            cc = (str(country or "").strip().upper() or None)
+            logger.debug("geo: _country_from_ip (ipinfo) ip=%s country=%s", ip, cc)
+            return (cc is not None), cc
+        except Exception as e:
+            logger.warning("geo: _country_from_ip ipinfo failed ip=%s err=%s", ip, e)
+            # fallthrough to fallback
+    
+    # Fallback 1: Geoapify when configured
     if _GEOAPIFY_AVAILABLE:
         try:
             url = (
@@ -1587,7 +1615,8 @@ def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
         except Exception as e:
             logger.warning("geo: _country_from_ip geoapify failed ip=%s err=%s", ip, e)
             # fallthrough to fallback
-    # Fallback: DbIpCity when importable
+    
+    # Fallback 2: DbIpCity when importable
     if DbIpCity is not None:
         try:
             result = DbIpCity.get(ip, api_key="free")  # type: ignore

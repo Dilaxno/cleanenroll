@@ -3220,23 +3220,31 @@ async def check_geo_restriction(form_id: str, request: Request):
         restricted = _normalize_country_list(form_data.get("restrictedCountries") or []) if is_pro else []
         
         if allowed or restricted:
-            _, country = _country_from_ip(ip)
+            detected, country = _country_from_ip(ip)
             
-            # Allowed whitelist takes precedence
-            if allowed:
-                if country and country not in allowed:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Your IP location is restricted from submitting the form. We're sorry about that"
-                    )
+            # If country detection failed and restrictions are enabled, block (fail closed for security)
+            if not detected or not country:
+                logger.warning("geo: country detection failed for ip=%s in preview, blocking due to active restrictions", ip)
+                raise HTTPException(
+                    status_code=403,
+                    detail="We're sorry, but submissions from your country are currently restricted due to regional limitations."
+                )
             
-            # Check restricted list
-            if restricted:
-                if country and country in restricted:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Your IP location is restricted from submitting the form. We're sorry about that"
-                    )
+            # Check allowed countries (whitelist)
+            if allowed and country not in allowed:
+                logger.info("geo: blocked preview for %s (not in allowed list)", country)
+                raise HTTPException(
+                    status_code=403,
+                    detail="We're sorry, but submissions from your country are currently restricted due to regional limitations."
+                )
+            
+            # Check restricted countries (blacklist)
+            if restricted and country in restricted:
+                logger.info("geo: blocked preview for %s (in restricted list)", country)
+                raise HTTPException(
+                    status_code=403,
+                    detail="We're sorry, but submissions from your country are currently restricted due to regional limitations."
+                )
         
         return {"ok": True, "message": "Access allowed"}
         
@@ -3402,13 +3410,22 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     # Geo restriction enforcement (allowed whitelist takes precedence when provided)
     allowed = _normalize_country_list(form_data.get("allowedCountries") or []) if is_pro else []
     restricted = _normalize_country_list(form_data.get("restrictedCountries") or []) if is_pro else []
-    if allowed:
-        _, country = _country_from_ip(ip)
-        if country and country not in allowed:
+    if allowed or restricted:
+        detected, country = _country_from_ip(ip)
+        
+        # If country detection failed and restrictions are enabled, block (fail closed for security)
+        if not detected or not country:
+            logger.warning("geo: country detection failed for ip=%s, blocking due to active restrictions", ip)
             raise HTTPException(status_code=403, detail="We're sorry, but submissions from your country are currently restricted due to regional limitations.")
-    if restricted:
-        _, country = _country_from_ip(ip)
-        if country and country in restricted:
+        
+        # Check allowed countries (whitelist)
+        if allowed and country not in allowed:
+            logger.info("geo: blocked submission from %s (not in allowed list)", country)
+            raise HTTPException(status_code=403, detail="We're sorry, but submissions from your country are currently restricted due to regional limitations.")
+        
+        # Check restricted countries (blacklist)
+        if restricted and country in restricted:
+            logger.info("geo: blocked submission from %s (in restricted list)", country)
             raise HTTPException(status_code=403, detail="We're sorry, but submissions from your country are currently restricted due to regional limitations.")
 
     # Enforce role-based email block (server-side) even if client validation is bypassed

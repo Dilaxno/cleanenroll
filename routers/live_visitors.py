@@ -48,7 +48,7 @@ async def _is_pro_plan(user_id: str) -> bool:
     try:
         async with async_session_maker() as session:
             res = await session.execute(
-                text("SELECT plan FROM users WHERE uid = :uid OR id = :uid LIMIT 1"),
+                text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"),
                 {"uid": user_id},
             )
             row = res.mappings().first()

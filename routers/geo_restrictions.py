@@ -18,18 +18,29 @@ except Exception:
     DbIpCity = None  # type: ignore
     _DBIPCITY_AVAILABLE = False
 
+# MaxMind GeoIP2 database support
+try:
+    import maxminddb
+    _MAXMIND_AVAILABLE = True
+except Exception:
+    maxminddb = None  # type: ignore
+    _MAXMIND_AVAILABLE = False
+
 GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY") or ""
 IPINFO_API_TOKEN = os.getenv("IPINFO_API_TOKEN") or ""
+GEOIP_DB_PATH = os.getenv("GEOIP_DB_PATH") or ""
+
 _GEOAPIFY_AVAILABLE = bool(GEOAPIFY_API_KEY)
 _IPINFO_AVAILABLE = bool(IPINFO_API_TOKEN)
-_GEO_LOOKUP_AVAILABLE = bool(_IPINFO_AVAILABLE or _GEOAPIFY_AVAILABLE or _DBIPCITY_AVAILABLE)
+_GEOIP2_AVAILABLE = bool(_MAXMIND_AVAILABLE and GEOIP_DB_PATH)
+_GEO_LOOKUP_AVAILABLE = bool(_GEOIP2_AVAILABLE or _IPINFO_AVAILABLE or _GEOAPIFY_AVAILABLE or _DBIPCITY_AVAILABLE)
 
 # Logger
 logger = logging.getLogger("backend.geo_restrictions")
 
 # Log geo lookup availability at import time
 try:
-    logger.info("geo: providers ipinfo=%s geoapify=%s dbipcity=%s", _IPINFO_AVAILABLE, _GEOAPIFY_AVAILABLE, _DBIPCITY_AVAILABLE)
+    logger.info("geo: providers geoip2=%s (path=%s) ipinfo=%s geoapify=%s dbipcity=%s", _GEOIP2_AVAILABLE, GEOIP_DB_PATH or 'none', _IPINFO_AVAILABLE, _GEOAPIFY_AVAILABLE, _DBIPCITY_AVAILABLE)
     if not _GEO_LOOKUP_AVAILABLE:
         logger.warning("geo: no geolocation provider available; country/lat/lon enrichment disabled")
 except Exception:
@@ -72,7 +83,39 @@ def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
         logger.debug("geo: _country_from_ip skipped private ip=%s", ip)
         return False, None
     
-    # Primary: IPinfo.io (matches live_visitors.py implementation)
+    # Primary: GeoIP2/MaxMind local database (fastest, no API calls)
+    if _GEOIP2_AVAILABLE and maxminddb:
+        try:
+            # Handle tar.gz path - extract to get .mmdb file
+            db_path = GEOIP_DB_PATH
+            if db_path.endswith('.tar.gz'):
+                # Look for extracted .mmdb file in same directory or common locations
+                import pathlib
+                base_dir = pathlib.Path(db_path).parent
+                # Try common paths
+                possible_paths = [
+                    base_dir / 'GeoLite2-City.mmdb',
+                    pathlib.Path('data/geoip/GeoLite2-City.mmdb'),
+                    pathlib.Path('/home/deployer/cleanenroll/data/geoip/GeoLite2-City.mmdb'),
+                ]
+                for path in possible_paths:
+                    if path.exists():
+                        db_path = str(path)
+                        break
+            
+            with maxminddb.open_database(db_path) as reader:
+                result = reader.get(ip)
+                if result and 'country' in result:
+                    country_code = result['country'].get('iso_code')
+                    if country_code:
+                        cc = str(country_code).strip().upper()
+                        logger.debug("geo: _country_from_ip (geoip2) ip=%s country=%s", ip, cc)
+                        return True, cc
+        except Exception as e:
+            logger.warning("geo: _country_from_ip geoip2 failed ip=%s err=%s", ip, e)
+            # fallthrough to fallback
+    
+    # Fallback 1: IPinfo.io
     if _IPINFO_AVAILABLE:
         try:
             url = f"https://ipinfo.io/{ip}/json?token={IPINFO_API_TOKEN}"

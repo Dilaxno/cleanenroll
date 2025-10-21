@@ -8,6 +8,8 @@ dnspython>=2.6.1
 
 # ip2geotools kept as fallback; remove if you fully deprecate it
 ip2geotools>=0.1.6
+# MaxMind GeoIP2 database reader for local GeoLite2 lookups
+maxminddb>=2.6.2
 firebase-admin>=6.5.0
 Jinja2>=3.1.4
 bleach>=6.1.0

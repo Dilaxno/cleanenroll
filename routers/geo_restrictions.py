@@ -182,7 +182,7 @@ def _country_from_ip(ip: str) -> Tuple[bool, Optional[str]]:
 # Endpoints
 # -----------------------------
 
-@router.get("/forms/{form_id}/geo-check")
+@router.get("/builder/forms/{form_id}/geo-check")
 async def check_geo_restriction(form_id: str, request: Request):
     """Check if the visitor's country is allowed to view/submit the form.
     Returns 200 if allowed, 403 if restricted.

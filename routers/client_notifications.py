@@ -193,7 +193,7 @@ async def send_auto_reply_email(
         return False
 
 
-@router.post("/forms/{form_id}/notify-client")
+@router.post("/builder/forms/{form_id}/notify-client")
 @limiter.limit("60/minute")
 async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] | None = None):
     """Send a client notification email for a form.

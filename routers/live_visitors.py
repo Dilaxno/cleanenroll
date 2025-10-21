@@ -41,8 +41,9 @@ def _verify_firebase_uid(request: Request) -> str:
 
 
 async def _is_pro_plan(user_id: str) -> bool:
-    """Check if user has Pro, Business, or Enterprise plan access."""
+    """Check if user has Pro plan access."""
     if not user_id:
+        print(f"[LiveVisitors] _is_pro_plan: No user_id provided")
         return False
     try:
         async with async_session_maker() as session:
@@ -51,9 +52,15 @@ async def _is_pro_plan(user_id: str) -> bool:
                 {"uid": user_id},
             )
             row = res.mappings().first()
-            plan = str((row or {}).get("plan") or "").lower()
-            return plan in ("pro", "business", "enterprise")
-    except Exception:
+            if not row:
+                print(f"[LiveVisitors] _is_pro_plan: No user found for uid={user_id}")
+                return False
+            plan = str((row or {}).get("plan") or "").lower().strip()
+            is_pro = plan == "pro"
+            print(f"[LiveVisitors] _is_pro_plan: uid={user_id}, plan={plan}, is_pro={is_pro}")
+            return is_pro
+    except Exception as e:
+        print(f"[LiveVisitors] _is_pro_plan error: {e}")
         return False
 
 class LiveVisitorPayload(BaseModel):
@@ -363,7 +370,7 @@ async def get_live_visitors(form_id: str, request: Request):
         if not is_pro:
             raise HTTPException(
                 status_code=403, 
-                detail="Live Visitors feature is only available for Pro, Business, and Enterprise plans. Please upgrade your plan to access this feature."
+                detail="Live Visitors feature is only available for Pro plan users. Please upgrade your plan to access this feature."
             )
         
         # Consider visitors active if last_seen within 30 seconds

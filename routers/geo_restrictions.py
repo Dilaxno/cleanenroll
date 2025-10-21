@@ -220,8 +220,9 @@ async def check_geo_restriction(form_id: str, request: Request):
         
         # Get client IP and check restrictions
         ip = _client_ip(request)
-        allowed = _normalize_country_list(form_data.get("allowedCountries") or []) if is_pro else []
-        restricted = _normalize_country_list(form_data.get("restrictedCountries") or []) if is_pro else []
+        # Database uses snake_case (restricted_countries, allowed_countries)
+        allowed = _normalize_country_list(form_data.get("allowed_countries") or []) if is_pro else []
+        restricted = _normalize_country_list(form_data.get("restricted_countries") or []) if is_pro else []
         
         if allowed or restricted:
             detected, country = _country_from_ip(ip)

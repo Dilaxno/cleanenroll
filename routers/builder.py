@@ -3167,30 +3167,36 @@ async def delete_custom_font(request: Request, font_id: str):
     
     try:
         async with async_session_maker() as session:
-            # Get font info
+            # Get font info first to verify it exists
             result = await session.execute(
                 text("""
-                    SELECT font_url FROM custom_fonts
+                    SELECT id, font_name, font_url FROM custom_fonts
                     WHERE id = :fid AND user_id = :uid
                 """),
                 {"fid": font_id, "uid": uid}
             )
             row = result.mappings().first()
             if not row:
+                logger.warning(f"Font {font_id} not found for user {uid}")
                 raise HTTPException(status_code=404, detail="Font not found")
             
+            logger.info(f"Deleting font {font_id} ({row.get('font_name')}) for user {uid}")
+            
             # Delete from database
-            await session.execute(
+            delete_result = await session.execute(
                 text("DELETE FROM custom_fonts WHERE id = :fid AND user_id = :uid"),
                 {"fid": font_id, "uid": uid}
             )
+            rows_deleted = delete_result.rowcount
             await session.commit()
+            
+            logger.info(f"Font {font_id} deleted successfully. Rows affected: {rows_deleted}")
             
             # Optional: Delete from R2 (commented out to preserve files)
             # font_url = row.get("font_url")
             # Extract key from URL and delete from R2
             
-            return {"success": True, "message": "Font deleted"}
+            return {"success": True, "message": "Font deleted", "rowsDeleted": rows_deleted}
     except HTTPException:
         raise
     except Exception as e:

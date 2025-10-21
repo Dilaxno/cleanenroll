@@ -2104,18 +2104,14 @@ async def public_get_form(form_id: str):
                     "passwordHash": data.get("password_hash") or data.get("passwordHash"),
                     "preventDuplicateByIP": bool(data.get("prevent_duplicate_by_ip") if data.get("prevent_duplicate_by_ip") is not None else data.get("preventDuplicateByIP")),
                     "duplicateWindowHours": int(data.get("duplicate_window_hours") or data.get("duplicateWindowHours") or 24),
-                    "restrictedCountries": _json_or(data.get("restricted_countries"), []) or [],
-                    "allowedCountries": _json_or(data.get("allowed_countries"), []) or [],
-                    "submitButton": _json_or(data.get("submit_button"), {}) or {},
-                    "showTopProgress": bool(data.get("show_top_progress") if data.get("show_top_progress") is not None else data.get("showTopProgress")),
-                    "showKeyboardHints": bool(data.get("show_keyboard_hints") if data.get("show_keyboard_hints") is not None else data.get("showKeyboardHints")),
-                    "sessionRecordingEnabled": True if data.get("session_recording_enabled") is None and data.get("sessionRecordingEnabled") is None else bool(data.get("session_recording_enabled") if data.get("session_recording_enabled") is not None else data.get("sessionRecordingEnabled")),
+                    "restrictedCountries": _json_or(data.get("restricted_countries"), data.get("restrictedCountries") or []) or [],
+                    "allowedCountries": _json_or(data.get("allowed_countries"), data.get("allowedCountries") or []) or [],
                     "isPublished": bool(data.get("is_published") if data.get("is_published") is not None else data.get("isPublished")),
                     "formType": data.get("formType") or data.get("form_type") or "simple",
                     # Large JSON blobs already normalized above
                     "theme": data.get("theme") or {},
-                    "branding": _json_or(data.get("branding"), {}) or {},
-                    "fields": _json_or(data.get("fields"), []) or [],
+                    "branding": _json_or(data.get("branding"), data.get("branding") or {}) or {},
+                    "fields": _json_or(data.get("fields"), data.get("fields") or []) or [],
                 }
                 return out
             except Exception:
@@ -2145,14 +2141,9 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     title = payload.get("title")
     subtitle = payload.get("subtitle")
     description = payload.get("description")
-    language = payload.get("language")
     theme = payload.get("theme")
     branding = payload.get("branding")
     redirect_cfg = payload.get("redirect")
-    submit_button = payload.get("submitButton") or payload.get("submit_button")
-    show_top_progress = payload.get("showTopProgress") or payload.get("show_top_progress")
-    show_keyboard_hints = payload.get("showKeyboardHints") or payload.get("show_keyboard_hints")
-    session_recording_enabled = payload.get("sessionRecordingEnabled") or payload.get("session_recording_enabled")
     # Spam/GDPR flags and geo restrictions
     recaptcha_enabled = payload.get("recaptchaEnabled")
     gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
@@ -2187,24 +2178,6 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     if isinstance(description, str):
         sets.append("description = :description")
         params["description"] = description.strip()
-    if isinstance(language, str) and language.strip():
-        sets.append("language = :language")
-        params["language"] = language.strip()
-    if isinstance(submit_button, dict):
-        try:
-            sets.append("submit_button = CAST(:submit_button AS JSONB)")
-            params["submit_button"] = json.dumps(submit_button)
-        except Exception:
-            pass
-    if isinstance(show_top_progress, bool):
-        sets.append("show_top_progress = :show_top_progress")
-        params["show_top_progress"] = show_top_progress
-    if isinstance(show_keyboard_hints, bool):
-        sets.append("show_keyboard_hints = :show_keyboard_hints")
-        params["show_keyboard_hints"] = show_keyboard_hints
-    if isinstance(session_recording_enabled, bool):
-        sets.append("session_recording_enabled = :session_recording_enabled")
-        params["session_recording_enabled"] = session_recording_enabled
     if isinstance(redirect_cfg, dict):
         # Expect shape { enabled: bool, url: str }
         try:

@@ -3133,6 +3133,58 @@ async def update_theme_split_image(request: Request, form_id: str, payload: Dict
     return {"ok": True, "publicUrl": url}
 
 
+@router.post("/forms/{form_id}/sessions/{session_id}/finalize")
+@limiter.limit("60/minute")
+async def finalize_session(form_id: str, session_id: str, request: Request, payload: Dict[str, Any] | None = None):
+    """Finalize a session recording by storing R2 URL and metadata.
+    Body: { r2Url?: string, recordingName?: string, duration?: number, country?: string }
+    Returns: { ok: true }
+    """
+    payload = payload or {}
+    r2_url = (payload.get("r2Url") or "").strip() or None
+    recording_name = (payload.get("recordingName") or "").strip() or None
+    duration = payload.get("duration")
+    country = (payload.get("country") or "").strip().upper() or None
+    
+    # Convert duration to int if provided
+    if duration is not None:
+        try:
+            duration = int(duration)
+        except (ValueError, TypeError):
+            duration = None
+    
+    try:
+        async with async_session_maker() as session:
+            # Upsert into sessions table
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO sessions (id, form_id, r2_url, recording_name, duration, country_code, created_at)
+                    VALUES (:sid, :fid, :r2_url, :rec_name, :dur, :country, NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        r2_url = COALESCE(EXCLUDED.r2_url, sessions.r2_url),
+                        recording_name = COALESCE(EXCLUDED.recording_name, sessions.recording_name),
+                        duration = COALESCE(EXCLUDED.duration, sessions.duration),
+                        country_code = COALESCE(EXCLUDED.country_code, sessions.country_code)
+                    """
+                ),
+                {
+                    "sid": session_id,
+                    "fid": form_id,
+                    "r2_url": r2_url,
+                    "rec_name": recording_name,
+                    "dur": duration,
+                    "country": country
+                }
+            )
+            await session.commit()
+        
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("finalize_session failed form_id=%s session_id=%s", form_id, session_id)
+        raise HTTPException(status_code=500, detail="Failed to finalize session")
+
+
 @router.post("/forms/{form_id}/submit")
 @limiter.limit("5/minute")
 async def submit_form(form_id: str, request: Request, payload: Dict = None):

@@ -42,6 +42,9 @@ except Exception:
 # Owner email notifications
 from routers.owner_notifications import get_owner_email, send_owner_notification
 
+# Client email notifications (auto-reply/thank you emails)
+from routers.client_notifications import send_auto_reply_email
+
 # Email integrations: encryption and sending
 from cryptography.fernet import Fernet
 import base64
@@ -2813,71 +2816,6 @@ async def verify_recaptcha_endpoint(request: Request, payload: Dict[str, Any] | 
 # Upload presign endpoints for R2 + theme updates persisted to Neon
 # -----------------------------
 
-@router.post("/forms/{form_id}/notify-client")
-@limiter.limit("60/minute")
-async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] | None = None):
-    """Send a client notification email for a form.
-
-    Body: { to: string, subject?: string, html?: string, text?: string, fullName?: string }
-    If subject/html are omitted, falls back to form auto-reply config.
-    """
-    payload = payload or {}
-    # Accept several ways to specify recipient
-    to_raw = str(payload.get("to") or payload.get("email") or "").strip()
-    subject = str(payload.get("subject") or "").strip()
-    html = str(payload.get("html") or "").strip()
-    text_fallback = str(payload.get("text") or "").strip()
-    full_name = str(payload.get("fullName") or "").strip()
-
-    # If direct recipient not provided, try to derive from submission values using fieldId or form config
-    if not to_raw:
-        raise HTTPException(status_code=400, detail="Recipient email is required.")
-
-    if not subject:
-        subject = "Notification"
-    if not html:
-        if text_fallback:
-            html = f"<pre style='white-space: pre-wrap; font-family: sans-serif;'>{text_fallback}</pre>"
-        else:
-            html = "<p>You have a new notification.</p>"
-    
-    # Validate email format
-    try:
-        _validate_email(to_raw, allow_smtputf8=True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid email address")
-
-    # If subject/html not provided, attempt to load from form auto-reply config
-    if not subject or not html:
-        try:
-            async with async_session_maker() as session:
-                res = await session.execute(
-                    text(
-                        """
-                        SELECT title, auto_reply_enabled, auto_reply_subject, auto_reply_message_html
-                        FROM forms
-                        WHERE id = :fid
-                        LIMIT 1
-                        """
-                    ),
-                    {"fid": form_id},
-                )
-                row = res.mappings().first()
-                if row and bool(row.get("auto_reply_enabled")):
-                    if not subject:
-                        subject = str(row.get("auto_reply_subject") or "Thank you for your submission").strip()
-                    if not html:
-                        html = str(row.get("auto_reply_message_html") or "").strip()
-        except Exception:
-            # best-effort; continue
-            pass
-
-    try:
-        send_email_html(to_raw, subject, html)
-        return {"ok": True}
-    except Exception as e:
-        logger.exception("notify_client failed form_id=%s to=%s", form_id, to_raw)
-        raise HTTPException(status_code=500, detail=f"Failed to send: {e}")
 
 def _ext_from_name_and_type(filename: Optional[str], content_type: Optional[str]) -> str:
     try:
@@ -4279,86 +4217,12 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     except Exception:
         pass
 
-    # Auto-reply to client from connected email integration (if configured)
+    # Auto-reply thank you email to submitter (if configured)
     try:
-        owner_id = str(form_data.get("userId") or "").strip() or None
-        cfg = form_data or {}
-        if owner_id and bool(cfg.get("autoReplyEnabled")):
-            target_id = (cfg.get("autoReplyEmailFieldId") or "").strip()
-            if target_id and isinstance(payload, dict):
-                to_val = payload.get(target_id)
-                if isinstance(to_val, list) and to_val:
-                    to_email = str(to_val[0] or "").strip()
-                else:
-                    to_email = str(to_val or "").strip()
-                # Validate basic email syntax
-                try:
-                    if to_email:
-                        _validate_email(to_email, check_deliverability=False)
-                    else:
-                        to_email = ""
-                except Exception:
-                    to_email = ""
-                if to_email:
-                    # Personalize subject/body with simple tokens
-                    subject_tpl = (cfg.get("autoReplySubject") or "Thank you for your submission").strip()
-                    body_tpl = (cfg.get("autoReplyMessageHtml") or "").strip()
-                    # Derive identity fields
-                    first_name = ""
-                    full_name = ""
-                    try:
-                        fields_def = cfg.get("fields") or []
-                        name_field = next((f for f in fields_def if (str(f.get("type")) == "full-name") or ("name" in str(f.get("label", "")).lower())), None)
-                        if name_field:
-                            full_name = str(payload.get(name_field.get("id")) or "").strip()
-                            if full_name:
-                                parts = full_name.split()
-                                first_name = parts[0] if parts else ""
-                    except Exception:
-                        pass
-                    tokens = {
-                        "@first_name": first_name,
-                        "@full_name": full_name,
-                        "@email": to_email,
-                        "@form_title": str(cfg.get("title") or "Form"),
-                    }
-                    def _apply_tokens(s: str) -> str:
-                        out = s or ""
-                        for k, v in tokens.items():
-                            out = out.replace(k, v or "")
-                        return out
-                    subject = _apply_tokens(subject_tpl)
-                    content_html = _apply_tokens(body_tpl)
-                    # Include optional footer and Google Font
-                    font_href = (cfg.get("theme") or {}).get("fontUrl") or None
-                    font_family = (cfg.get("theme") or {}).get("fontFamily") or None
-                    footer_html = (cfg.get("autoReplyFooterHtml") or "").strip() or None
-                    # Render user-facing client email with unbranded client template, not the app's internal base.html
-                    html = render_email("client_base.html", {
-                        "subject": subject,
-                        "title": subject,
-                        "preheader": None,
-                        "intro": None,
-                        "content_html": content_html,
-                        "footer_html": footer_html,
-                        "font_href": font_href,
-                        "font_family": font_family,
-                        # Optional brand pass-through from form branding
-                        "brand_logo": ((cfg.get("branding") or {}).get("logo") or None),
-                        "brand_name": (cfg.get("title") or "")
-                    })
-                    try:
-                        # Try user's connected integration first; if not configured or fails, fall back to default SMTP
-                        try:
-                            sent_via_integration = _send_email_via_integration(owner_id, to_email, subject, html)
-                        except Exception:
-                            sent_via_integration = False
-                        if not sent_via_integration:
-                            send_email_html(to_email, subject, html)
-                    except Exception:
-                        logger.exception("client auto-reply failed form_id=%s", form_id)
-    except Exception:
-        logger.exception("auto-reply send failed form_id=%s", form_id)
+        owner_id_for_email = str(form_data.get("user_id") or "").strip() or None
+        await send_auto_reply_email(form_data, payload, owner_id_for_email)
+    except Exception as e:
+        logger.exception("Auto-reply send failed form_id=%s: %s", form_id, str(e))
 
     logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp

@@ -87,6 +87,7 @@ from routers.live_visitors import router as live_visitors_router  # type: ignore
 from routers.file_redirects import router as file_redirects_router  # type: ignore
 from routers.zoom import router as zoom_router  # type: ignore
 from routers.custom_domain import router as custom_domain_router  # type: ignore
+from routers.client_notifications import router as client_notifications_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -270,6 +271,7 @@ app.include_router(live_visitors_router)
 app.include_router(file_redirects_router)
 app.include_router(zoom_router)
 app.include_router(custom_domain_router, prefix="/api")
+app.include_router(client_notifications_router, prefix="/api")
 
 
 if __name__ == "__main__":

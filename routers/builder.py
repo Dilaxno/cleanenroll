@@ -391,6 +391,13 @@ async def analytics_events(request: Request, payload: Dict[str, Any] | None = No
     try:
         async with async_session_maker() as session:
             await _ensure_form_analytics_table(session)
+            
+            # Prepare common params
+            event_ts = ts or datetime.utcnow()
+            device_info_json = json.dumps(device_info) if isinstance(device_info, dict) else None
+            data_json = json.dumps(data) if isinstance(data, dict) else json.dumps({})
+            
+            # Insert into form_analytics_events (original table)
             await session.execute(
                 text(
                     """
@@ -404,14 +411,45 @@ async def analytics_events(request: Request, payload: Dict[str, Any] | None = No
                     "form_id": form_id,
                     "user_id": body.get("userId") or None,
                     "type": etype,
-                    "ts": ts or datetime.utcnow(),
+                    "ts": event_ts,
                     "session_id": session_id,
                     "visitor_id": visitor_id,
-                    "device_info": json.dumps(device_info) if isinstance(device_info, dict) else None,
-                    "data": json.dumps(data) if isinstance(data, dict) else json.dumps({}),
+                    "device_info": device_info_json,
+                    "data": data_json,
                     "ip": ip,
                 }
             )
+            
+            # Also insert into unified analytics table with all metrics
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO analytics (id, form_id, user_id, type, ts, session_id, visitor_id, device_info, data, ip_address, created_at)
+                    VALUES (:id, :form_id, :user_id, :type, :ts, :session_id, :visitor_id, CAST(:device_info AS JSONB), CAST(:data AS JSONB), :ip, NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
+                        session_id = EXCLUDED.session_id,
+                        visitor_id = EXCLUDED.visitor_id,
+                        device_info = EXCLUDED.device_info,
+                        data = EXCLUDED.data,
+                        ts = EXCLUDED.ts,
+                        ip_address = EXCLUDED.ip_address
+                    """
+                ),
+                {
+                    "id": eid,
+                    "form_id": form_id,
+                    "user_id": body.get("userId") or None,
+                    "type": etype,
+                    "ts": event_ts,
+                    "session_id": session_id,
+                    "visitor_id": visitor_id,
+                    "device_info": device_info_json,
+                    "data": data_json,
+                    "ip": ip,
+                }
+            )
+            
             await session.commit()
     except Exception:
         # Best effort only

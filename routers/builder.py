@@ -39,6 +39,9 @@ except Exception:
     _FILE_REDIRECTS_AVAILABLE = False  # type: ignore
     _PYSHORT_AVAILABLE = False
 
+# Owner email notifications
+from routers.owner_notifications import get_owner_email, send_owner_notification
+
 # Email integrations: encryption and sending
 from cryptography.fernet import Fernet
 import base64
@@ -3351,20 +3354,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         # Fetch owner email from Neon early (before transactions) to use for notifications later
         owner_id = str(form_data.get("userId") or "").strip() or None
         if owner_id:
-            try:
-                async with async_session_maker() as session:
-                    res = await session.execute(
-                        text("SELECT email FROM users WHERE uid = :uid LIMIT 1"),
-                        {"uid": owner_id}
-                    )
-                    row = res.mappings().first()
-                    if row and row.get("email"):
-                        em = str(row.get("email")).strip()
-                        if "@" in em:
-                            owner_email = em
-                            logger.debug("Fetched owner email for notifications owner_id=%s", owner_id)
-            except Exception as e:
-                logger.warning("Failed to fetch owner email owner_id=%s: %s", owner_id, str(e))
+            owner_email = await get_owner_email(owner_id)
         # Normalize JSON fields that may be stored as text
         for k in ("theme", "branding"):
             v = form_data.get(k)
@@ -4182,72 +4172,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     # Email notification to form owner (best-effort, using pre-fetched owner_email)
     try:
         if owner_email:
-            logger.info("Preparing owner email notification to=%s form_id=%s", owner_email, form_id)
-            form_title = str(form_data.get("title") or "Form").strip() or "Form"
-            subject = f"New submission — {form_title}"
-            preview = ""
-            try:
-                ans = record.get("answers") or {}
-                logger.debug("Building email preview from %d answers", len(ans))
-                # Map field ids to labels for human-readable output
-                label_by_id = {}
-                try:
-                    for f in (form_data.get("fields") or []):
-                        if isinstance(f, dict):
-                            fid = str(f.get("id") or "").strip()
-                            lab = str(f.get("label") or "").strip()
-                            if fid:
-                                label_by_id[fid] = lab or fid
-                except Exception:
-                    label_by_id = {}
-                parts = []
-                for k, v in list(ans.items())[:10]:
-                    try:
-                        label = label_by_id.get(str(k), str(k))
-                        if isinstance(v, str) and v.strip():
-                            val_preview = v.strip()[:140]
-                            parts.append(f"<p><strong>{label}:</strong> {val_preview}</p>")
-                        elif isinstance(v, list) and v:
-                            list_str = ", ".join(str(x) for x in v if x)
-                            if list_str:
-                                parts.append(f"<p><strong>{label}:</strong> {list_str[:140]}</p>")
-                    except Exception:
-                        continue
-                preview = "".join(parts)
-                logger.debug("Email preview built with %d field parts", len(parts))
-            except Exception as e:
-                logger.warning("Failed to build email preview: %s", str(e))
-                preview = ""
-            # If signatures are available, append thumbnails below the preview
-            try:
-                sigs = record.get("signatures") or {}
-            except Exception:
-                sigs = {}
-            sigs_html = ""
-            if isinstance(sigs, dict) and sigs:
-                items = []
-                for k, v in sigs.items():
-                    try:
-                        url = (v.get("pngUrl") or v.get("url") or v.get("pngDataUrl") or v.get("dataUrl") or "").strip()
-                        if url:
-                            safe = _normalize_bg_public_url(url) if url.startswith("http") else url
-                            link = _shorten_url(safe) if safe.startswith("http") else safe
-                            items.append(f"<div style='margin:6px 0'><div style='font-size:12px;color:#94a3b8'>Signature {k}</div><a href='{link}' target='_blank' rel='noopener noreferrer'><img src='{safe}' alt='Signature {k}' style='max-width:320px;border:1px solid #e5e7eb;border-radius:6px' /></a>" + (f"<div style='font-size:12px;color:#94a3b8;word-break:break-all'>{link}</div>" if link and isinstance(link, str) and link.startswith('http') else "") + "</div>")
-                    except Exception:
-                        continue
-                if items:
-                    sigs_html = "<div style='margin-top:12px'><div style='font-weight:600;margin-bottom:6px'>Signatures</div>" + "".join(items) + "</div>"
-
-            html = render_email("base.html", {
-                "subject": subject,
-                "title": subject,
-                "intro": f"You received a new submission for {form_title}.",
-                "content_html": (preview or "<p>No preview available</p>") + sigs_html,
-                "preheader": f"New submission for {form_title}",
-            })
-            logger.info("Sending owner notification email to=%s subject=%s", owner_email, subject)
-            send_email_html(owner_email, subject, html)
-            logger.info("Owner notification email sent successfully to=%s form_id=%s", owner_email, form_id)
+            await send_owner_notification(owner_email, form_id, form_data, record)
         else:
             logger.warning("Owner email not available for notification form_id=%s owner_id=%s", form_id, str(form_data.get("userId") or ""))
     except Exception as e:

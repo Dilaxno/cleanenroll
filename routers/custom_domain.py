@@ -81,7 +81,6 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
                 SET custom_domain = :dom,
                     custom_domain_verified = TRUE,
                     ssl_verified = TRUE,
-                    serve_mode = 'proxy',
                     updated_at = NOW()
                 WHERE id = :fid
             """),
@@ -93,7 +92,6 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
         "verified": True,
         "domain": inbound_domain,
         "sslVerified": True,
-        "serveMode": "proxy",
         "mode": "caddy",
         "message": f"Domain {inbound_domain} verified and ready to serve directly via api.cleanenroll.com."
     }
@@ -152,7 +150,7 @@ async def get_cert_status(form_id: str):
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
-                SELECT custom_domain, custom_domain_verified, ssl_verified, serve_mode
+                SELECT custom_domain, custom_domain_verified, ssl_verified
                 FROM forms WHERE id = :fid LIMIT 1
             """),
             {"fid": form_id},
@@ -166,7 +164,6 @@ async def get_cert_status(form_id: str):
         "domain": row.get("custom_domain"),
         "verified": bool(row.get("custom_domain_verified")),
         "sslVerified": bool(row.get("ssl_verified")),
-        "serveMode": row.get("serve_mode") or "proxy",
         "mode": "caddy",
         "message": "SSL automatically managed by Caddy via api.cleanenroll.com."
     }
@@ -184,7 +181,7 @@ async def resolve_domain(hostname: str):
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
-                SELECT id, custom_domain, serve_mode
+                SELECT id, custom_domain
                 FROM forms
                 WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
                 LIMIT 1
@@ -199,6 +196,5 @@ async def resolve_domain(hostname: str):
     return {
         "formId": row.get("id"),
         "domain": row.get("custom_domain"),
-        "serveMode": row.get("serve_mode"),
         "message": "Form mapped successfully for custom domain."
     }        

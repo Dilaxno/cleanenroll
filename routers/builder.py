@@ -2973,52 +2973,125 @@ async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str
         await session.commit()
     return {"ok": True, "publicUrl": url}
 
-@router.post("/forms/{form_id}/theme/submit-button")
+
+@router.post("/forms/{form_id}/theme/submit-button-label")
 @limiter.limit("120/minute")
-async def update_theme_submit_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
-    """Persist submit button style (label, color, textColor) to Neon in forms.theme.submitButton."""
-    payload = payload or {}
-    label = str(payload.get("label") or "").strip()
-    color = str(payload.get("color") or "").strip() or None
-    text_color = str(payload.get("textColor") or "").strip() or None
-
-    def _is_hex(c: Optional[str]) -> bool:
-        try:
-            if not c:
-                return False
-            s = c.strip()
-            if not s.startswith("#"):
-                return False
-            h = s[1:]
-            return len(h) in (3, 6) and all(ch in "0123456789abcdefABCDEF" for ch in h)
-        except Exception:
-            return False
-
-    if color and not _is_hex(color):
-        raise HTTPException(status_code=400, detail="Invalid color hex")
-    if text_color and not _is_hex(text_color):
-        raise HTTPException(status_code=400, detail="Invalid textColor hex")
-
-    submit_button = {k: v for k, v in {
-        "label": label or None,
-        "color": color,
-        "textColor": text_color,
-    }.items() if v is not None}
-
+async def update_theme_submit_button_label(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist submit button label to Neon forms.theme.submitButtonLabel."""
+    label = str((payload or {}).get('label') or '').strip() or 'Submit'
     async with async_session_maker() as session:
         await session.execute(
             text(
                 """
                 UPDATE forms
-                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButton}', CAST(:btn AS JSONB), true),
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButtonLabel}', CAST(:label AS JSONB), true),
                     updated_at = NOW()
                 WHERE id = :fid
                 """
             ),
-            {"fid": form_id, "btn": json.dumps(submit_button or {})},
+            {"fid": form_id, "label": json.dumps(label)}
         )
         await session.commit()
-    return {"ok": True, "submitButton": submit_button}
+    return {"ok": True, "label": label}
+
+
+@router.post("/forms/{form_id}/theme/submit-button-color")
+@limiter.limit("120/minute")
+async def update_theme_submit_button_color(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist submit button background color to Neon forms.theme.submitButtonColor."""
+    color = str((payload or {}).get('color') or '').strip()
+    if not color or not color.startswith('#'):
+        raise HTTPException(status_code=400, detail="Invalid color hex")
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButtonColor}', CAST(:color AS JSONB), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "color": json.dumps(color)}
+        )
+        await session.commit()
+    return {"ok": True, "color": color}
+
+
+@router.post("/forms/{form_id}/theme/submit-button-text-color")
+@limiter.limit("120/minute")
+async def update_theme_submit_button_text_color(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist submit button text color to Neon forms.theme.submitButtonTextColor."""
+    text_color = str((payload or {}).get('textColor') or '').strip()
+    if not text_color or not text_color.startswith('#'):
+        raise HTTPException(status_code=400, detail="Invalid textColor hex")
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButtonTextColor}', CAST(:text_color AS JSONB), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "text_color": json.dumps(text_color)}
+        )
+        await session.commit()
+    return {"ok": True, "textColor": text_color}
+
+
+@router.post("/forms/{form_id}/theme/title-style")
+@limiter.limit("120/minute")
+async def update_theme_title_style(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist title style (bold, italic, level) to Neon forms.theme.titleStyle."""
+    payload = payload or {}
+    title_style = {
+        "bold": bool(payload.get('bold', True)),
+        "italic": bool(payload.get('italic', False)),
+        "level": max(1, min(6, int(payload.get('level', 1))))
+    }
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{titleStyle}', CAST(:style AS JSONB), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "style": json.dumps(title_style)}
+        )
+        await session.commit()
+    return {"ok": True, "titleStyle": title_style}
+
+
+@router.post("/forms/{form_id}/theme/subtitle-style")
+@limiter.limit("120/minute")
+async def update_theme_subtitle_style(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist subtitle style (bold, italic, level) to Neon forms.theme.subtitleStyle."""
+    payload = payload or {}
+    subtitle_style = {
+        "bold": bool(payload.get('bold', False)),
+        "italic": bool(payload.get('italic', False)),
+        "level": max(1, min(6, int(payload.get('level', 3))))
+    }
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{subtitleStyle}', CAST(:style AS JSONB), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "style": json.dumps(subtitle_style)}
+        )
+        await session.commit()
+    return {"ok": True, "subtitleStyle": subtitle_style}
+
 
 @router.post("/forms/{form_id}/auto-reply/config")
 @limiter.limit("60/minute")

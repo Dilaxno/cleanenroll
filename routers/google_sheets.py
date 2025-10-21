@@ -271,18 +271,27 @@ def callback(code: str = Query(None), state: str = Query("{}")):
 def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
-    # Simple connectivity status + mapping for a form if provided
+    # Simple connectivity status + mappings for a form if provided
     try:
         access, _, _ = _get_tokens(userId)
         connected = bool(access)
     except Exception:
         connected = False
-    mapping = None
+    mappings = []
+    sheet_count = 0
     if formId:
         data = _read_integration(userId)
         gs_map = (data.get("googleSheetsMappings") or {}) if isinstance(data, dict) else {}
-        mapping = gs_map.get(formId)
-    return {"connected": connected, "mapping": mapping}
+        # Support both old (single object) and new (array) format
+        form_sheets = gs_map.get(formId)
+        if isinstance(form_sheets, list):
+            mappings = form_sheets
+            sheet_count = len(form_sheets)
+        elif isinstance(form_sheets, dict):
+            # Legacy single mapping - convert to array
+            mappings = [form_sheets]
+            sheet_count = 1
+    return {"connected": connected, "mappings": mappings, "sheetCount": sheet_count}
 
 
 @router.post("/create")
@@ -291,6 +300,22 @@ async def create_sheet(userId: str = Query(...), formId: str = Query(...), paylo
         raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     if not isinstance(payload, dict):
         payload = {}
+    
+    # Check sheet limit (10 sheets per user across all forms)
+    data = _read_integration(userId)
+    if not isinstance(data, dict):
+        data = {}
+    gs_map = data.get("googleSheetsMappings") or {}
+    total_sheets = 0
+    for form_id, sheets_data in gs_map.items():
+        if isinstance(sheets_data, list):
+            total_sheets += len(sheets_data)
+        elif isinstance(sheets_data, dict):
+            total_sheets += 1
+    
+    if total_sheets >= 10:
+        raise HTTPException(status_code=400, detail="Sheet limit reached. You can create up to 10 Google Sheets total. Delete an existing sheet to create a new one.")
+    
     title = (payload.get("title") or "Form Submissions").strip() or "Form Submissions"
     sync_enabled = bool(payload.get("sync"))
 
@@ -344,8 +369,7 @@ async def create_sheet(userId: str = Query(...), formId: str = Query(...), paylo
     if r2.status_code not in (200, 201):
         logger.warning("Initial write failed: %s", r2.text)
 
-    # 3) Save mapping
-    # Save mapping to file
+    # 3) Save mapping (support multiple sheets per form)
     mapping_entry = {
         "spreadsheetId": spreadsheet_id,
         "sheetName": sheet_name,
@@ -353,6 +377,7 @@ async def create_sheet(userId: str = Query(...), formId: str = Query(...), paylo
         "fieldOrder": field_order,
         "synced": sync_enabled,
         "title": title,
+        "createdAt": int(time.time()),
     }
     data = _read_integration(userId)
     if not isinstance(data, dict):
@@ -360,7 +385,19 @@ async def create_sheet(userId: str = Query(...), formId: str = Query(...), paylo
     maps = data.get("googleSheetsMappings") or {}
     if not isinstance(maps, dict):
         maps = {}
-    maps[formId] = mapping_entry
+    
+    # Convert to array format if needed
+    existing = maps.get(formId)
+    if isinstance(existing, dict):
+        # Legacy single mapping - convert to array
+        maps[formId] = [existing, mapping_entry]
+    elif isinstance(existing, list):
+        # Already array - append
+        maps[formId] = existing + [mapping_entry]
+    else:
+        # First sheet for this form
+        maps[formId] = [mapping_entry]
+    
     data["googleSheetsMappings"] = maps
     _write_integration(userId, data)
 
@@ -393,25 +430,38 @@ def toggle_sync(userId: str = Query(...), formId: str = Query(...), payload: Dic
 
 @router.get("/mappings")
 def list_mappings(userId: str = Query(...)):
-    """Return all Google Sheets mappings created by this user (formId -> mapping)."""
+    """Return all Google Sheets mappings created by this user (formId -> array of sheets)."""
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
     data = _read_integration(userId)
     gs_map = (data.get("googleSheetsMappings") or {}) if isinstance(data, dict) else {}
     out: List[Dict[str, Any]] = []
-    for form_id, mapping in gs_map.items():
-        if not isinstance(mapping, dict):
-            continue
-        entry = {
-            "formId": form_id,
-            "title": mapping.get("title") or mapping.get("sheetName") or "Sheet",
-            "spreadsheetId": mapping.get("spreadsheetId"),
-            "sheetName": mapping.get("sheetName") or "Sheet1",
-            "synced": bool(mapping.get("synced")),
-            "url": (f"https://docs.google.com/spreadsheets/d/{mapping.get('spreadsheetId')}" if mapping.get("spreadsheetId") else None),
-        }
-        out.append(entry)
-    return {"mappings": out}
+    total_count = 0
+    
+    for form_id, sheets_data in gs_map.items():
+        # Support both old (single object) and new (array) format
+        sheets_list = []
+        if isinstance(sheets_data, list):
+            sheets_list = sheets_data
+        elif isinstance(sheets_data, dict):
+            sheets_list = [sheets_data]
+        
+        for mapping in sheets_list:
+            if not isinstance(mapping, dict):
+                continue
+            entry = {
+                "formId": form_id,
+                "title": mapping.get("title") or mapping.get("sheetName") or "Sheet",
+                "spreadsheetId": mapping.get("spreadsheetId"),
+                "sheetName": mapping.get("sheetName") or "Sheet1",
+                "synced": bool(mapping.get("synced")),
+                "createdAt": mapping.get("createdAt"),
+                "url": (f"https://docs.google.com/spreadsheets/d/{mapping.get('spreadsheetId')}" if mapping.get("spreadsheetId") else None),
+            }
+            out.append(entry)
+            total_count += 1
+    
+    return {"mappings": out, "totalCount": total_count, "limit": 10}
 
 
 @router.post("/disconnect")
@@ -432,18 +482,19 @@ def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str,
     try:
         if not _is_pro_plan(user_id):
             return
-        # load mapping
+        # load mappings (support multiple sheets)
         data = _read_integration(user_id)
         gs_map = (data.get("googleSheetsMappings") or {}) if isinstance(data, dict) else {}
-        mapping = gs_map.get(form_id)
-        if not mapping or not mapping.get("synced"):
-            return
-        spreadsheet_id = mapping.get("spreadsheetId")
-        sheet_name = mapping.get("sheetName") or "Sheet1"
-        field_order: List[str] = mapping.get("fieldOrder") or []
-        if not spreadsheet_id or not field_order:
-            return
-        # build row
+        sheets_data = gs_map.get(form_id)
+        
+        # Support both old (single object) and new (array) format
+        sheets_list = []
+        if isinstance(sheets_data, list):
+            sheets_list = sheets_data
+        elif isinstance(sheets_data, dict):
+            sheets_list = [sheets_data]
+        
+        # Append to all synced sheets for this form
         def _flatten(val: Any) -> str:
             if val is None:
                 return ""
@@ -455,14 +506,26 @@ def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str,
                 except Exception:
                     return str(val)
             return str(val)
+        
         answers = record.get("answers") or {}
-        row = [str(record.get("submittedAt") or "")] + [ _flatten(answers.get(fid)) for fid in field_order ]
-        rng = f"{sheet_name}!A1"
-        token = _get_valid_access_token(user_id)
-        url = f"{SHEETS_BASE}/{spreadsheet_id}/values/{requests.utils.quote(rng, safe='')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
-        body = {"range": rng, "majorDimension": "ROWS", "values": [row]}
-        r = requests.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, data=json.dumps(body), timeout=20)
-        if r.status_code not in (200, 201):
-            logger.warning("Append to Google Sheet failed: %s", r.text)
+        
+        for mapping in sheets_list:
+            if not mapping or not mapping.get("synced"):
+                continue
+            spreadsheet_id = mapping.get("spreadsheetId")
+            sheet_name = mapping.get("sheetName") or "Sheet1"
+            field_order: List[str] = mapping.get("fieldOrder") or []
+            if not spreadsheet_id or not field_order:
+                continue
+            
+            # Build row for this sheet
+            row = [str(record.get("submittedAt") or "")] + [ _flatten(answers.get(fid)) for fid in field_order ]
+            rng = f"{sheet_name}!A1"
+            token = _get_valid_access_token(user_id)
+            url = f"{SHEETS_BASE}/{spreadsheet_id}/values/{requests.utils.quote(rng, safe='')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+            body = {"range": rng, "majorDimension": "ROWS", "values": [row]}
+            r = requests.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, data=json.dumps(body), timeout=20)
+            if r.status_code not in (200, 201):
+                logger.warning("Append to Google Sheet failed for %s: %s", spreadsheet_id, r.text)
     except Exception:
         logger.exception("google_sheets append error form_id=%s", form_id)

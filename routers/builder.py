@@ -3268,7 +3268,7 @@ async def check_geo_restriction(form_id: str, request: Request):
         form_data = dict(row)
         
         # Check if user is pro (geo restrictions are pro feature)
-        user_id = str(form_data.get("userId") or "").strip() or None
+        user_id = str(form_data.get("user_id") or "").strip() or None
         is_pro = False
         if user_id:
             try:
@@ -3352,7 +3352,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         form_data = dict(row)
         
         # Fetch owner email from Neon early (before transactions) to use for notifications later
-        owner_id = str(form_data.get("userId") or "").strip() or None
+        owner_id = str(form_data.get("user_id") or "").strip() or None
         if owner_id:
             owner_email = await get_owner_email(owner_id)
         # Normalize JSON fields that may be stored as text
@@ -3388,7 +3388,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
         # Monthly per-user submissions limit for Free plans
         try:
-            owner_id = str(form_data.get("userId") or "").strip() or None
+            owner_id = str(form_data.get("user_id") or "").strip() or None
             if owner_id and not (await _is_pro_plan(owner_id)):
                 # Count current month's submissions for this owner in Neon
                 async with async_session_maker() as session:
@@ -3435,7 +3435,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
     # Determine if owner has Pro plan (fallback to Free if unknown)
     try:
-        owner_id = str(form_data.get("userId") or "").strip() or None
+        owner_id = str(form_data.get("user_id") or "").strip() or None
     except Exception:
         owner_id = None
     is_pro = await _is_pro_plan(owner_id)
@@ -4018,7 +4018,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
     # Geo enrich and insert into Neon in one transaction
     country_code, lat, lon = _geo_from_ip(ip)
-    owner_id = form_data.get("userId") or form_data.get("user_id")
+    owner_id = form_data.get("user_id")
     # Build metadata payload
     meta_payload: Dict[str, Any] = {
         "clientIp": ip,
@@ -4142,7 +4142,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             from routers.google_sheets import try_append_submission_for_form  # type: ignore
         except Exception:
             from routers.google_sheets import try_append_submission_for_form  # type: ignore
-        owner_id = str(form_data.get("userId") or "").strip() or None
+        owner_id = str(form_data.get("user_id") or "").strip() or None
         if owner_id:
             try_append_submission_for_form(owner_id, form_id, record)
     except Exception:
@@ -4153,7 +4153,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
         except Exception:
             from routers.airtable import try_append_submission_for_form as _airtable_append  # type: ignore
-        owner_id = str(form_data.get("userId") or "").strip() or None
+        owner_id = str(form_data.get("user_id") or "").strip() or None
         if owner_id:
             _airtable_append(owner_id, form_id, record)
     except Exception:
@@ -4164,7 +4164,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             from routers.slack import try_notify_slack_for_form  # type: ignore
         except Exception:
             from routers.slack import try_notify_slack_for_form  # type: ignore
-        owner_id = str(form_data.get("userId") or "").strip() or None
+        owner_id = str(form_data.get("user_id") or "").strip() or None
         if owner_id:
             try_notify_slack_for_form(owner_id, form_id, record)
     except Exception:
@@ -4174,7 +4174,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         if owner_email:
             await send_owner_notification(owner_email, form_id, form_data, record)
         else:
-            logger.warning("Owner email not available for notification form_id=%s owner_id=%s", form_id, str(form_data.get("userId") or ""))
+            logger.warning("Owner email not available for notification form_id=%s owner_id=%s", form_id, str(form_data.get("user_id") or ""))
     except Exception as e:
         logger.exception("owner email notify failed form_id=%s owner_email=%s error=%s", form_id, owner_email, str(e))
     # Server-side mirrors to Firestore for submissions, markers and notifications (no client writes)

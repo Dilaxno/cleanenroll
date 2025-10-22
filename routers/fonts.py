@@ -18,9 +18,11 @@ except Exception:
 
 # Database connection
 try:
-    from db.database import get_connection
+    from db.database import async_session_maker
 except Exception:
-    from db.database import get_connection
+    from db.database import async_session_maker
+
+from sqlalchemy import text
 
 # Firebase Admin for token verification
 try:
@@ -157,18 +159,22 @@ async def upload_font(
     font_display_name = font_name or filename.rsplit(".", 1)[0]
     
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO custom_fonts (id, user_id, font_name, font_url, font_format, file_size)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (font_id, uid, font_display_name, font_url, font_format, len(data))
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+        async with async_session_maker() as session:
+            await session.execute(
+                text("""
+                INSERT INTO custom_fonts (id, user_id, font_name, font_url, font_format, file_size)
+                VALUES (:id, :user_id, :font_name, :font_url, :font_format, :file_size)
+                """),
+                {
+                    "id": font_id,
+                    "user_id": uid,
+                    "font_name": font_display_name,
+                    "font_url": font_url,
+                    "font_format": font_format,
+                    "file_size": len(data)
+                }
+            )
+            await session.commit()
     except Exception as e:
         logger.exception("Database insert failed: %s", e)
         # Try to clean up R2 upload
@@ -195,33 +201,30 @@ async def list_fonts(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, font_name, font_url, font_format, file_size, created_at
-            FROM custom_fonts
-            WHERE user_id = %s
-            ORDER BY created_at DESC
-            """,
-            (uid,)
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        
-        fonts = []
-        for row in rows:
-            fonts.append(FontListItem(
-                id=row[0],
-                font_name=row[1],
-                font_url=row[2],
-                font_format=row[3],
-                file_size=row[4],
-                created_at=str(row[5])
-            ))
-        
-        return fonts
+        async with async_session_maker() as session:
+            result = await session.execute(
+                text("""
+                SELECT id, font_name, font_url, font_format, file_size, created_at
+                FROM custom_fonts
+                WHERE user_id = :user_id
+                ORDER BY created_at DESC
+                """),
+                {"user_id": uid}
+            )
+            rows = result.fetchall()
+            
+            fonts = []
+            for row in rows:
+                fonts.append(FontListItem(
+                    id=row[0],
+                    font_name=row[1],
+                    font_url=row[2],
+                    font_format=row[3],
+                    file_size=row[4],
+                    created_at=str(row[5])
+                ))
+            
+            return fonts
     except Exception as e:
         logger.exception("Failed to list fonts: %s", e)
         raise HTTPException(status_code=500, detail="Failed to list fonts")
@@ -235,31 +238,25 @@ async def delete_font(font_id: str, request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # Get font URL to extract R2 key
-        cursor.execute(
-            "SELECT font_url FROM custom_fonts WHERE id = %s AND user_id = %s",
-            (font_id, uid)
-        )
-        row = cursor.fetchone()
-        
-        if not row:
-            cursor.close()
-            conn.close()
-            raise HTTPException(status_code=404, detail="Font not found")
-        
-        font_url = row[0]
-        
-        # Delete from database
-        cursor.execute(
-            "DELETE FROM custom_fonts WHERE id = %s AND user_id = %s",
-            (font_id, uid)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+        async with async_session_maker() as session:
+            # Get font URL to extract R2 key
+            result = await session.execute(
+                text("SELECT font_url FROM custom_fonts WHERE id = :id AND user_id = :user_id"),
+                {"id": font_id, "user_id": uid}
+            )
+            row = result.fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Font not found")
+            
+            font_url = row[0]
+            
+            # Delete from database
+            await session.execute(
+                text("DELETE FROM custom_fonts WHERE id = :id AND user_id = :user_id"),
+                {"id": font_id, "user_id": uid}
+            )
+            await session.commit()
         
         # Try to delete from R2 (best effort)
         try:

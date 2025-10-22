@@ -338,6 +338,13 @@ def callback(
         logger.error(f"Airtable callback failed: PKCE verifier not found for user {user_id}")
         raise HTTPException(status_code=400, detail="PKCE verifier expired or not found. Please try connecting again.")
 
+    # Check credentials are loaded
+    if not AIRTABLE_CLIENT_ID or not AIRTABLE_CLIENT_SECRET:
+        logger.error("Airtable credentials not configured in environment")
+        raise HTTPException(status_code=500, detail="Airtable integration not configured")
+    
+    logger.info(f"Airtable token exchange: client_id={AIRTABLE_CLIENT_ID[:10]}..., redirect_uri={AIRTABLE_REDIRECT_URI}")
+
     data = {
         "code": code,
         "grant_type": "authorization_code",

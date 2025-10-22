@@ -346,7 +346,15 @@ async def create_sheet(userId: str = Query(...), formId: str = Query(...), paylo
 
     rows: List[List[str]] = []
     for rec in responses:
-        row = [str(rec.get("submittedAt") or "")] + [ _flatten((rec.get("answers") or {}).get(fid)) for fid in field_order ]
+        # Data is stored with field labels as keys directly in the data object
+        # After flattening in _list_responses, field values are accessible by label
+        row_values = []
+        for idx, fid in enumerate(field_order):
+            # Use the header label to get the value (headers are in same order as field_order)
+            label = headers[idx + 1] if idx + 1 < len(headers) else None
+            value = rec.get(label) if label else None
+            row_values.append(_flatten(value))
+        row = [str(rec.get("submittedAt") or "")] + row_values
         rows.append(row)
 
     token = _get_valid_access_token(userId)
@@ -507,19 +515,25 @@ def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str,
                     return str(val)
             return str(val)
         
-        answers = record.get("answers") or {}
-        
         for mapping in sheets_list:
             if not mapping or not mapping.get("synced"):
                 continue
             spreadsheet_id = mapping.get("spreadsheetId")
             sheet_name = mapping.get("sheetName") or "Sheet1"
             field_order: List[str] = mapping.get("fieldOrder") or []
+            headers: List[str] = mapping.get("headers") or []
             if not spreadsheet_id or not field_order:
                 continue
             
-            # Build row for this sheet
-            row = [str(record.get("submittedAt") or "")] + [ _flatten(answers.get(fid)) for fid in field_order ]
+            # Build row for this sheet using field labels from headers
+            # Data is stored with field labels as keys (e.g., {"Full Name": "John", "Email": "john@example.com"})
+            row_values = []
+            for idx, fid in enumerate(field_order):
+                # Use the header label to get the value (headers[0] is 'submittedAt', so offset by 1)
+                label = headers[idx + 1] if idx + 1 < len(headers) else None
+                value = record.get(label) if label else None
+                row_values.append(_flatten(value))
+            row = [str(record.get("submittedAt") or "")] + row_values
             rng = f"{sheet_name}!A1"
             token = _get_valid_access_token(user_id)
             url = f"{SHEETS_BASE}/{spreadsheet_id}/values/{requests.utils.quote(rng, safe='')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"

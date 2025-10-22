@@ -2116,7 +2116,7 @@ async def public_get_form(form_id: str):
                     "isPublished": bool(data.get("is_published") if data.get("is_published") is not None else data.get("isPublished")),
                     "formType": data.get("formType") or data.get("form_type") or "simple",
                     # Large JSON blobs already normalized above
-                    "theme": data.get("theme") or {},
+                    "theme": _json_or(data.get("theme"), {}) or {},
                     "branding": _json_or(data.get("branding"), data.get("branding") or {}) or {},
                     "fields": _json_or(data.get("fields"), data.get("fields") or []) or [],
                 }

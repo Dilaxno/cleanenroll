@@ -22,11 +22,13 @@ try:
 except Exception:
     from db.database import get_connection
 
-# Auth dependency
+# Firebase Admin for token verification
 try:
-    from routers.builder import get_current_user_uid
+    import firebase_admin
+    from firebase_admin import auth as fb_auth
+    _FB_AVAILABLE = True
 except Exception:
-    from routers.builder import get_current_user_uid
+    _FB_AVAILABLE = False
 
 logger = logging.getLogger("backend.fonts")
 router = APIRouter(prefix="/api/uploads/fonts", tags=["fonts"])
@@ -60,18 +62,42 @@ class FontListItem(BaseModel):
     created_at: str
 
 
+async def _get_uid_from_token(request: Request) -> str:
+    """Extract and verify Firebase ID token from Authorization header."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = auth_header.replace("Bearer ", "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    
+    if not _FB_AVAILABLE:
+        raise HTTPException(status_code=500, detail="Authentication not available")
+    
+    try:
+        decoded = fb_auth.verify_id_token(token)
+        uid = decoded.get("uid")
+        if not uid:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return uid
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
 @router.post("/upload", response_model=FontUploadResponse)
 @limiter.limit("30/minute")
 async def upload_font(
     request: Request,
     file: UploadFile = File(...),
-    font_name: Optional[str] = None,
-    uid: str = Depends(get_current_user_uid)
+    font_name: Optional[str] = None
 ):
     """
     Upload a custom font file (.woff2, .woff, .ttf, .otf) to R2 storage.
     Returns font metadata including public URL.
     """
+    uid = await _get_uid_from_token(request)
     if not uid:
         raise HTTPException(status_code=401, detail="Unauthorized")
     
@@ -162,8 +188,9 @@ async def upload_font(
 
 
 @router.get("", response_model=List[FontListItem])
-async def list_fonts(uid: str = Depends(get_current_user_uid)):
+async def list_fonts(request: Request):
     """Get all custom fonts for the current user."""
+    uid = await _get_uid_from_token(request)
     if not uid:
         raise HTTPException(status_code=401, detail="Unauthorized")
     
@@ -201,8 +228,9 @@ async def list_fonts(uid: str = Depends(get_current_user_uid)):
 
 
 @router.delete("/{font_id}")
-async def delete_font(font_id: str, uid: str = Depends(get_current_user_uid)):
+async def delete_font(font_id: str, request: Request):
     """Delete a custom font (removes from both database and R2)."""
+    uid = await _get_uid_from_token(request)
     if not uid:
         raise HTTPException(status_code=401, detail="Unauthorized")
     

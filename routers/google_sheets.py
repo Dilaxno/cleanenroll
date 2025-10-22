@@ -472,6 +472,58 @@ def list_mappings(userId: str = Query(...)):
     return {"mappings": out, "totalCount": total_count, "limit": 10}
 
 
+@router.post("/delete")
+def delete_sheet(userId: str = Query(...), payload: Dict[str, Any] = None):
+    """Delete a specific Google Sheet mapping."""
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Google Sheets integration is available on Pro plans.")
+    if not isinstance(payload, dict):
+        payload = {}
+    
+    form_id = payload.get("formId")
+    spreadsheet_id = payload.get("spreadsheetId")
+    
+    if not form_id or not spreadsheet_id:
+        raise HTTPException(status_code=400, detail="Missing formId or spreadsheetId")
+    
+    data = _read_integration(userId)
+    if not isinstance(data, dict):
+        data = {}
+    
+    gs_map = data.get("googleSheetsMappings") or {}
+    if not isinstance(gs_map, dict):
+        raise HTTPException(status_code=404, detail="No Google Sheets mappings found")
+    
+    sheets_data = gs_map.get(form_id)
+    if not sheets_data:
+        raise HTTPException(status_code=404, detail="No sheets found for this form")
+    
+    # Convert to list format
+    sheets_list = []
+    if isinstance(sheets_data, list):
+        sheets_list = sheets_data
+    elif isinstance(sheets_data, dict):
+        sheets_list = [sheets_data]
+    
+    # Filter out the sheet to delete
+    updated_sheets = [s for s in sheets_list if s.get("spreadsheetId") != spreadsheet_id]
+    
+    if len(updated_sheets) == len(sheets_list):
+        raise HTTPException(status_code=404, detail="Sheet not found")
+    
+    # Update mappings
+    if updated_sheets:
+        gs_map[form_id] = updated_sheets
+    else:
+        # Remove form_id key if no sheets left
+        gs_map.pop(form_id, None)
+    
+    data["googleSheetsMappings"] = gs_map
+    _write_integration(userId, data)
+    
+    return {"deleted": True, "remainingSheets": len(updated_sheets)}
+
+
 @router.post("/disconnect")
 def disconnect(userId: str = Query(...)):
     if not _is_pro_plan(userId):
@@ -526,12 +578,13 @@ def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str,
                 continue
             
             # Build row for this sheet using field labels from headers
-            # Data is stored with field labels as keys (e.g., {"Full Name": "John", "Email": "john@example.com"})
+            # Record structure from builder.py: {"answers": {"Full Name": "John", "Email": "john@example.com"}, "submittedAt": "..."}
+            answers = record.get("answers") or {}
             row_values = []
             for idx, fid in enumerate(field_order):
                 # Use the header label to get the value (headers[0] is 'submittedAt', so offset by 1)
                 label = headers[idx + 1] if idx + 1 < len(headers) else None
-                value = record.get(label) if label else None
+                value = answers.get(label) if label else None
                 row_values.append(_flatten(value))
             row = [str(record.get("submittedAt") or "")] + row_values
             rng = f"{sheet_name}!A1"

@@ -669,6 +669,13 @@ class ThemeSchema(BaseModel):
     splitImageFit: Literal["cover", "contain"] = "cover"
     splitImageWidthPercent: int = Field(default=50, ge=20, le=80)
     splitImageBgColor: Optional[str] = None
+    # Decorative overlay image (SVG/PNG/JPG) that appears on top of the form
+    overlayImageUrl: Optional[str] = None
+    overlayImagePosition: Literal["top-left", "top-right", "bottom-left", "bottom-right", "center", "top-center", "bottom-center"] = "top-right"
+    overlayImageSize: int = Field(default=200, ge=50, le=800)  # Size in pixels
+    overlayImageOpacity: int = Field(default=100, ge=0, le=100)  # Opacity percentage
+    overlayImageOffsetX: int = Field(default=0, ge=-500, le=500)  # Horizontal offset in pixels
+    overlayImageOffsetY: int = Field(default=0, ge=-500, le=500)  # Vertical offset in pixels
     # Submit button styling (label/color/textColor)
     submitButton: SubmitButton = Field(default_factory=SubmitButton)
     # Typography styles under theme (mirror of top-level fields)
@@ -3152,6 +3159,28 @@ async def update_theme_split_image(request: Request, form_id: str, payload: Dict
         await session.commit()
     return {"ok": True, "publicUrl": url}
 
+
+@router.post("/forms/{form_id}/theme/overlay-image")
+@limiter.limit("120/minute")
+async def update_theme_overlay_image(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist overlay decorative image URL to Neon forms.theme.overlayImageUrl."""
+    url = str((payload or {}).get('publicUrl') or (payload or {}).get('url') or '').strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing publicUrl")
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{overlayImageUrl}', CAST(:url AS JSONB), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "url": json.dumps(url)}
+        )
+        await session.commit()
+    return {"ok": True, "publicUrl": url}
 
 
 @router.post("/forms/{form_id}/submit")

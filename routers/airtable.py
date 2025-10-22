@@ -251,14 +251,18 @@ def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
 
 @router.get("/callback")
 def callback(code: str = Query(None), state: str = Query("{}")):
+    logger.info(f"Airtable callback: code={'present' if code else 'missing'}, state={state[:100] if state else 'empty'}")
     if not code:
+        logger.error("Airtable callback failed: Missing code parameter")
         raise HTTPException(status_code=400, detail="Missing code")
     try:
         parsed_state = json.loads(state or "{}")
-    except Exception:
+    except Exception as e:
+        logger.error(f"Airtable callback failed: Invalid state JSON - {e}")
         parsed_state = {}
     user_id = parsed_state.get("userId")
     if not user_id:
+        logger.error(f"Airtable callback failed: Missing userId in state. Parsed state: {parsed_state}")
         raise HTTPException(status_code=400, detail="Missing userId in state")
     if not _is_pro_plan(str(user_id)):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
@@ -272,15 +276,18 @@ def callback(code: str = Query(None), state: str = Query("{}")):
     }
     resp = requests.post(OAUTH_TOKEN, data=data, timeout=20)
     if resp.status_code != 200:
+        logger.error(f"Airtable OAuth exchange failed: status={resp.status_code}, body={resp.text}")
         raise HTTPException(status_code=400, detail=f"OAuth exchange failed: {resp.text}")
     tok = resp.json()
     access_token = tok.get("access_token")
     refresh_token = tok.get("refresh_token")
     expires_in = tok.get("expires_in")
     if not access_token:
+        logger.error(f"Airtable OAuth response missing access_token: {tok}")
         raise HTTPException(status_code=400, detail="OAuth exchange missing access_token")
 
     _save_tokens(user_id, access_token, refresh_token, expires_in)
+    logger.info(f"Airtable OAuth successful for user {user_id}")
 
     redirect_target = parsed_state.get("redirect") or FRONTEND_REDIRECT_URL
     return RedirectResponse(url=redirect_target, status_code=302)

@@ -403,14 +403,26 @@ def list_mappings(userId: str = Query(...)):
     for form_id, mapping in amap.items():
         if not isinstance(mapping, dict):
             continue
+        # Construct Airtable URL - use tableId if available, otherwise use tableName
+        base_id = mapping.get("baseId")
+        table_id = mapping.get("tableId")
+        table_name = mapping.get("tableName")
+        url = None
+        if base_id:
+            if table_id:
+                url = f"https://airtable.com/{base_id}/{table_id}"
+            elif table_name:
+                # Airtable supports addressing tables by name in URLs
+                url = f"https://airtable.com/{base_id}/{table_name}"
+        
         entry = {
             "formId": form_id,
-            "title": mapping.get("title") or mapping.get("tableName") or "Airtable",
-            "baseId": mapping.get("baseId"),
-            "tableId": mapping.get("tableId"),
-            "tableName": mapping.get("tableName"),
+            "title": mapping.get("title") or table_name or "Airtable",
+            "baseId": base_id,
+            "tableId": table_id,
+            "tableName": table_name,
             "synced": bool(mapping.get("synced")),
-            "url": (f"https://airtable.com/{mapping.get('baseId')}/{mapping.get('tableId')}" if mapping.get("baseId") and mapping.get("tableId") else None),
+            "url": url,
         }
         out.append(entry)
     return {"mappings": out}

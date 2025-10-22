@@ -585,8 +585,51 @@ def toggle_sync(userId: str = Query(...), formId: str = Query(...), payload: Dic
     return {"synced": desired}
 
 
+@router.delete("/unlink")
+def unlink_table(userId: str = Query(...), formId: str = Query(...)):
+    """Unlink/delete a single Airtable table mapping for a specific form."""
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
+    data = _read_integration(userId)
+    amap = data.get("airtableMappings") or {}
+    if formId in amap:
+        del amap[formId]
+        data["airtableMappings"] = amap
+        _write_integration(userId, data)
+        return {"unlinked": True, "formId": formId}
+    raise HTTPException(status_code=404, detail="No mapping found for this form")
+
+
+@router.post("/unlink-batch")
+def unlink_tables_batch(userId: str = Query(...), payload: Dict[str, Any] = None):
+    """Batch delete multiple Airtable table mappings.
+    Body: { formIds: ["formId1", "formId2", ...] }
+    """
+    if not _is_pro_plan(userId):
+        raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
+    if not isinstance(payload, dict):
+        payload = {}
+    form_ids = payload.get("formIds") or []
+    if not isinstance(form_ids, list):
+        raise HTTPException(status_code=400, detail="formIds must be an array")
+    
+    data = _read_integration(userId)
+    amap = data.get("airtableMappings") or {}
+    unlinked = []
+    
+    for form_id in form_ids:
+        if form_id in amap:
+            del amap[form_id]
+            unlinked.append(form_id)
+    
+    data["airtableMappings"] = amap
+    _write_integration(userId, data)
+    return {"unlinked": unlinked, "count": len(unlinked)}
+
+
 @router.post("/disconnect")
 def disconnect(userId: str = Query(...)):
+    """Disconnect entire Airtable integration (removes all mappings and OAuth tokens)."""
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
     data = _read_integration(userId)

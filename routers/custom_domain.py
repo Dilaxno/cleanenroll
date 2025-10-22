@@ -202,6 +202,31 @@ async def resolve_domain(hostname: str):
 
 
 # ─────────────────────────────
+# DELETE CUSTOM DOMAIN
+# ─────────────────────────────
+
+@router.delete("/forms/{form_id}/custom-domain")
+async def delete_custom_domain(form_id: str):
+    """
+    Remove custom domain from the form in Neon DB.
+    """
+    async with async_session_maker() as session:
+        await session.execute(
+            text("""
+                UPDATE forms
+                SET custom_domain = NULL,
+                    custom_domain_verified = FALSE,
+                    ssl_verified = FALSE,
+                    updated_at = NOW()
+                WHERE id = :fid
+            """),
+            {"fid": form_id}
+        )
+        await session.commit()
+    return {"success": True, "message": "Custom domain removed successfully"}
+
+
+# ─────────────────────────────
 # ALLOW DOMAIN (for Caddy ask endpoint)
 # ─────────────────────────────
 

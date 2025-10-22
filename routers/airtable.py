@@ -342,6 +342,7 @@ def callback(
         "code": code,
         "grant_type": "authorization_code",
         "client_id": AIRTABLE_CLIENT_ID,
+        "client_secret": AIRTABLE_CLIENT_SECRET,
         "redirect_uri": AIRTABLE_REDIRECT_URI,
         "code_verifier": code_verifier,
     }

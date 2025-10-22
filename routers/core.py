@@ -2392,8 +2392,10 @@ async def dodo_webhook(request: Request):
         # standardwebhooks expects the exact stringified payload
         wh.verify(raw_text, std_headers)
         logger.info("[dodo-webhook] signature verified via standardwebhooks")
-    except Exception:
-        logger.warning("[dodo-webhook] signature verification failed")
+    except Exception as e:
+        logger.warning("[dodo-webhook] signature verification failed: %s", str(e))
+        logger.debug("[dodo-webhook] webhook-id=%s, timestamp=%s, sig_length=%d, body_length=%d, secret_length=%d", 
+                     webhook_id, webhook_ts, len(std_headers.get('webhook-signature', '')), len(raw_text), len(secret))
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     # Idempotency: check if webhook-id already processed
@@ -2539,6 +2541,9 @@ async def dodo_webhook(request: Request):
     subscription_id = (
         data.get("subscription_id")
         or (data.get("subscription") or {}).get("subscription_id")
+        or (data.get("subscription") or {}).get("id")
+        or metadata.get("subscription_id")
+        or data.get("id")  # fallback if data itself is the subscription object
     )
     product_id = data.get("product_id") or (data.get("product") or {}).get("product_id")
     payment_id = data.get("payment_id") or data.get("id") or payload.get("id")
@@ -2578,10 +2583,31 @@ async def dodo_webhook(request: Request):
     try:
         if resolved_uid and new_plan:
             async with async_session_maker() as session:
-                await session.execute(
-                    "UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid",
-                    {"plan": new_plan, "uid": resolved_uid},
-                )
+                # Store subscription_id for active subscriptions, clear it for cancelled ones
+                if event_type in ("subscription.active", "subscription.renewed", "payment.succeeded"):
+                    if subscription_id:
+                        await session.execute(
+                            "UPDATE users SET plan = :plan, subscription_id = :sub_id, updated_at = NOW() WHERE uid = :uid",
+                            {"plan": new_plan, "sub_id": str(subscription_id), "uid": resolved_uid},
+                        )
+                        logger.info("[dodo-webhook] stored subscription_id=%s for uid=%s", subscription_id, resolved_uid)
+                    else:
+                        await session.execute(
+                            "UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid",
+                            {"plan": new_plan, "uid": resolved_uid},
+                        )
+                elif event_type in ("subscription.cancelled", "subscription.expired", "subscription.failed"):
+                    # Clear subscription_id for cancelled/expired/failed subscriptions
+                    await session.execute(
+                        "UPDATE users SET plan = :plan, subscription_id = NULL, updated_at = NOW() WHERE uid = :uid",
+                        {"plan": new_plan, "uid": resolved_uid},
+                    )
+                    logger.info("[dodo-webhook] cleared subscription_id for cancelled/expired uid=%s", resolved_uid)
+                else:
+                    await session.execute(
+                        "UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid",
+                        {"plan": new_plan, "uid": resolved_uid},
+                    )
                 # Record idempotency only after a successful plan update
                 try:
                     await session.execute(

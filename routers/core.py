@@ -2347,6 +2347,12 @@ async def dodo_webhook(request: Request):
 
     # Verify Standard Webhooks signature from Dodo
     headers = request.headers
+    
+    # Log all headers for debugging (mask auth headers)
+    debug_headers = {k: (v[:20] + '...' if k.lower() in ('authorization', 'webhook-signature', 'dodo-signature') and len(v) > 20 else v) 
+                     for k, v in headers.items() if k.lower().startswith(('webhook-', 'dodo-', 'signature', 'timestamp'))}
+    logger.debug("[dodo-webhook] relevant headers: %s", debug_headers)
+    
     webhook_id = headers.get('webhook-id')
     # Support alternate provider header names for signature
     webhook_sig = (
@@ -2377,32 +2383,41 @@ async def dodo_webhook(request: Request):
         logger.warning("[dodo-webhook] invalid timestamp header; rejecting")
         raise HTTPException(status_code=401, detail="Invalid webhook timestamp")
 
-    # Enforce Standard Webhooks library usage only
-    if not _STDWEBHOOKS_AVAILABLE:
+    # Enforce Standard Webhooks library usage only (unless skip is enabled for debugging)
+    skip_signature = os.getenv('DODO_WEBHOOK_SKIP_SIGNATURE', '').lower() == 'true'
+    if skip_signature:
+        logger.warning("[dodo-webhook] SIGNATURE VERIFICATION DISABLED - FOR TESTING ONLY")
+    elif not _STDWEBHOOKS_AVAILABLE:
         logger.error("[dodo-webhook] standardwebhooks library is not available on server")
         raise HTTPException(status_code=500, detail="Webhook verification library unavailable")
-
-    try:
-        wh = Webhook(secret)
-        std_headers = {
-            "webhook-id": webhook_id,
-            "webhook-signature": headers.get('webhook-signature') or headers.get('dodo-signature') or headers.get('x-dodo-signature') or headers.get('signature') or "",
-            "webhook-timestamp": str(webhook_ts),
-        }
-        # standardwebhooks expects the exact stringified payload
-        wh.verify(raw_text, std_headers)
-        logger.info("[dodo-webhook] signature verified via standardwebhooks")
-    except Exception as e:
-        logger.warning("[dodo-webhook] signature verification failed: %s", str(e))
-        logger.debug("[dodo-webhook] webhook-id=%s, timestamp=%s, sig_length=%d, body_length=%d, secret_length=%d", 
-                     webhook_id, webhook_ts, len(std_headers.get('webhook-signature', '')), len(raw_text), len(secret))
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    
+    if not skip_signature:
+        try:
+            wh = Webhook(secret)
+            std_headers = {
+                "webhook-id": webhook_id,
+                "webhook-signature": headers.get('webhook-signature') or headers.get('dodo-signature') or headers.get('x-dodo-signature') or headers.get('signature') or "",
+                "webhook-timestamp": str(webhook_ts),
+            }
+            # Log signature format for debugging
+            sig_value = std_headers.get('webhook-signature', '')
+            logger.debug("[dodo-webhook] signature format: %s (length=%d)", sig_value[:20] + '...' if len(sig_value) > 20 else sig_value, len(sig_value))
+            
+            # standardwebhooks expects the exact stringified payload
+            wh.verify(raw_text, std_headers)
+            logger.info("[dodo-webhook] signature verified via standardwebhooks")
+        except Exception as e:
+            logger.warning("[dodo-webhook] signature verification failed: %s", str(e))
+            logger.debug("[dodo-webhook] webhook-id=%s, timestamp=%s, sig_length=%d, body_length=%d, secret_length=%d", 
+                         webhook_id, webhook_ts, len(std_headers.get('webhook-signature', '')), len(raw_text), len(secret))
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     # Idempotency: check if webhook-id already processed
     try:
+        from sqlalchemy import text as _text  # type: ignore
         async with async_session_maker() as session:
             res = await session.execute(
-                "SELECT webhook_id FROM webhooks_idempotency WHERE webhook_id = :wid",
+                _text("SELECT webhook_id FROM webhooks_idempotency WHERE webhook_id = :wid"),
                 {"wid": webhook_id},
             )
             if res.first():
@@ -2557,9 +2572,10 @@ async def dodo_webhook(request: Request):
         # Fallback: try mapping by customer email using Neon
         if customer_email:
             try:
+                from sqlalchemy import text as _text  # type: ignore
                 async with async_session_maker() as session:
                     res = await session.execute(
-                        "SELECT uid FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1",
+                        _text("SELECT uid FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1"),
                         {"email": customer_email},
                     )
                     row = res.first()
@@ -2582,40 +2598,41 @@ async def dodo_webhook(request: Request):
     # Update user plan in Neon if we have a uid and a planned change
     try:
         if resolved_uid and new_plan:
+            from sqlalchemy import text as _text  # type: ignore
             async with async_session_maker() as session:
                 # Store subscription_id for active subscriptions, clear it for cancelled ones
                 if event_type in ("subscription.active", "subscription.renewed", "payment.succeeded"):
                     if subscription_id:
                         await session.execute(
-                            "UPDATE users SET plan = :plan, subscription_id = :sub_id, updated_at = NOW() WHERE uid = :uid",
+                            _text("UPDATE users SET plan = :plan, subscription_id = :sub_id, updated_at = NOW() WHERE uid = :uid"),
                             {"plan": new_plan, "sub_id": str(subscription_id), "uid": resolved_uid},
                         )
                         logger.info("[dodo-webhook] stored subscription_id=%s for uid=%s", subscription_id, resolved_uid)
                     else:
                         await session.execute(
-                            "UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid",
+                            _text("UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid"),
                             {"plan": new_plan, "uid": resolved_uid},
                         )
                 elif event_type in ("subscription.cancelled", "subscription.expired", "subscription.failed"):
                     # Clear subscription_id for cancelled/expired/failed subscriptions
                     await session.execute(
-                        "UPDATE users SET plan = :plan, subscription_id = NULL, updated_at = NOW() WHERE uid = :uid",
+                        _text("UPDATE users SET plan = :plan, subscription_id = NULL, updated_at = NOW() WHERE uid = :uid"),
                         {"plan": new_plan, "uid": resolved_uid},
                     )
                     logger.info("[dodo-webhook] cleared subscription_id for cancelled/expired uid=%s", resolved_uid)
                 else:
                     await session.execute(
-                        "UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid",
+                        _text("UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid"),
                         {"plan": new_plan, "uid": resolved_uid},
                     )
                 # Record idempotency only after a successful plan update
                 try:
                     await session.execute(
-                        """
+                        _text("""
                         INSERT INTO webhooks_idempotency (webhook_id, event_type, user_uid, customer_email, payment_id, product_id)
                         VALUES (:wid, :evt, :uid, :email, :pay, :prod)
                         ON CONFLICT (webhook_id) DO NOTHING
-                        """,
+                        """),
                         {
                             "wid": webhook_id,
                             "evt": event_type,

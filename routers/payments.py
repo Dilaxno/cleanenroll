@@ -457,6 +457,17 @@ async def _process_dodo_event(payload: Dict):
             # Immediately set plan to free and clear billing flags
             if uid:
                 await _set_user_plan(uid, 'free')
+                # Clear subscription_id from database since subscription is cancelled
+                try:
+                    async with async_session_maker() as session:
+                        await session.execute(
+                            "UPDATE users SET subscription_id = NULL, updated_at = NOW() WHERE uid = :uid",
+                            {"uid": uid}
+                        )
+                        await session.commit()
+                    logger.info('[payments] cleared subscription_id for cancelled subscription uid=%s', uid)
+                except Exception:
+                    logger.exception('[payments] failed to clear subscription_id for uid=%s', uid)
                 await _update_user_billing(uid, {
                     'nextBillingAt': None,
                     'cancelAtPeriodEnd': False,
@@ -475,6 +486,25 @@ async def _process_dodo_event(payload: Dict):
         elif event_type in ('subscription.renewed', 'subscription.created', 'invoice.paid'):
             if uid:
                 await _set_user_plan(uid, 'pro')
+                # Extract subscription_id from webhook payload
+                subscription_id = (
+                    data.get('subscription_id')
+                    or data.get('subscription', {}).get('id')
+                    or meta.get('subscription_id')
+                    or data.get('id')  # fallback to data.id if it's the subscription object itself
+                )
+                # Store subscription_id in Neon DB for future cancellation/management
+                if subscription_id:
+                    try:
+                        async with async_session_maker() as session:
+                            await session.execute(
+                                "UPDATE users SET subscription_id = :sub_id, updated_at = NOW() WHERE uid = :uid",
+                                {"sub_id": str(subscription_id), "uid": uid}
+                            )
+                            await session.commit()
+                        logger.info('[payments] stored subscription_id=%s for uid=%s', subscription_id, uid)
+                    except Exception:
+                        logger.exception('[payments] failed to store subscription_id for uid=%s', uid)
                 # Best-effort payment identifier extraction (depends on provider payload)
                 payment_id = (
                     data.get('payment_id')

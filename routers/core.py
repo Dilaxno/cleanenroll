@@ -13,6 +13,7 @@ import time
 import logging
 import traceback
 from datetime import timedelta
+from utils.data_normalization import normalize_booleans, normalize_jsonb_field
 try:
     from standardwebhooks import Webhook  # type: ignore
     _STDWEBHOOKS_AVAILABLE = True
@@ -1807,7 +1808,9 @@ async def get_form(form_id: str):
                             form_data[field] = json_lib.loads(form_data[field])
                         except:
                             pass
-                return form_data
+                # Normalize all booleans (including nested ones in JSONB fields)
+                # This ensures React receives proper boolean types instead of "true"/"false" strings
+                return normalize_booleans(form_data)
         
         # Fallback to file if not in database
         data = _load_form(form_id)

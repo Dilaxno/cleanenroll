@@ -75,6 +75,9 @@ try:
 except Exception:
     from utils.email import render_email, send_email_html  # type: ignore
 
+# Data normalization for JSONB fields and boolean conversion
+from utils.data_normalization import normalize_booleans, normalize_jsonb_field, normalize_db_row
+
 # Email validation
 from email_validator import validate_email as _validate_email, EmailNotValidError as _EmailNotValidError
 try:
@@ -2035,14 +2038,9 @@ async def public_get_form(form_id: str):
                 pass
             # Map DB snake_case fields to frontend camelCase expected by SPA
             try:
-                # Normalize JSON/text fields first
+                # Use normalize_jsonb_field for proper type conversion including booleans
                 def _json_or(val, default):
-                    try:
-                        if isinstance(val, str):
-                            return json.loads(val)
-                        return val if isinstance(val, (dict, list)) else default
-                    except Exception:
-                        return default
+                    return normalize_jsonb_field(val, default)
 
                 # Best-effort: increment views in Neon and log to analytics table BEFORE returning
                 try:
@@ -2120,7 +2118,9 @@ async def public_get_form(form_id: str):
                     "branding": _json_or(data.get("branding"), data.get("branding") or {}) or {},
                     "fields": _json_or(data.get("fields"), data.get("fields") or []) or [],
                 }
-                return out
+                # Final normalization pass to ensure all booleans (including nested ones) are proper Python booleans
+                # This is critical for React components that check boolean props with strict equality
+                return normalize_booleans(out)
             except Exception:
                 # Fallback to original data shape
                 return data
@@ -4290,6 +4290,9 @@ async def list_form_responses(form_id: str, request: Request, limit: int = 50, o
             except Exception:
                 item["answers"] = {}
             
+            # Normalize booleans in answers (JSONB data may have string booleans)
+            item["answers"] = normalize_booleans(item.get("answers", {}))
+            
             # Parse metadata field (JSONB)
             try:
                 metadata = r.get("metadata")
@@ -4385,6 +4388,9 @@ async def get_form_response(form_id: str, response_id: str, request: Request):
                 item["answers"] = {}
         except Exception:
             item["answers"] = {}
+        
+        # Normalize booleans in answers (JSONB data may have string booleans)
+        item["answers"] = normalize_booleans(item.get("answers", {}))
         
         # Parse metadata field (JSONB)
         try:

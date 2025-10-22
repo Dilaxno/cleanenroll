@@ -14,6 +14,7 @@ from db.database import get_session
 from models.validators import validate_form, sanitize_for_db
 from models.base import FormModel
 from db.validation import validate_and_save_form
+from utils.data_normalization import normalize_booleans
 
 class AsyncFormsService:
     """Async service for handling form operations with PostgreSQL and Pydantic validation"""
@@ -70,7 +71,9 @@ class AsyncFormsService:
             {"user_id": user_id, "limit_val": safe_limit, "offset_val": safe_offset},
         )
         
-        return [dict(row) for row in result.mappings().all()]
+        # Normalize all booleans in JSONB fields (theme, fields, etc.) for each form
+        forms = [dict(row) for row in result.mappings().all()]
+        return [normalize_booleans(form) for form in forms]
     
     @staticmethod
     async def get_form_by_id(session: AsyncSession, form_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -86,7 +89,10 @@ class AsyncFormsService:
         result = await session.execute(query, params)
         row = result.mappings().first()
         
-        return dict(row) if row else None
+        if row:
+            form_data = dict(row)
+            return normalize_booleans(form_data)
+        return None
     
     @staticmethod
     async def check_form_name_exists(session: AsyncSession, user_id: str, name: str) -> bool:

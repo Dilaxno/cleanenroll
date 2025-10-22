@@ -345,15 +345,19 @@ def callback(
     
     logger.info(f"Airtable token exchange: client_id={AIRTABLE_CLIENT_ID[:10]}..., redirect_uri={AIRTABLE_REDIRECT_URI}")
 
+    # Airtable requires HTTP Basic Auth for client credentials, not form data
     data = {
-        "code": code,
         "grant_type": "authorization_code",
-        "client_id": AIRTABLE_CLIENT_ID,
-        "client_secret": AIRTABLE_CLIENT_SECRET,
+        "code": code,
         "redirect_uri": AIRTABLE_REDIRECT_URI,
         "code_verifier": code_verifier,
     }
-    resp = requests.post(OAUTH_TOKEN, data=data, timeout=20)
+    resp = requests.post(
+        OAUTH_TOKEN,
+        auth=(AIRTABLE_CLIENT_ID, AIRTABLE_CLIENT_SECRET),
+        data=data,
+        timeout=20
+    )
     if resp.status_code != 200:
         logger.error(f"Airtable OAuth exchange failed: status={resp.status_code}, body={resp.text}")
         raise HTTPException(status_code=400, detail=f"OAuth exchange failed: {resp.text}")

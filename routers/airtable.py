@@ -33,23 +33,60 @@ router = APIRouter(prefix="/api/integrations/airtable", tags=["airtable"])
 INTEGRATIONS_BASE = os.path.join(os.getcwd(), "data", "integrations", "airtable")
 os.makedirs(INTEGRATIONS_BASE, exist_ok=True)
 
-def _path(user_id: str) -> str:
-    safe = str(user_id).strip()
-    return os.path.join(INTEGRATIONS_BASE, f"{safe}.json")
+def _integration_path(user_id: str) -> str:
+    return os.path.join(INTEGRATIONS_BASE, f"{user_id}.json")
+
+def _pkce_verifier_path(user_id: str) -> str:
+    """Temporary storage for PKCE code_verifier during OAuth flow."""
+    return os.path.join(INTEGRATIONS_BASE, f"{user_id}_pkce.json")
 
 def _read_integration(user_id: str) -> Dict[str, Any]:
     try:
-        with open(_path(user_id), "r", encoding="utf-8") as f:
+        with open(_integration_path(user_id), "r", encoding="utf-8") as f:
             return json.load(f) or {}
     except Exception:
         return {}
+
+def _save_pkce_verifier(user_id: str, verifier: str) -> None:
+    """Store code_verifier temporarily for OAuth callback."""
+    try:
+        with open(_pkce_verifier_path(user_id), "w", encoding="utf-8") as f:
+            json.dump({"verifier": verifier, "timestamp": time.time()}, f)
+    except Exception:
+        logger.exception("Failed to save PKCE verifier")
+
+def _get_pkce_verifier(user_id: str) -> Optional[str]:
+    """Retrieve and delete code_verifier from temporary storage."""
+    try:
+        path = _pkce_verifier_path(user_id)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Delete after reading (one-time use)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        # Check if not expired (10 minutes)
+        if time.time() - data.get("timestamp", 0) > 600:
+            return None
+        return data.get("verifier")
+    except Exception:
+        return None
+
+def _generate_pkce_pair() -> Tuple[str, str]:
+    """Generate PKCE code_verifier and code_challenge."""
+    code_verifier = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).decode().rstrip("=")
+    return code_verifier, code_challenge
 
 def _write_integration(user_id: str, payload: Dict[str, Any]) -> None:
     try:
         cur = _read_integration(user_id)
         cur.update(payload or {})
         os.makedirs(INTEGRATIONS_BASE, exist_ok=True)
-        with open(_path(user_id), "w", encoding="utf-8") as f:
+        with open(_integration_path(user_id), "w", encoding="utf-8") as f:
             json.dump(cur, f, ensure_ascii=False, indent=2)
     except Exception:
         logger.exception("Failed to write Airtable integration for %s", user_id)
@@ -233,6 +270,11 @@ def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
     if not AIRTABLE_CLIENT_ID or not AIRTABLE_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Airtable OAuth not configured")
+    
+    # Generate PKCE parameters (required by Airtable)
+    code_verifier, code_challenge = _generate_pkce_pair()
+    _save_pkce_verifier(userId, code_verifier)
+    
     state_data = {"userId": userId}
     if redirect:
         state_data["redirect"] = redirect
@@ -243,9 +285,12 @@ def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
         "response_type": "code",
         "scope": " ".join(SCOPES),
         "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
     }
     from urllib.parse import urlencode, quote_plus
     url = f"{OAUTH_AUTH}?{urlencode(params, quote_via=quote_plus)}"
+    logger.info(f"Airtable OAuth initiated for user {userId} with PKCE")
     return {"authorize_url": url}
 
 
@@ -287,12 +332,18 @@ def callback(
     if not _is_pro_plan(str(user_id)):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
 
+    # Retrieve PKCE code_verifier
+    code_verifier = _get_pkce_verifier(user_id)
+    if not code_verifier:
+        logger.error(f"Airtable callback failed: PKCE verifier not found for user {user_id}")
+        raise HTTPException(status_code=400, detail="PKCE verifier expired or not found. Please try connecting again.")
+
     data = {
         "code": code,
         "grant_type": "authorization_code",
         "client_id": AIRTABLE_CLIENT_ID,
-        "client_secret": AIRTABLE_CLIENT_SECRET,
         "redirect_uri": AIRTABLE_REDIRECT_URI,
+        "code_verifier": code_verifier,
     }
     resp = requests.post(OAUTH_TOKEN, data=data, timeout=20)
     if resp.status_code != 200:

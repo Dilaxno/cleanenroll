@@ -250,10 +250,30 @@ def authorize(userId: str = Query(...), redirect: Optional[str] = Query(None)):
 
 
 @router.get("/callback")
-def callback(code: str = Query(None), state: str = Query("{}")):
-    logger.info(f"Airtable callback: code={'present' if code else 'missing'}, state={state[:100] if state else 'empty'}")
+def callback(
+    code: str = Query(None), 
+    state: str = Query("{}"),
+    error: str = Query(None),
+    error_description: str = Query(None)
+):
+    logger.info(f"Airtable callback: code={'present' if code else 'missing'}, state={state[:100] if state else 'empty'}, error={error}")
+    
+    # Handle OAuth errors (user denied access or other errors)
+    if error:
+        logger.error(f"Airtable OAuth error: {error}, description: {error_description}")
+        # Parse state to get redirect URL
+        try:
+            parsed_state = json.loads(state or "{}")
+            redirect_url = parsed_state.get("redirect", "https://cleanenroll.com/dashboard?integrations=airtable")
+        except Exception:
+            redirect_url = "https://cleanenroll.com/dashboard?integrations=airtable"
+        
+        # Redirect back to frontend with error info
+        error_msg = error_description or error or "Authorization failed"
+        return RedirectResponse(url=f"{redirect_url}&status=error&message={error_msg}", status_code=302)
+    
     if not code:
-        logger.error("Airtable callback failed: Missing code parameter")
+        logger.error("Airtable callback failed: Missing code parameter (and no error parameter)")
         raise HTTPException(status_code=400, detail="Missing code")
     try:
         parsed_state = json.loads(state or "{}")

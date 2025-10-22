@@ -3,6 +3,7 @@ from typing import Dict, Optional
 from sqlalchemy import text
 import dns.resolver
 from db.database import async_session_maker  # type: ignore
+from fastapi.responses import PlainTextResponse
 
 router = APIRouter()
 
@@ -203,13 +204,9 @@ async def resolve_domain(hostname: str):
 # ─────────────────────────────
 # ALLOW DOMAIN (for Caddy ask endpoint)
 # ─────────────────────────────
-@router.get("/api/allow-domain")
+
+@router.api_route("/api/allow-domain", methods=["GET", "HEAD"])
 async def allow_domain(domain: str):
-    """
-    Called by Caddy's 'ask' directive to decide if a domain should get a TLS cert.
-    Returns 'yes' if the domain exists in the forms table, otherwise 'no'.
-    """
-    normalized = domain.lower().rstrip(".")
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
@@ -217,9 +214,10 @@ async def allow_domain(domain: str):
                 WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
                 LIMIT 1
             """),
-            {"dom": normalized},
+            {"dom": domain.lower().rstrip(".")}
         )
         row = res.first()
         if row:
-            return "yes"
-    return "no"
+            return PlainTextResponse("yes")
+    return PlainTextResponse("no")
+

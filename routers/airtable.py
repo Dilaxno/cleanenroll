@@ -281,8 +281,8 @@ async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
-    data = _read_integration(user_id)
+async def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
+    data = await _read_integration(user_id)
     integ = (data.get("airtable") or {})
     tok = integ.get("token")
     rtok = integ.get("refreshToken")
@@ -292,9 +292,9 @@ def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
     return _decrypt_token(tok), (_decrypt_token(rtok) if rtok else None), expiry
 
 
-def _save_tokens(user_id: str, access_token: str, refresh_token: Optional[str], expires_in: Optional[int]):
+async def _save_tokens(user_id: str, access_token: str, refresh_token: Optional[str], expires_in: Optional[int]):
     enc_access = _encrypt_token(access_token)
-    integ = _read_integration(user_id)
+    integ = await _read_integration(user_id)
     cur = integ.get("airtable") or {}
     cur.update({"token": enc_access})
     if refresh_token:
@@ -302,11 +302,11 @@ def _save_tokens(user_id: str, access_token: str, refresh_token: Optional[str], 
     if expires_in:
         cur["expiry"] = int(time.time()) + int(expires_in)
     integ["airtable"] = cur
-    _write_integration(user_id, integ)
+    await _write_integration(user_id, integ)
 
 
-def _get_valid_access_token(user_id: str) -> str:
-    access, refresh, expiry = _get_tokens(user_id)
+async def _get_valid_access_token(user_id: str) -> str:
+    access, refresh, expiry = await _get_tokens(user_id)
     now = int(time.time())
     if expiry and now < (expiry - 60):
         return access
@@ -326,7 +326,7 @@ def _get_valid_access_token(user_id: str) -> str:
     payload = resp.json()
     new_access = payload.get("access_token") or access
     expires_in = payload.get("expires_in")
-    _save_tokens(user_id, new_access, refresh, expires_in)
+    await _save_tokens(user_id, new_access, refresh, expires_in)
     return new_access
 
 
@@ -435,7 +435,7 @@ async def callback(
         logger.error(f"Airtable OAuth response missing access_token: {tok}")
         raise HTTPException(status_code=400, detail="OAuth exchange missing access_token")
 
-    _save_tokens(user_id, access_token, refresh_token, expires_in)
+    await _save_tokens(user_id, access_token, refresh_token, expires_in)
     logger.info(f"Airtable OAuth successful for user {user_id}")
 
     redirect_target = parsed_state.get("redirect") or FRONTEND_REDIRECT_URL
@@ -447,7 +447,7 @@ async def status(userId: str = Query(...), formId: Optional[str] = Query(None)):
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
     try:
-        access, _, _ = _get_tokens(userId)
+        access, _, _ = await _get_tokens(userId)
         connected = bool(access)
     except Exception:
         connected = False
@@ -577,7 +577,7 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
         field_order.append(fid)
         headers.append(label)
 
-    token = _get_valid_access_token(userId)
+    token = await _get_valid_access_token(userId)
 
     # Resolve or create table
     resolved_table_id = table_id
@@ -934,7 +934,7 @@ async def try_append_submission_for_form(user_id: str, form_id: str, record: Dic
         if not url_path:
             return
         post_url = f"{API_BASE}/{base_id}/{requests.utils.quote(url_path, safe='')}"
-        token = _get_valid_access_token(user_id)
+        token = await _get_valid_access_token(user_id)
         body = {"records": [{"fields": fields_map}]}
         r = requests.post(post_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, data=json.dumps(body), timeout=20)
         if r.status_code not in (200, 201):

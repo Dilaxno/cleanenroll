@@ -417,6 +417,7 @@ def list_mappings(userId: str = Query(...)):
 
 
 @router.post("/link")
+@router.post("/create")  # Alias for frontend compatibility
 async def link_table(userId: str = Query(...), formId: str = Query(...), payload: Dict[str, Any] = None):
     """
     Link an existing table or create a new one and optionally backfill.

@@ -89,6 +89,7 @@ from routers.zoom import router as zoom_router  # type: ignore
 from routers.custom_domain import router as custom_domain_router  # type: ignore
 from routers.client_notifications import router as client_notifications_router  # type: ignore
 from routers.geo_restrictions import router as geo_restrictions_router  # type: ignore
+from routers.fonts import router as fonts_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -274,6 +275,7 @@ app.include_router(zoom_router)
 app.include_router(custom_domain_router, prefix="/api")
 app.include_router(client_notifications_router, prefix="/api")
 app.include_router(geo_restrictions_router, prefix="/api")
+app.include_router(fonts_router)
 
 
 if __name__ == "__main__":

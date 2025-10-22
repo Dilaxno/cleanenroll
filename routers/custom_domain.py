@@ -197,4 +197,29 @@ async def resolve_domain(hostname: str):
         "formId": row.get("id"),
         "domain": row.get("custom_domain"),
         "message": "Form mapped successfully for custom domain."
-    }        
+    }
+
+
+# ─────────────────────────────
+# ALLOW DOMAIN (for Caddy ask endpoint)
+# ─────────────────────────────
+@router.get("/api/allow-domain")
+async def allow_domain(domain: str):
+    """
+    Called by Caddy's 'ask' directive to decide if a domain should get a TLS cert.
+    Returns 'yes' if the domain exists in the forms table, otherwise 'no'.
+    """
+    normalized = domain.lower().rstrip(".")
+    async with async_session_maker() as session:
+        res = await session.execute(
+            text("""
+                SELECT id FROM forms
+                WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
+                LIMIT 1
+            """),
+            {"dom": normalized},
+        )
+        row = res.first()
+        if row:
+            return "yes"
+    return "no"

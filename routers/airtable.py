@@ -88,8 +88,10 @@ def _write_integration(user_id: str, payload: Dict[str, Any]) -> None:
         os.makedirs(INTEGRATIONS_BASE, exist_ok=True)
         with open(_integration_path(user_id), "w", encoding="utf-8") as f:
             json.dump(cur, f, ensure_ascii=False, indent=2)
-    except Exception:
+        logger.info(f"Airtable integration written for {user_id}")
+    except Exception as e:
         logger.exception("Failed to write Airtable integration for %s", user_id)
+        raise HTTPException(status_code=500, detail=f"Failed to save integration data: {str(e)}")
 
 
 def _is_pro_plan(user_id: str) -> bool:
@@ -602,14 +604,36 @@ def unlink_table(userId: str = Query(...), formId: str = Query(...)):
     """Unlink/delete a single Airtable table mapping for a specific form."""
     if not _is_pro_plan(userId):
         raise HTTPException(status_code=403, detail="Airtable integration is available on Pro plans.")
+    
+    logger.info(f"Unlinking Airtable table for user {userId}, formId {formId}")
     data = _read_integration(userId)
     amap = data.get("airtableMappings") or {}
-    if formId in amap:
-        del amap[formId]
-        data["airtableMappings"] = amap
-        _write_integration(userId, data)
-        return {"unlinked": True, "formId": formId}
-    raise HTTPException(status_code=404, detail="No mapping found for this form")
+    
+    logger.info(f"Current mappings before deletion: {list(amap.keys())}")
+    
+    if formId not in amap:
+        logger.warning(f"No mapping found for formId {formId}")
+        raise HTTPException(status_code=404, detail="No mapping found for this form")
+    
+    # Delete the mapping
+    del amap[formId]
+    data["airtableMappings"] = amap
+    
+    logger.info(f"Mappings after deletion: {list(amap.keys())}")
+    
+    # Write updated data
+    _write_integration(userId, data)
+    
+    # Verify deletion by reading back
+    verification = _read_integration(userId)
+    verify_map = verification.get("airtableMappings") or {}
+    
+    if formId in verify_map:
+        logger.error(f"CRITICAL: FormId {formId} still exists after deletion!")
+        raise HTTPException(status_code=500, detail="Failed to delete mapping")
+    
+    logger.info(f"Successfully unlinked formId {formId} for user {userId}")
+    return {"unlinked": True, "formId": formId}
 
 
 @router.post("/unlink-batch")

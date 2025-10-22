@@ -1637,6 +1637,49 @@ def _save_form(data: Dict) -> str:
 
 
 def _load_form(form_id: str) -> Dict:
+    """Load form from Neon database (async context handled by endpoint)"""
+    # Try loading from database first
+    try:
+        from ..db.database import async_session_maker
+        from sqlalchemy import text
+        import asyncio
+        
+        async def _fetch_from_db():
+            async with async_session_maker() as session:
+                result = await session.execute(
+                    text("SELECT * FROM forms WHERE id = :form_id LIMIT 1"),
+                    {"form_id": form_id}
+                )
+                row = result.mappings().first()
+                if row:
+                    form_data = dict(row)
+                    # Parse JSON fields
+                    import json as json_lib
+                    for field in ['fields', 'theme', 'branding', 'allowed_domains']:
+                        if field in form_data and isinstance(form_data[field], str):
+                            try:
+                                form_data[field] = json_lib.loads(form_data[field])
+                            except:
+                                pass
+                    return form_data
+                return None
+        
+        # Run async function in event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If already in async context, create task
+            import nest_asyncio
+            nest_asyncio.apply()
+            form_data = loop.run_until_complete(_fetch_from_db())
+        else:
+            form_data = asyncio.run(_fetch_from_db())
+            
+        if form_data:
+            return form_data
+    except Exception as e:
+        print(f"Database load failed, falling back to file: {e}")
+    
+    # Fallback to file-based loading
     path = _form_path(form_id)
     if not os.path.exists(path):
         raise FileNotFoundError
@@ -1742,11 +1785,38 @@ async def create_form(cfg: FormConfig):
 
 @router.get("/api/forms/{form_id}")
 async def get_form(form_id: str):
+    """Load form from Neon database with custom font metadata in theme"""
     try:
+        from ..db.database import async_session_maker
+        from sqlalchemy import text
+        
+        # Load from database
+        async with async_session_maker() as session:
+            result = await session.execute(
+                text("SELECT * FROM forms WHERE id = :form_id LIMIT 1"),
+                {"form_id": form_id}
+            )
+            row = result.mappings().first()
+            if row:
+                form_data = dict(row)
+                # Parse JSON fields (theme contains custom font metadata)
+                import json as json_lib
+                for field in ['fields', 'theme', 'branding', 'allowed_domains', 'redirect']:
+                    if field in form_data and isinstance(form_data[field], str):
+                        try:
+                            form_data[field] = json_lib.loads(form_data[field])
+                        except:
+                            pass
+                return form_data
+        
+        # Fallback to file if not in database
         data = _load_form(form_id)
         return data
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Form not found")
+    except Exception as e:
+        print(f"Error loading form: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load form")
 
 
 # -----------------------------

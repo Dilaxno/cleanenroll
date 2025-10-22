@@ -249,7 +249,8 @@ async def get_user_info(request: Request, userId: str = Query(..., description="
                 SELECT uid, email, display_name, photo_url, plan,
                        forms_count, signup_ip, signup_country,
                        signup_geo_lat, signup_geo_lon, signup_user_agent,
-                       signup_at, created_at, updated_at
+                       signup_at, created_at, updated_at,
+                       subscription_id, last_payment_id
                 FROM users WHERE uid = :uid LIMIT 1
                 """
             ), {"uid": userId})
@@ -2602,12 +2603,24 @@ async def dodo_webhook(request: Request):
             async with async_session_maker() as session:
                 # Store subscription_id for active subscriptions, clear it for cancelled ones
                 if event_type in ("subscription.active", "subscription.renewed", "payment.succeeded"):
-                    if subscription_id:
+                    if subscription_id and payment_id:
+                        await session.execute(
+                            _text("UPDATE users SET plan = :plan, subscription_id = :sub_id, last_payment_id = :pay_id, updated_at = NOW() WHERE uid = :uid"),
+                            {"plan": new_plan, "sub_id": str(subscription_id), "pay_id": str(payment_id), "uid": resolved_uid},
+                        )
+                        logger.info("[dodo-webhook] stored subscription_id=%s payment_id=%s for uid=%s", subscription_id, payment_id, resolved_uid)
+                    elif subscription_id:
                         await session.execute(
                             _text("UPDATE users SET plan = :plan, subscription_id = :sub_id, updated_at = NOW() WHERE uid = :uid"),
                             {"plan": new_plan, "sub_id": str(subscription_id), "uid": resolved_uid},
                         )
                         logger.info("[dodo-webhook] stored subscription_id=%s for uid=%s", subscription_id, resolved_uid)
+                    elif payment_id:
+                        await session.execute(
+                            _text("UPDATE users SET plan = :plan, last_payment_id = :pay_id, updated_at = NOW() WHERE uid = :uid"),
+                            {"plan": new_plan, "pay_id": str(payment_id), "uid": resolved_uid},
+                        )
+                        logger.info("[dodo-webhook] stored payment_id=%s for uid=%s", payment_id, resolved_uid)
                     else:
                         await session.execute(
                             _text("UPDATE users SET plan = :plan, updated_at = NOW() WHERE uid = :uid"),

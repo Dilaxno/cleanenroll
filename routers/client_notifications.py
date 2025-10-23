@@ -243,44 +243,46 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
             # Owner notifications are handled separately in submit_form endpoint
             raise HTTPException(status_code=400, detail="Client email not found in submission data")
 
-    if not subject:
-        subject = "Notification"
-    if not html:
-        if text_fallback:
-            html = f"<pre style='white-space: pre-wrap; font-family: sans-serif;'>{text_fallback}</pre>"
-        else:
-            html = "<p>You have a new notification.</p>"
-    
     # Validate email format
     try:
         _validate_email(to_raw, allow_smtputf8=True)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid email address")
 
-    # If subject/html not provided, attempt to load from form auto-reply config
-    if not subject or not html:
-        try:
-            async with async_session_maker() as session:
-                res = await session.execute(
-                    text(
-                        """
-                        SELECT title, auto_reply_enabled, auto_reply_subject, auto_reply_message_html
-                        FROM forms
-                        WHERE id = :fid
-                        LIMIT 1
-                        """
-                    ),
-                    {"fid": form_id},
-                )
-                row = res.mappings().first()
-                if row and bool(row.get("auto_reply_enabled")):
-                    if not subject:
-                        subject = str(row.get("auto_reply_subject") or "Thank you for your submission").strip()
-                    if not html:
-                        html = str(row.get("auto_reply_message_html") or "").strip()
-        except Exception:
-            # best-effort; continue
-            pass
+    # Load auto-reply settings from form config (Thank You Email tab in builder)
+    # This takes priority over any defaults
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text(
+                    """
+                    SELECT title, auto_reply_enabled, auto_reply_subject, auto_reply_message_html
+                    FROM forms
+                    WHERE id = :fid
+                    LIMIT 1
+                    """
+                ),
+                {"fid": form_id},
+            )
+            row = res.mappings().first()
+            if row and bool(row.get("auto_reply_enabled")):
+                # Use form owner's configured auto-reply settings
+                if not subject:
+                    subject = str(row.get("auto_reply_subject") or "Thank you for your submission").strip()
+                if not html:
+                    html = str(row.get("auto_reply_message_html") or "").strip()
+    except Exception as e:
+        logger.error(f"Failed to load auto-reply settings: {e}")
+        # Continue with defaults if form config fails
+    
+    # Final fallbacks if still empty after loading form config
+    if not subject:
+        subject = "Thank you for your submission"
+    if not html:
+        if text_fallback:
+            html = f"<pre style='white-space: pre-wrap; font-family: sans-serif;'>{text_fallback}</pre>"
+        else:
+            html = "<p>Thank you for your submission!</p>"
 
     try:
         send_email_html(to_raw, subject, html)

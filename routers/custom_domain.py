@@ -226,27 +226,26 @@ async def delete_custom_domain(form_id: str):
 @router.api_route("/allow-domain", methods=["GET", "HEAD"])
 async def allow_domain(request: Request):
     """
-    Endpoint called by Caddy's on_demand_tls 'ask' directive.
-    Returns 'yes' if the Host or ?domain= param matches a verified custom domain.
+    Caddy calls this endpoint (on_demand_tls ask) to verify if a domain is allowed.
+    It must return plain text "yes" (200) if allowed, "no" (403) otherwise.
     """
-    domain = request.headers.get("Host") or request.query_params.get("domain")
-    inbound_domain = _normalize_domain(domain)
-    if not inbound_domain:
+    domain = request.query_params.get("domain") or request.headers.get("Host")
+    if not domain:
         return PlainTextResponse("no", status_code=403)
 
+    normalized = domain.lower().strip().rstrip(".")
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
                 SELECT id FROM forms
-                WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = LOWER(TRIM(BOTH '.' FROM :dom))
+                WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
                 LIMIT 1
             """),
-            {"dom": inbound_domain},
+            {"dom": normalized},
         )
         row = res.first()
 
     if row:
         return PlainTextResponse("yes", status_code=200)
-    return PlainTextResponse("no", status_code=403)
-
-
+    else:
+        return PlainTextResponse("no", status_code=403)

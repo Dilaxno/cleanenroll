@@ -2727,38 +2727,6 @@ async def _send_email_via_integration(user_id: str, to_email: str, subject: str,
     return _send_email_via_user_smtp(smtp_config, to_email, subject, html_body)
 
 # -----------------------------
-# -----------------------------
-# AI Copilot endpoint
-# -----------------------------
-
-@router.post("/ai/copilot")
-@limiter.limit("30/minute")
-async def ai_copilot(request: Request, payload: Dict[str, Any] | None = None):
-    """AI copilot for generating form field suggestions.
-    Body: { prompt: string, language?: string, title?: string, tone?: string, currentFields?: array }
-    Returns: { suggestions: { fields: array } }
-    """
-    payload = payload or {}
-    prompt = (payload.get("prompt") or "").strip()
-    
-    # For now, return a default/fallback response since AI integration is optional
-    # This prevents 404 errors and allows the frontend to use default fields
-    
-    # In the future, this could integrate with OpenAI or other AI services
-    # For example:
-    # openai_key = os.getenv("OPENAI_API_KEY")
-    # if openai_key and prompt:
-    #     # Call OpenAI API to generate field suggestions
-    #     pass
-    
-    # Return empty suggestions to let frontend use its default fields
-    return {
-        "suggestions": {
-            "fields": []
-        }
-    }
-
-# -----------------------------
 # reCAPTCHA verification endpoint
 # -----------------------------
 

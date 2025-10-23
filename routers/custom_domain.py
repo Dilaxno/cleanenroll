@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 import dns.resolver
 import logging
 from db.database import async_session_maker  # type: ignore
-from fastapi.responses import PlainTextResponse
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 

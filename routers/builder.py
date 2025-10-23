@@ -3022,7 +3022,8 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
 @limiter.limit("60/minute")
 async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[str, Any] | None = None):
     """Update auto-reply configuration on a form.
-    Body: { enabled?: bool, emailFieldId?: string, subject?: string, messageHtml?: string }
+    Body: { enabled?: bool, emailFieldId?: string, subject?: string, messageHtml?: string, 
+            buttonLabel?: string, buttonUrl?: string, buttonColor?: string }
     Requires Firebase auth and form ownership.
     """
     # Auth
@@ -3035,6 +3036,9 @@ async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[st
     email_field_id = payload.get("emailFieldId")
     subject = payload.get("subject")
     message_html = payload.get("messageHtml")
+    button_label = payload.get("buttonLabel")
+    button_url = payload.get("buttonUrl")
+    button_color = payload.get("buttonColor")
 
     # Persist into theme JSONB to avoid schema drift issues
     patch: Dict[str, Any] = {}
@@ -3046,6 +3050,12 @@ async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[st
         patch["autoReplySubject"] = subject.strip()
     if isinstance(message_html, str):
         patch["autoReplyMessageHtml"] = message_html
+    if isinstance(button_label, str):
+        patch["autoReplyButtonLabel"] = button_label.strip()
+    if isinstance(button_url, str):
+        patch["autoReplyButtonUrl"] = button_url.strip()
+    if isinstance(button_color, str):
+        patch["autoReplyButtonColor"] = button_color.strip()
     if not patch:
         return {"success": True, "updated": 0}
 

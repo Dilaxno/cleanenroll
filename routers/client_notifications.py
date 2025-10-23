@@ -251,12 +251,15 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
 
     # Load auto-reply settings from form config (Thank You Email tab in builder)
     # This takes priority over any defaults
+    button_label = None
+    button_url = None
+    button_color = None
     try:
         async with async_session_maker() as session:
             res = await session.execute(
                 text(
                     """
-                    SELECT title, auto_reply_enabled, auto_reply_subject, auto_reply_message_html
+                    SELECT title, auto_reply_enabled, auto_reply_subject, auto_reply_message_html, theme, branding
                     FROM forms
                     WHERE id = :fid
                     LIMIT 1
@@ -271,6 +274,24 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
                     subject = str(row.get("auto_reply_subject") or "Thank you for your submission").strip()
                 if not html:
                     html = str(row.get("auto_reply_message_html") or "").strip()
+                
+                # Load button customization from theme JSONB
+                import json
+                theme = row.get("theme")
+                if theme:
+                    if isinstance(theme, str):
+                        theme = json.loads(theme)
+                    button_label = theme.get("autoReplyButtonLabel") or "Visit Website"
+                    button_url = theme.get("autoReplyButtonUrl") or ""
+                    button_color = theme.get("autoReplyButtonColor") or "#4f46e5"
+                
+                # Get logo from branding for email template
+                branding = row.get("branding")
+                logo_url = None
+                if branding:
+                    if isinstance(branding, str):
+                        branding = json.loads(branding)
+                    logo_url = branding.get("logo")
     except Exception as e:
         logger.error(f"Failed to load auto-reply settings: {e}")
         # Continue with defaults if form config fails
@@ -283,9 +304,34 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
             html = f"<pre style='white-space: pre-wrap; font-family: sans-serif;'>{text_fallback}</pre>"
         else:
             html = "<p>Thank you for your submission!</p>"
+    
+    # Wrap in email template with branding and custom button
+    email_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body style="margin: 0; padding: 20px; background-color: #0B0F19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+        <div style="max-width: 600px; margin: 0 auto;">
+            {'<div style="text-align: center; margin-bottom: 20px;">' + f'<img src="{logo_url}" alt="Logo" style="max-width: 160px; height: auto;">' + '</div>' if logo_url else ''}
+            <div style="background-color: #111418; border-radius: 12px; padding: 24px;">
+                <div style="color: #ffffff; font-size: 16px; line-height: 1.6;">
+                    {html}
+                </div>
+                {f'<div style="margin-top: 24px; text-align: center;"><a href="{button_url}" style="display: inline-block; background-color: {button_color}; color: #ffffff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 14px;">{button_label}</a></div>' if button_url and button_label else ''}
+            </div>
+            <div style="text-align: center; margin-top: 16px; color: #c7c7c7; font-size: 12px;">
+                © {__import__('datetime').datetime.now().year} CleanEnroll
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
     try:
-        send_email_html(to_raw, subject, html)
+        send_email_html(to_raw, subject, email_html)
         return {"ok": True}
     except Exception as e:
         logger.exception("notify_client failed form_id=%s to=%s", form_id, to_raw)

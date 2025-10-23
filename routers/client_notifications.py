@@ -217,7 +217,7 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
                 async with async_session_maker() as session:
                     res = await session.execute(
                         text("""
-                            SELECT answers
+                            SELECT data
                             FROM submissions
                             WHERE id = :response_id AND form_id = :form_id
                             LIMIT 1
@@ -227,11 +227,11 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
                     row = res.mappings().first()
                     if row:
                         import json
-                        answers = row.get("answers")
-                        if isinstance(answers, str):
-                            answers = json.loads(answers)
-                        # Look for email field in answers
-                        for key, value in (answers or {}).items():
+                        submission_data = row.get("data")
+                        if isinstance(submission_data, str):
+                            submission_data = json.loads(submission_data)
+                        # Look for email field in submission data
+                        for key, value in (submission_data or {}).items():
                             if isinstance(value, str) and "@" in value and "." in value:
                                 to_raw = value.strip()
                                 break

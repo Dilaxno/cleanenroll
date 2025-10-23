@@ -145,6 +145,7 @@ router = APIRouter(prefix="/api/builder", tags=["builder"])
 async def _is_pro_plan(user_id: _Optional[str]) -> bool:
     """Return True if the user's plan in Neon is a paid tier."""
     if not user_id:
+        logger.debug("_is_pro_plan: no user_id provided")
         return False
     try:
         async with async_session_maker() as session:  # type: ignore
@@ -153,9 +154,13 @@ async def _is_pro_plan(user_id: _Optional[str]) -> bool:
                 {"uid": user_id},
             )
             row = res.mappings().first()
+            logger.debug("_is_pro_plan: user_id=%s row=%s", user_id, dict(row) if row else None)
             plan = str((row or {}).get("plan") or "").lower()
-            return plan in ("pro", "business", "enterprise")
-    except Exception:
+            is_pro = plan in ("pro", "business", "enterprise")
+            logger.debug("_is_pro_plan: user_id=%s plan=%s is_pro=%s", user_id, plan, is_pro)
+            return is_pro
+    except Exception as e:
+        logger.exception("_is_pro_plan: exception for user_id=%s", user_id)
         return False
 
 

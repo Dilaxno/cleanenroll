@@ -228,7 +228,7 @@ async def delete_custom_domain(form_id: str):
 # ─────────────────────────────
 # ALLOW DOMAIN (for Caddy on-demand TLS ask endpoint)
 # ─────────────────────────────
-@router.api_route("/api/allow-domain", methods=["GET", "HEAD"])
+@router.api_route("/allow-domain", methods=["GET", "HEAD"])
 async def allow_domain(request: Request):
     """
     Endpoint called by Caddy's on_demand_tls 'ask' directive.

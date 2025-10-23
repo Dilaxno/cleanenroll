@@ -4284,8 +4284,16 @@ async def list_form_responses(form_id: str, request: Request, limit: int = 50, o
                     item["lat"] = meta.get("lat")
                 if meta.get("lon"):
                     item["lon"] = meta.get("lon")
+                if meta.get("country"):
+                    # Expose metadata country (fallback if country_code column is empty)
+                    if not item.get("country"):
+                        item["country"] = meta.get("country")
+                    # Also store as country_code for consistency
+                    item["country_code"] = item.get("country") or meta.get("country")
                 if meta.get("signatures"):
                     item["signatures"] = meta.get("signatures")
+                # Store full metadata for frontend access
+                item["metadata"] = meta
             except Exception:
                 pass
             

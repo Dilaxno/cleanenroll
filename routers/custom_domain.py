@@ -226,11 +226,11 @@ async def delete_custom_domain(form_id: str):
 @router.api_route("/allow-domain", methods=["GET", "HEAD"])
 async def allow_domain(request: Request):
     """
-    Endpoint called by Caddy's on_demand_tls 'ask' directive.
-    Returns 'yes' if the Host (or ?domain= param) is found in the DB.
+    Called by Caddy's on_demand_tls 'ask' directive.
+    Must return plain text "ok" with status 200 to allow SSL issuance.
     """
     try:
-        domain = request.headers.get("Host") or request.query_params.get("domain")
+        domain = request.query_params.get("domain") or request.headers.get("Host")
         if not domain:
             logger.warning("[CADDY-ASK] No domain in request")
             return PlainTextResponse("no", status_code=403)
@@ -241,8 +241,9 @@ async def allow_domain(request: Request):
         async with async_session_maker() as session:
             res = await session.execute(
                 text("""
-                    SELECT id, custom_domain FROM forms
+                    SELECT id FROM forms
                     WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
+                      AND custom_domain_verified = TRUE
                     LIMIT 1
                 """),
                 {"dom": domain}
@@ -251,10 +252,11 @@ async def allow_domain(request: Request):
 
         if row:
             logger.warning(f"[CADDY-ASK] FOUND: {domain} -> {row[0]}")
-            return PlainTextResponse("yes", status_code=200)
-        
+            return PlainTextResponse("ok", status_code=200)
+
         logger.warning(f"[CADDY-ASK] NOT FOUND: {domain}")
         return PlainTextResponse("no", status_code=403)
+
     except Exception as e:
         logger.error(f"[CADDY-ASK] ERROR: {e}")
         return PlainTextResponse("no", status_code=403)

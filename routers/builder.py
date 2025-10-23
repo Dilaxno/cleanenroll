@@ -2582,14 +2582,17 @@ async def get_email_integration_status(request: Request, userId: Optional[str] =
 
 @router.post("/email/smtp/save")
 @limiter.limit("30/minute")
-async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = None, userId: Optional[str] = Query(default=None)):
+async def save_smtp_settings(request: Request, payload: Dict[str, Any] | None = None):
     """Save SMTP settings for a user in Neon DB including encrypted password.
     Expects JSON body: { host, port, username, password, fromEmail }
+    Authorization: Bearer token required
     Returns: { success: true }
     """
     try:
+        # Extract userId from Firebase token
+        userId = _verify_firebase_uid(request)
         if not userId:
-            raise HTTPException(status_code=400, detail="Missing userId")
+            raise HTTPException(status_code=401, detail="Authentication required")
         payload = payload or {}
         host = str(payload.get("host") or "").strip()
         try:

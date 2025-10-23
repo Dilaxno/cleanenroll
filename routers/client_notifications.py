@@ -254,6 +254,7 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
     button_label = None
     button_url = None
     button_color = None
+    logo_url = None
     try:
         async with async_session_maker() as session:
             res = await session.execute(

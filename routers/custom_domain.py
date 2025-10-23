@@ -2,8 +2,11 @@ from fastapi import APIRouter, HTTPException, Request
 from typing import Dict, Optional
 from sqlalchemy import text
 import dns.resolver
+import logging
 from db.database import async_session_maker  # type: ignore
 from fastapi.responses import PlainTextResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -228,11 +231,11 @@ async def allow_domain(request: Request):
     """
     domain = request.headers.get("Host") or request.query_params.get("domain")
     if not domain:
-        print("[allow-domain] No domain provided in Host header or query param")
+        logger.warning("[allow-domain] No domain provided in Host header or query param")
         return PlainTextResponse("no", status_code=403)
 
     domain = domain.strip().lower().rstrip(".")
-    print(f"[allow-domain] Checking domain: {domain}")
+    logger.info(f"[allow-domain] Checking domain: {domain}")
 
     async with async_session_maker() as session:
         res = await session.execute(
@@ -246,8 +249,8 @@ async def allow_domain(request: Request):
         row = res.first()
 
     if row:
-        print(f"[allow-domain] ✓ Domain found: {domain} -> form_id: {row[0]}")
+        logger.info(f"[allow-domain] ✓ Domain found: {domain} -> form_id: {row[0]}")
         return PlainTextResponse("yes", status_code=200)
     
-    print(f"[allow-domain] ✗ Domain NOT found: {domain}")
+    logger.warning(f"[allow-domain] ✗ Domain NOT found: {domain}")
     return PlainTextResponse("no", status_code=403)

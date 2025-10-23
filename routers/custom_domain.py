@@ -228,14 +228,16 @@ async def allow_domain(request: Request):
     """
     domain = request.headers.get("Host") or request.query_params.get("domain")
     if not domain:
+        print("[allow-domain] No domain provided in Host header or query param")
         return PlainTextResponse("no", status_code=403)
 
     domain = domain.strip().lower().rstrip(".")
+    print(f"[allow-domain] Checking domain: {domain}")
 
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
-                SELECT id FROM forms
+                SELECT id, custom_domain FROM forms
                 WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
                 LIMIT 1
             """),
@@ -244,5 +246,8 @@ async def allow_domain(request: Request):
         row = res.first()
 
     if row:
+        print(f"[allow-domain] ✓ Domain found: {domain} -> form_id: {row[0]}")
         return PlainTextResponse("yes", status_code=200)
+    
+    print(f"[allow-domain] ✗ Domain NOT found: {domain}")
     return PlainTextResponse("no", status_code=403)

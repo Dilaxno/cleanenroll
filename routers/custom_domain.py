@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from typing import Dict, Optional
 from sqlalchemy import text
 import dns.resolver
@@ -204,7 +204,6 @@ async def resolve_domain(hostname: str):
 # ─────────────────────────────
 # DELETE CUSTOM DOMAIN
 # ─────────────────────────────
-
 @router.delete("/forms/{form_id}/custom-domain")
 async def delete_custom_domain(form_id: str):
     """
@@ -227,11 +226,19 @@ async def delete_custom_domain(form_id: str):
 
 
 # ─────────────────────────────
-# ALLOW DOMAIN (for Caddy ask endpoint)
+# ALLOW DOMAIN (for Caddy on-demand TLS ask endpoint)
 # ─────────────────────────────
-
 @router.api_route("/api/allow-domain", methods=["GET", "HEAD"])
-async def allow_domain(domain: str):
+async def allow_domain(request: Request):
+    """
+    Endpoint called by Caddy's on_demand_tls 'ask' directive.
+    Returns 'yes' if the Host (or ?domain= param) is found in the DB.
+    """
+    domain = request.headers.get("Host") or request.query_params.get("domain")
+    if not domain:
+        return PlainTextResponse("no", status_code=403)
+
+    domain = domain.lower().rstrip(".")
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
@@ -239,10 +246,12 @@ async def allow_domain(domain: str):
                 WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
                 LIMIT 1
             """),
-            {"dom": domain.lower().rstrip(".")}
+            {"dom": domain}
         )
         row = res.first()
-        if row:
-            return PlainTextResponse("yes")
-    return PlainTextResponse("no")
+
+    if row:
+        return PlainTextResponse("yes", status_code=200)
+
+    return PlainTextResponse("no", status_code=403)
 

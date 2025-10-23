@@ -3221,6 +3221,17 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 form_data["fields"] = []
         elif not isinstance(v, list):
             form_data["fields"] = []
+        
+        # Normalize country restriction arrays (JSONB)
+        for k in ("allowed_countries", "restricted_countries"):
+            v = form_data.get(k)
+            if isinstance(v, str):
+                try:
+                    form_data[k] = json.loads(v)
+                except Exception:
+                    form_data[k] = []
+            elif not isinstance(v, list):
+                form_data[k] = []
     except HTTPException:
         raise
     except Exception:

@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException, Request
-from typing import Dict, Optional
-from sqlalchemy import text
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
+from fastapi.responses import PlainTextResponse, JSONResponse
+from pydantic import BaseModel
 import dns.resolver
 import logging
 from db.database import async_session_maker  # type: ignore
@@ -175,8 +175,21 @@ async def get_cert_status(form_id: str):
 # ─────────────────────────────
 # RESOLVE DOMAIN → FORM
 # ─────────────────────────────
+@router.options("/resolve-domain/{hostname}")
+async def resolve_domain_options(hostname: str, request: Request):
+    """Handle CORS preflight for resolve-domain endpoint."""
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
 @router.get("/resolve-domain/{hostname}")
-async def resolve_domain(hostname: str):
+async def resolve_domain(hostname: str, request: Request):
     """Used by Caddy or frontend to find which form should be served for a given custom domain."""
     inbound_domain = _normalize_domain(hostname)
     async with async_session_maker() as session:
@@ -192,12 +205,31 @@ async def resolve_domain(hostname: str):
         row = res.mappings().first()
 
     if not row:
-        raise HTTPException(status_code=404, detail="No form bound to this domain")
+        # Return 404 with CORS headers
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "No form bound to this domain"},
+            headers={
+                "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
 
-    return {
-        "formId": row.get("id"),
-        "domain": row.get("custom_domain"),
-        "message": "Form mapped successfully for custom domain."
+    # Return success with CORS headers
+    return JSONResponse(
+        content={
+            "formId": row.get("id"),
+            "domain": row.get("custom_domain"),
+            "message": "Form mapped successfully for custom domain."
+        },
+        headers={
+            "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
     }
 
 

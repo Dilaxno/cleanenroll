@@ -241,10 +241,12 @@ for k in ("FRONTEND_URL", "FRONTEND_URL2", "CORS_ORIGIN", "CORS_ORIGINS"):
         continue
 _allow_origins = _env_origins_list or list(dict.fromkeys(_default_origins + _extra))
 
+# Allow all origins for custom domain support
+# Custom domains (e.g., form.quickcap.pro) need to fetch forms from API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allow_origins,
-    allow_credentials=True,
+    allow_origins=["*"],  # Allow all origins for custom domains
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )

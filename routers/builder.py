@@ -2156,6 +2156,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
     privacy_policy_url = payload.get("privacyPolicyUrl") or payload.get("privacy_policy_url")
     restricted_countries = payload.get("restrictedCountries")
+    allowed_countries = payload.get("allowedCountries")
     # Link safety check (URL scanner)
     url_scan_enabled = payload.get("urlScanEnabled")
     # File safety check
@@ -2207,6 +2208,13 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             norm = [str(c).strip().upper() for c in restricted_countries if str(c).strip()]
             sets.append("restricted_countries = CAST(:restricted_countries AS JSONB)")
             params["restricted_countries"] = json.dumps(norm)
+        except Exception:
+            pass
+    if isinstance(allowed_countries, list):
+        try:
+            norm = [str(c).strip().upper() for c in allowed_countries if str(c).strip()]
+            sets.append("allowed_countries = CAST(:allowed_countries AS JSONB)")
+            params["allowed_countries"] = json.dumps(norm)
         except Exception:
             pass
     # Link safety check (URL scanner)

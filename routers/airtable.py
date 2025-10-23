@@ -124,6 +124,12 @@ async def _write_integration(user_id: str, payload: Dict[str, Any]) -> None:
         access_token = airtable_data.get("accessToken")
         refresh_token = airtable_data.get("refreshToken")
         expires_at = airtable_data.get("expiresAt")
+        
+        # Convert Unix timestamp to datetime if needed
+        if expires_at and isinstance(expires_at, (int, float)):
+            from datetime import datetime, timezone
+            expires_at = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        
         scopes = airtable_data.get("scopes") or []
         mappings = cur.get("airtableMappings") or {}
         

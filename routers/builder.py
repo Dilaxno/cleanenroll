@@ -4536,51 +4536,109 @@ async def list_responses(
 
         ids_raw = (payload or {}).get("ids") or []
         ids: List[str] = []
-    #   - from (ISO datetime): include days >= this date
-    #   - to (ISO datetime): include days <= this date
-    # When no range is provided, returns the all-time totals.
-
-    data = _load_analytics_countries(form_id)
-    if not from_ts and not to_ts:
-        return {"countries": data.get("total") or {}}
-
-    def _to_date(s: Optional[str]) -> Optional[datetime]:
-        if not s:
-            return None
+        for item in ids_raw:
+            sid = str(item).strip()
+            if sid:
+                ids.append(sid)
+        
+        if not ids:
+            return {"success": False, "deleted": 0, "idsDeleted": [], "idsFailed": []}
+        
+        # Verify ownership
         try:
-            x = str(s).strip()
-            if x.endswith("Z"):
-                x = x[:-1] + "+00:00"
-            dt = datetime.fromisoformat(x)
-            return dt
+            async with async_session_maker() as session:
+                res = await session.execute(
+                    text("SELECT user_id FROM forms WHERE id = :fid LIMIT 1"),
+                    {"fid": form_id}
+                )
+                row = res.mappings().first()
+                if not row or str(row.get("user_id")) != uid:
+                    raise HTTPException(status_code=403, detail="Forbidden")
+        except HTTPException:
+            raise
         except Exception:
-            try:
-                return datetime.fromisoformat(str(s)[:10] + "T00:00:00+00:00")
-            except Exception:
+            raise HTTPException(status_code=500, detail="Database error")
+        
+        # Delete from Neon submissions table
+        deleted_ids = []
+        failed_ids = []
+        
+        try:
+            async with async_session_maker() as session:
+                for submission_id in ids:
+                    try:
+                        result = await session.execute(
+                            text("DELETE FROM submissions WHERE id = :sid AND form_id = :fid"),
+                            {"sid": submission_id, "fid": form_id}
+                        )
+                        if result.rowcount > 0:
+                            deleted_ids.append(submission_id)
+                        else:
+                            failed_ids.append(submission_id)
+                    except Exception:
+                        failed_ids.append(submission_id)
+                await session.commit()
+        except Exception as e:
+            logger.exception("delete_responses_batch: error deleting submissions")
+            raise HTTPException(status_code=500, detail="Failed to delete submissions")
+        
+        return {
+            "success": True,
+            "deleted": len(deleted_ids),
+            "idsDeleted": deleted_ids,
+            "idsFailed": failed_ids
+        }
+
+    @router.get("/forms/{form_id}/analytics/countries")
+    async def get_analytics_countries(form_id: str, request: Request, from_ts: Optional[str] = None, to_ts: Optional[str] = None):
+        """
+        Return country analytics for the given form, optionally filtered by date range.
+        Query params:
+          - from (ISO datetime): include days >= this date
+          - to (ISO datetime): include days <= this date
+        When no range is provided, returns the all-time totals.
+        """
+        data = _load_analytics_countries(form_id)
+        if not from_ts and not to_ts:
+            return {"countries": data.get("total") or {}}
+
+        def _to_date(s: Optional[str]) -> Optional[datetime]:
+            if not s:
                 return None
-
-    start = _to_date(from_ts)
-    end = _to_date(to_ts)
-    if start is None and end is None:
-        return {"countries": data.get("total") or {}}
-
-    daily = data.get("daily") or {}
-    agg: Dict[str, int] = {}
-    for day, bucket in daily.items():
-        try:
-            day_dt = datetime.fromisoformat(day + "T00:00:00+00:00")
-        except Exception:
-            continue
-        if start and day_dt < start.replace(hour=0, minute=0, second=0, microsecond=0):
-            continue
-        if end and day_dt > end.replace(hour=0, minute=0, second=0, microsecond=0):
-            continue
-        for iso, cnt in (bucket or {}).items():
             try:
-                agg[iso] = int(agg.get(iso, 0)) + int(cnt or 0)
+                x = str(s).strip()
+                if x.endswith("Z"):
+                    x = x[:-1] + "+00:00"
+                dt = datetime.fromisoformat(x)
+                return dt
+            except Exception:
+                try:
+                    return datetime.fromisoformat(str(s)[:10] + "T00:00:00+00:00")
+                except Exception:
+                    return None
+
+        start = _to_date(from_ts)
+        end = _to_date(to_ts)
+        if start is None and end is None:
+            return {"countries": data.get("total") or {}}
+
+        daily = data.get("daily") or {}
+        agg: Dict[str, int] = {}
+        for day, bucket in daily.items():
+            try:
+                day_dt = datetime.fromisoformat(day + "T00:00:00+00:00")
             except Exception:
                 continue
-    return {"countries": agg}
+            if start and day_dt < start.replace(hour=0, minute=0, second=0, microsecond=0):
+                continue
+            if end and day_dt > end.replace(hour=0, minute=0, second=0, microsecond=0):
+                continue
+            for iso, cnt in (bucket or {}).items():
+                try:
+                    agg[iso] = int(agg.get(iso, 0)) + int(cnt or 0)
+                except Exception:
+                    continue
+        return {"countries": agg}
 
 # -----------------------------
 # DNS Provider: Cloudflare (API token based)

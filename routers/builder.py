@@ -3323,8 +3323,11 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
 
     # Geo restriction enforcement (allowed whitelist takes precedence when provided)
     # Database uses snake_case (restricted_countries, allowed_countries)
+    logger.debug("geo: is_pro=%s owner_id=%s", is_pro, owner_id)
+    logger.debug("geo: raw allowed_countries=%s restricted_countries=%s", form_data.get("allowed_countries"), form_data.get("restricted_countries"))
     allowed = _normalize_country_list(form_data.get("allowed_countries") or []) if is_pro else []
     restricted = _normalize_country_list(form_data.get("restricted_countries") or []) if is_pro else []
+    logger.debug("geo: normalized allowed=%s restricted=%s", allowed, restricted)
     if allowed or restricted:
         detected, country = _country_from_ip(ip)
         

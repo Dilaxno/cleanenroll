@@ -220,20 +220,18 @@ async def delete_custom_domain(form_id: str):
     return {"success": True, "message": "Custom domain removed successfully"}
 
 
-# ─────────────────────────────
-# ALLOW DOMAIN (for Caddy on-demand TLS ask endpoint)
-# ─────────────────────────────
-@router.api_route("/allow-domain", methods=["GET", "HEAD"])
+@router.api_route("/api/allow-domain", methods=["GET", "HEAD"])
 async def allow_domain(request: Request):
     """
-    Caddy calls this endpoint (on_demand_tls ask) to verify if a domain is allowed.
-    It must return plain text "yes" (200) if allowed, "no" (403) otherwise.
+    Endpoint called by Caddy's on_demand_tls 'ask' directive.
+    Returns 'yes' if the Host (or ?domain= param) is found in the DB.
     """
-    domain = request.query_params.get("domain") or request.headers.get("Host")
+    domain = request.headers.get("Host") or request.query_params.get("domain")
     if not domain:
         return PlainTextResponse("no", status_code=403)
 
-    normalized = domain.lower().strip().rstrip(".")
+    domain = domain.strip().lower().rstrip(".")
+
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
@@ -241,11 +239,10 @@ async def allow_domain(request: Request):
                 WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
                 LIMIT 1
             """),
-            {"dom": normalized},
+            {"dom": domain}
         )
         row = res.first()
 
     if row:
         return PlainTextResponse("yes", status_code=200)
-    else:
-        return PlainTextResponse("no", status_code=403)
+    return PlainTextResponse("no", status_code=403)

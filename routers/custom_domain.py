@@ -11,6 +11,7 @@ CUSTOM_DOMAIN_TARGET = "api.cleanenroll.com"  # Your backend host
 
 
 def _normalize_domain(dom: Optional[str]) -> Optional[str]:
+    """Normalize domain by trimming whitespace, lowercasing, and removing trailing dots."""
     if not dom:
         return None
     return dom.strip().lower().rstrip(".")
@@ -103,9 +104,7 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
 # ─────────────────────────────
 @router.post("/forms/{form_id}/custom-domain/issue-cert")
 async def issue_cert(form_id: str):
-    """
-    Dummy endpoint (Caddy issues cert automatically on first HTTPS request).
-    """
+    """Dummy endpoint (Caddy issues cert automatically on first HTTPS request)."""
     async with async_session_maker() as session:
         res = await session.execute(
             text("SELECT custom_domain, custom_domain_verified FROM forms WHERE id = :fid LIMIT 1"),
@@ -115,7 +114,7 @@ async def issue_cert(form_id: str):
 
     if not row:
         raise HTTPException(status_code=404, detail="Form not found")
-    
+
     domain_val = _normalize_domain(row.get("custom_domain"))
     if not domain_val:
         raise HTTPException(status_code=400, detail="No custom domain configured")
@@ -175,9 +174,7 @@ async def get_cert_status(form_id: str):
 # ─────────────────────────────
 @router.get("/resolve-domain/{hostname}")
 async def resolve_domain(hostname: str):
-    """
-    Used by Caddy or frontend to find which form should be served for a given custom domain.
-    """
+    """Used by Caddy or frontend to find which form should be served for a given custom domain."""
     inbound_domain = _normalize_domain(hostname)
     async with async_session_maker() as session:
         res = await session.execute(
@@ -206,9 +203,7 @@ async def resolve_domain(hostname: str):
 # ─────────────────────────────
 @router.delete("/forms/{form_id}/custom-domain")
 async def delete_custom_domain(form_id: str):
-    """
-    Remove custom domain from the form in Neon DB.
-    """
+    """Remove custom domain from the form in Neon DB."""
     async with async_session_maker() as session:
         await session.execute(
             text("""
@@ -232,26 +227,26 @@ async def delete_custom_domain(form_id: str):
 async def allow_domain(request: Request):
     """
     Endpoint called by Caddy's on_demand_tls 'ask' directive.
-    Returns 'yes' if the Host (or ?domain= param) is found in the DB.
+    Returns 'yes' if the Host or ?domain= param matches a verified custom domain.
     """
     domain = request.headers.get("Host") or request.query_params.get("domain")
-    if not domain:
+    inbound_domain = _normalize_domain(domain)
+    if not inbound_domain:
         return PlainTextResponse("no", status_code=403)
 
-    domain = domain.lower().rstrip(".")
     async with async_session_maker() as session:
         res = await session.execute(
             text("""
                 SELECT id FROM forms
-                WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
+                WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = LOWER(TRIM(BOTH '.' FROM :dom))
                 LIMIT 1
             """),
-            {"dom": domain}
+            {"dom": inbound_domain},
         )
         row = res.first()
 
     if row:
         return PlainTextResponse("yes", status_code=200)
-
     return PlainTextResponse("no", status_code=403)
+
 

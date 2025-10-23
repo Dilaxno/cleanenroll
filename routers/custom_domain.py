@@ -230,7 +230,7 @@ async def resolve_domain(hostname: str, request: Request):
             "Access-Control-Allow-Methods": "GET, OPTIONS",
             "Access-Control-Allow-Headers": "*",
         }
-    }
+    )
 
 
 # ─────────────────────────────

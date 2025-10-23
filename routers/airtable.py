@@ -284,9 +284,9 @@ async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
 async def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
     data = await _read_integration(user_id)
     integ = (data.get("airtable") or {})
-    tok = integ.get("token")
+    tok = integ.get("accessToken")  # Changed from "token" to "accessToken"
     rtok = integ.get("refreshToken")
-    expiry = int(integ.get("expiry") or 0)
+    expiry = int(integ.get("expiresAt") or 0)  # Changed from "expiry" to "expiresAt"
     if not tok:
         raise HTTPException(status_code=400, detail="Airtable not connected for this user")
     return _decrypt_token(tok), (_decrypt_token(rtok) if rtok else None), expiry
@@ -296,11 +296,11 @@ async def _save_tokens(user_id: str, access_token: str, refresh_token: Optional[
     enc_access = _encrypt_token(access_token)
     integ = await _read_integration(user_id)
     cur = integ.get("airtable") or {}
-    cur.update({"token": enc_access})
+    cur.update({"accessToken": enc_access})  # Changed from "token" to "accessToken"
     if refresh_token:
         cur["refreshToken"] = _encrypt_token(refresh_token)
     if expires_in:
-        cur["expiry"] = int(time.time()) + int(expires_in)
+        cur["expiresAt"] = int(time.time()) + int(expires_in)  # Changed from "expiry" to "expiresAt"
     integ["airtable"] = cur
     await _write_integration(user_id, integ)
 

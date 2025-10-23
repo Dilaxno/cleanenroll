@@ -209,41 +209,39 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
     text_fallback = str(payload.get("text") or "").strip()
     full_name = str(payload.get("fullName") or "").strip()
 
-    # If direct recipient not provided, notify form owner as fallback
+    # If recipient not provided, try to extract from latest submission (for auto-reply)
     if not to_raw:
-        try:
-            async with async_session_maker() as session:
-                res = await session.execute(
-                    text("""
-                        SELECT u.email, f.title
-                        FROM forms f
-                        JOIN users u ON f.user_id = u.uid
-                        WHERE f.id = :fid
-                        LIMIT 1
-                    """),
-                    {"fid": form_id}
-                )
-                row = res.mappings().first()
-                if row and row.get("email"):
-                    to_raw = str(row.get("email")).strip()
-                    if not subject:
-                        form_title = str(row.get("title") or "Form")
-                        subject = f"New submission for {form_title}"
-                    if not html:
-                        preview = str(payload.get("preview") or "").strip()
-                        response_id = str(payload.get("responseId") or "").strip()
-                        html = f"<p>You received a new form submission.</p>"
-                        if preview:
-                            html += f"<p><strong>Preview:</strong> {preview}</p>"
-                        if response_id:
-                            html += f"<p><strong>Response ID:</strong> {response_id}</p>"
-                else:
-                    raise HTTPException(status_code=400, detail="Form owner email not found")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to fetch form owner email: {e}")
-            raise HTTPException(status_code=400, detail="Recipient email is required.")
+        response_id = str(payload.get("responseId") or "").strip()
+        if response_id:
+            try:
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text("""
+                            SELECT answers
+                            FROM submissions
+                            WHERE id = :response_id AND form_id = :form_id
+                            LIMIT 1
+                        """),
+                        {"response_id": response_id, "form_id": form_id}
+                    )
+                    row = res.mappings().first()
+                    if row:
+                        import json
+                        answers = row.get("answers")
+                        if isinstance(answers, str):
+                            answers = json.loads(answers)
+                        # Look for email field in answers
+                        for key, value in (answers or {}).items():
+                            if isinstance(value, str) and "@" in value and "." in value:
+                                to_raw = value.strip()
+                                break
+            except Exception as e:
+                logger.error(f"Failed to extract email from submission: {e}")
+        
+        if not to_raw:
+            # Don't send anything - this endpoint is for CLIENT auto-replies only
+            # Owner notifications are handled separately in submit_form endpoint
+            raise HTTPException(status_code=400, detail="Client email not found in submission data")
 
     if not subject:
         subject = "Notification"

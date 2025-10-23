@@ -209,9 +209,41 @@ async def notify_client(form_id: str, request: Request, payload: Dict[str, Any] 
     text_fallback = str(payload.get("text") or "").strip()
     full_name = str(payload.get("fullName") or "").strip()
 
-    # If direct recipient not provided, try to derive from submission values using fieldId or form config
+    # If direct recipient not provided, notify form owner as fallback
     if not to_raw:
-        raise HTTPException(status_code=400, detail="Recipient email is required.")
+        try:
+            async with async_session_maker() as session:
+                res = await session.execute(
+                    text("""
+                        SELECT u.email, f.title
+                        FROM forms f
+                        JOIN users u ON f.user_id = u.uid
+                        WHERE f.id = :fid
+                        LIMIT 1
+                    """),
+                    {"fid": form_id}
+                )
+                row = res.mappings().first()
+                if row and row.get("email"):
+                    to_raw = str(row.get("email")).strip()
+                    if not subject:
+                        form_title = str(row.get("title") or "Form")
+                        subject = f"New submission for {form_title}"
+                    if not html:
+                        preview = str(payload.get("preview") or "").strip()
+                        response_id = str(payload.get("responseId") or "").strip()
+                        html = f"<p>You received a new form submission.</p>"
+                        if preview:
+                            html += f"<p><strong>Preview:</strong> {preview}</p>"
+                        if response_id:
+                            html += f"<p><strong>Response ID:</strong> {response_id}</p>"
+                else:
+                    raise HTTPException(status_code=400, detail="Form owner email not found")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to fetch form owner email: {e}")
+            raise HTTPException(status_code=400, detail="Recipient email is required.")
 
     if not subject:
         subject = "Notification"

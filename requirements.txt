@@ -27,6 +27,7 @@ slowapi>=0.1.8
 fastratelimiter>=0.0.4
 itsdangerous>=2.2.0
 requests>=2.31.0
+httpx>=0.27.0
 rapidfuzz>=3.6.1
 python-whois>=0.8.0
 boto3>=1.34.0

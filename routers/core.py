@@ -1378,28 +1378,7 @@ async def verify_custom_domain(req: VerifyCustomDomainRequest):
         json.dump(data, f, ensure_ascii=False, indent=2)
     return {"status": "ok", "verified": True, "domain": dom}
 
-@router.get("/api/allow-domain")
-async def allow_domain(domain: str | None = None, request: Request = None):
-    """Endpoint for Caddy on_demand_tls ask. Returns 200 if domain is allowed.
-    Caddy calls: GET /api/allow-domain?domain=<requested-host>&remote_ip=<ip>
-    """
-    dom = _normalize_domain(domain or "")
-    if not _is_valid_domain(dom):
-        return PlainTextResponse("invalid", status_code=403)
-    try:
-        for name in os.listdir(DATA_DIR):
-            if not name.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(DATA_DIR, name), "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if data.get("customDomainVerified") and _normalize_domain(str(data.get("customDomain") or "")) == dom:
-                    return PlainTextResponse("ok", status_code=200)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return PlainTextResponse("denied", status_code=403)
+# allow_domain route moved to custom_domain.py (uses database instead of JSON files)
 
 @router.get("/api/validate-email")
 @router.get("/api/validate-email/")

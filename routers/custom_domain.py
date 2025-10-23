@@ -222,36 +222,39 @@ async def delete_custom_domain(form_id: str):
         await session.commit()
     return {"success": True, "message": "Custom domain removed successfully"}
 
-
-@router.api_route("/allow-domain", methods=["GET", "HEAD"])
+@router.get("/allow-domain")
 async def allow_domain(request: Request):
+    """
+    Called by Caddy's on_demand_tls 'ask' directive.
+    Returns 'yes' if ?domain=<domain> exists in the database.
+    """
     try:
-        domain = request.headers.get("Host") or request.query_params.get("domain")
+        domain = request.query_params.get("domain")
         if not domain:
-            logger.warning("[CADDY-ASK] No domain in request")
+            logger.warning("[CADDY-ASK] Missing domain parameter")
             return PlainTextResponse("no", status_code=403)
 
         domain = domain.strip().lower().rstrip(".")
-        logger.warning(f"[CADDY-ASK] Checking: '{domain}'")  # 👈 Add this
+        logger.warning(f"[CADDY-ASK] Checking: '{domain}'")
 
         async with async_session_maker() as session:
             res = await session.execute(
                 text("""
-                    SELECT id, custom_domain
-                    FROM forms
-                    WHERE LOWER(TRIM(BOTH '.' FROM COALESCE(custom_domain, ''))) = :dom
+                    SELECT id FROM forms
+                    WHERE LOWER(TRIM(BOTH FROM custom_domain)) = :domain
                     LIMIT 1
                 """),
-                {"dom": domain}
+                {"domain": domain}
             )
             row = res.first()
 
         if row:
-            logger.warning(f"[CADDY-ASK] FOUND: {domain} -> {row[0]}")
+            logger.warning(f"[CADDY-ASK] FOUND {domain} -> id={row[0]}")
             return PlainTextResponse("yes", status_code=200)
 
-        logger.warning(f"[CADDY-ASK] NOT FOUND: {domain}")
+        logger.warning(f"[CADDY-ASK] NOT FOUND: '{domain}'")
         return PlainTextResponse("no", status_code=403)
+
     except Exception as e:
         logger.error(f"[CADDY-ASK] ERROR: {e}")
         return PlainTextResponse("no", status_code=403)

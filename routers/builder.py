@@ -2122,6 +2122,7 @@ async def public_get_form(form_id: str):
                     "theme": _json_or(data.get("theme"), {}) or {},
                     "branding": _json_or(data.get("branding"), data.get("branding") or {}) or {},
                     "fields": _json_or(data.get("fields"), data.get("fields") or []) or [],
+                    "submitButton": computed_btn,  # Add submitButton at root level for FormViewPage
                 }
                 # Final normalization pass to ensure all booleans (including nested ones) are proper Python booleans
                 # This is critical for React components that check boolean props with strict equality

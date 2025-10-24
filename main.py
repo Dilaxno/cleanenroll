@@ -93,6 +93,7 @@ from routers.fonts import router as fonts_router  # type: ignore
 from routers.user_stats import router as user_stats_router  # type: ignore
 from routers.geocoding import router as geocoding_router  # type: ignore
 from routers.schedules import router as schedules_router  # type: ignore
+from routers.admin_live_visitors import router as admin_live_visitors_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -284,6 +285,7 @@ app.include_router(fonts_router)
 app.include_router(user_stats_router)
 app.include_router(geocoding_router)
 app.include_router(schedules_router)
+app.include_router(admin_live_visitors_router)
 
 
 if __name__ == "__main__":

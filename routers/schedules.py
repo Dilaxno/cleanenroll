@@ -100,8 +100,8 @@ async def get_user_schedules(
                     field_label = field.get('label', '') or field.get('question', '') or 'Untitled Field'
                     
                     if field_type in ['date', 'age', 'calendar', 'time', 'zoom-meeting']:
-                        # Get the value from submission data
-                        field_value = submission_data.get(field_id)
+                        # Get the value from submission data (submissions use field labels as keys, not IDs)
+                        field_value = submission_data.get(field_label)
                         
                         if field_value:
                             # Parse date value

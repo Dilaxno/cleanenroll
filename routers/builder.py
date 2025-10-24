@@ -813,8 +813,8 @@ class FormConfig(BaseModel):
     autoReplyEmailFieldId: Optional[str] = None
     autoReplySubject: Optional[str] = None
     autoReplyMessageHtml: Optional[str] = None
-    # Optional custom footer HTML for auto-reply emails
-    autoReplyFooterHtml: Optional[str] = None
+    # Copyright name for auto-reply email footer (e.g., "YourCompany.com")
+    autoReplyCopyright: Optional[str] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 

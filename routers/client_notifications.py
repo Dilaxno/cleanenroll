@@ -153,25 +153,41 @@ async def send_auto_reply_email(
         subject = _apply_tokens(subject_tpl)
         content_html = _apply_tokens(body_tpl)
         
-        # Get branding and font settings
+        # Get theme and branding settings
         theme = cfg.get("theme") or {}
         branding = cfg.get("branding") or {}
-        font_href = theme.get("fontUrl") or None
-        font_family = theme.get("fontFamily") or None
-        footer_html = (cfg.get("autoReplyFooterHtml") or "").strip() or None
         
-        # Render email with client template
-        html = render_email("client_base.html", {
+        # Font settings
+        font_href = theme.get("fontUrl") or None
+        font_family = theme.get("fontFamily") or "Inter"
+        
+        # Copyright name for footer
+        copyright_name = (cfg.get("autoReplyCopyright") or "").strip() or None
+        
+        # Button customization
+        button_label = theme.get("autoReplyButtonLabel") or cfg.get("autoReplyButtonLabel") or None
+        button_url = theme.get("autoReplyButtonUrl") or cfg.get("autoReplyButtonUrl") or None
+        button_color = theme.get("autoReplyButtonColor") or cfg.get("autoReplyButtonColor") or "#3b82f6"
+        button_text_color = theme.get("autoReplyButtonTextColor") or cfg.get("autoReplyButtonTextColor") or "#ffffff"
+        
+        # Get current year for copyright
+        from datetime import datetime
+        current_year = datetime.now().year
+        
+        # Render email with thank you template (separate from app notifications)
+        html = render_email("thankyou.html", {
             "subject": subject,
-            "title": subject,
-            "preheader": None,
-            "intro": None,
+            "preheader": subject,
             "content_html": content_html,
-            "footer_html": footer_html,
             "font_href": font_href,
             "font_family": font_family,
-            "brand_logo": branding.get("logo") or None,
-            "brand_name": cfg.get("title") or ""
+            "copyright_name": copyright_name,
+            "form_title": cfg.get("title") or "Our Team",
+            "year": current_year,
+            "cta_label": button_label,
+            "cta_url": button_url,
+            "button_color": button_color,
+            "button_text_color": button_text_color
         })
         
         # Try to send via user's email integration first, then fall back to default

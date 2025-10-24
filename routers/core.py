@@ -676,9 +676,10 @@ async def signup_enrich(request: Request):
 
     # Persist signup metadata to Neon (users table), best-effort
     try:
+        from sqlalchemy import text as _text  # type: ignore
         async with async_session_maker() as session:
             await session.execute(
-                """
+                _text("""
                 UPDATE users
                 SET signup_ip = :ip,
                     signup_country = :country,
@@ -688,7 +689,7 @@ async def signup_enrich(request: Request):
                     signup_at = NOW(),
                     updated_at = NOW()
                 WHERE uid = :uid
-                """,
+                """),
                 {
                     "ip": ip or None,
                     "country": (str(country).upper() if isinstance(country, str) and country else None),
@@ -781,6 +782,7 @@ async def signup_upsert(request: Request, body: SignupUpsertPayload):
 
     # Upsert into Neon
     try:
+        from sqlalchemy import text as _text  # type: ignore
         async with async_session_maker() as session:
             await session.execute(
                 _text(

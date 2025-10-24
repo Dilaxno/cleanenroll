@@ -3185,6 +3185,12 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     """
     # Load the form from Neon (PostgreSQL); require that it's published
     owner_email = None  # Will be fetched early to avoid transaction conflicts
+    
+    # Extract session_id from payload for completion time tracking
+    session_id = None
+    if isinstance(payload, dict):
+        session_id = str(payload.get("sessionId") or payload.get("session_id") or "").strip() or None
+    
     try:
         async with async_session_maker() as session:
             res = await session.execute(
@@ -3875,10 +3881,10 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 """
                 INSERT INTO submissions (
                     id, form_id, form_owner_id, data, metadata,
-                    ip_address, country_code, user_agent, submitted_at
+                    ip_address, country_code, user_agent, submitted_at, session_id
                 ) VALUES (
                 :id, :form_id, :owner_id, CAST(:data AS JSONB), CAST(:metadata AS JSONB),
-                :ip, :country, :ua, :submitted_at
+                :ip, :country, :ua, :submitted_at, :session_id
             )
             """
             ),
@@ -3893,6 +3899,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 "country": (country_code or "").upper() or None,
                 "ua": str(request.headers.get("user-agent") or ""),
                 "submitted_at": submitted_at,
+                "session_id": session_id,
             },
         )
         # Optional: marker row

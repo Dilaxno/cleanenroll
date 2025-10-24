@@ -198,34 +198,40 @@ async def get_user_analytics(
             os_stats[os] = os_stats.get(os, 0) + count
         
         # Calculate average completion time (time between form_started and submission)
-        completion_time_query = text(f"""
-            WITH starts AS (
-                SELECT a.session_id, a.form_id, MIN(a.created_at) as start_time
-                FROM analytics a
-                INNER JOIN forms f ON a.form_id = f.id
-                WHERE f.user_id = :uid
-                  AND a.type = 'form_started'
-                  AND a.session_id IS NOT NULL
-                  {form_filter}
-                  {date_filter}
-                GROUP BY a.session_id, a.form_id
-            ),
-            completions AS (
-                SELECT s.session_id, s.form_id, s.submitted_at as end_time
-                FROM submissions s
-                INNER JOIN forms f ON s.form_id = f.id
-                WHERE f.user_id = :uid
-                  AND s.session_id IS NOT NULL
-                  {form_filter.replace("f.id", "s.form_id")}
-                  {sub_date_filter}
-            )
-            SELECT AVG(EXTRACT(EPOCH FROM (c.end_time - st.start_time))) as avg_seconds
-            FROM starts st
-            INNER JOIN completions c ON st.session_id = c.session_id AND st.form_id = c.form_id
-            WHERE c.end_time > st.start_time
-        """)
-        completion_result = await session.execute(completion_time_query, params)
-        avg_completion_seconds = completion_result.scalar() or 0
+        # Gracefully handle missing session_id column in submissions table
+        avg_completion_seconds = 0
+        try:
+            completion_time_query = text(f"""
+                WITH starts AS (
+                    SELECT a.session_id, a.form_id, MIN(a.created_at) as start_time
+                    FROM analytics a
+                    INNER JOIN forms f ON a.form_id = f.id
+                    WHERE f.user_id = :uid
+                      AND a.type = 'form_started'
+                      AND a.session_id IS NOT NULL
+                      {form_filter}
+                      {date_filter}
+                    GROUP BY a.session_id, a.form_id
+                ),
+                completions AS (
+                    SELECT s.session_id, s.form_id, s.submitted_at as end_time
+                    FROM submissions s
+                    INNER JOIN forms f ON s.form_id = f.id
+                    WHERE f.user_id = :uid
+                      AND s.session_id IS NOT NULL
+                      {form_filter.replace("f.id", "s.form_id")}
+                      {sub_date_filter}
+                )
+                SELECT AVG(EXTRACT(EPOCH FROM (c.end_time - st.start_time))) as avg_seconds
+                FROM starts st
+                INNER JOIN completions c ON st.session_id = c.session_id AND st.form_id = c.form_id
+                WHERE c.end_time > st.start_time
+            """)
+            completion_result = await session.execute(completion_time_query, params)
+            avg_completion_seconds = completion_result.scalar() or 0
+        except Exception as e:
+            logger.warning(f"Could not calculate avg completion time (session_id column may not exist): {e}")
+            avg_completion_seconds = 0
         
         # Get field-level analytics (errors and focus)
         field_analytics_query = text(f"""

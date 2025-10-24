@@ -154,6 +154,22 @@ async def upload_sanitized_image(request: Request, file: UploadFile = File(...),
 
     Returns: { publicUrl, key, contentType, bytes }
     """
+    # Verify authentication for secure uploads
+    try:
+        from firebase_admin import auth as _admin_auth
+        authz = request.headers.get("authorization") or request.headers.get("Authorization")
+        if not authz or not authz.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        token = authz.split(" ", 1)[1].strip()
+        decoded = _admin_auth.verify_id_token(token)
+        if not decoded.get("uid"):
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Auth verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    
     # Read into memory
     try:
         data = await file.read()
@@ -170,12 +186,35 @@ async def upload_sanitized_image(request: Request, file: UploadFile = File(...),
     sniffed = _sniff_mime(data)
     if not sniffed or not sniffed.startswith("image/"):
         raise HTTPException(status_code=415, detail="Only image uploads are allowed")
-    if sniffed not in _ALLOWED_IMAGE_MIMES:
+    
+    # Handle SVG separately - sanitize to prevent XSS
+    if sniffed == "image/svg+xml" or data.strip().startswith(b"<svg") or data.strip().startswith(b"<?xml"):
+        # Basic SVG sanitization: remove script tags and event handlers
+        try:
+            svg_text = data.decode('utf-8', errors='ignore')
+            # Remove dangerous elements and attributes
+            import re
+            # Remove script tags
+            svg_text = re.sub(r'<script[^>]*>.*?</script>', '', svg_text, flags=re.IGNORECASE | re.DOTALL)
+            # Remove event handlers (onclick, onload, etc.)
+            svg_text = re.sub(r'\s+on\w+\s*=\s*["\'][^"\']*["\']', '', svg_text, flags=re.IGNORECASE)
+            svg_text = re.sub(r'\s+on\w+\s*=\s*[^\s>]+', '', svg_text, flags=re.IGNORECASE)
+            # Remove javascript: hrefs
+            svg_text = re.sub(r'href\s*=\s*["\']javascript:[^"\']*["\']', '', svg_text, flags=re.IGNORECASE)
+            sanitized = svg_text.encode('utf-8')
+            content_type = "image/svg+xml"
+            ext = ".svg"
+        except Exception as e:
+            logger.exception("SVG sanitization failed: %s", e)
+            raise HTTPException(status_code=415, detail="Invalid SVG file")
+    elif sniffed not in _ALLOWED_IMAGE_MIMES:
         # We'll still attempt to decode/encode with Pillow; block if Pillow fails
         logger.info("upload: non-allowlisted image mime=%s; attempting sanitize", sniffed)
-
-    # Re-encode and strip metadata
-    sanitized, content_type, ext = _sanitize_image_bytes(data)
+        # Re-encode and strip metadata
+        sanitized, content_type, ext = _sanitize_image_bytes(data)
+    else:
+        # Re-encode and strip metadata
+        sanitized, content_type, ext = _sanitize_image_bytes(data)
 
     # Persist to R2 with contentType derived from sanitized output
     key = _safe_key(folder or "uploads/images", ext)

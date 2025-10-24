@@ -123,12 +123,21 @@ async def _write_integration(user_id: str, payload: Dict[str, Any]) -> None:
         airtable_data = cur.get("airtable") or {}
         access_token = airtable_data.get("accessToken")
         refresh_token = airtable_data.get("refreshToken")
-        expires_at = airtable_data.get("expiresAt")
+        expires_at_raw = airtable_data.get("expiresAt")
         
-        # Convert Unix timestamp to datetime if needed
-        if expires_at and isinstance(expires_at, (int, float)):
+        # Convert to datetime object for PostgreSQL
+        expires_at = None
+        if expires_at_raw:
             from datetime import datetime, timezone
-            expires_at = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+            if isinstance(expires_at_raw, (int, float)):
+                # Unix timestamp
+                expires_at = datetime.fromtimestamp(expires_at_raw, tz=timezone.utc)
+            elif isinstance(expires_at_raw, str):
+                # ISO datetime string from _read_integration
+                try:
+                    expires_at = datetime.fromisoformat(expires_at_raw.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    expires_at = None
         
         scopes = airtable_data.get("scopes") or []
         mappings = cur.get("airtableMappings") or {}

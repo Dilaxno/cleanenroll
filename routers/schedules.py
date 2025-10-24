@@ -93,13 +93,13 @@ async def get_user_schedules(
                     except:
                         form_fields = []
                 
-                # Extract date/calendar fields
+                # Extract date/calendar/time fields including zoom meetings
                 for field in form_fields:
                     field_type = field.get('type', '')
                     field_id = field.get('id', '')
                     field_label = field.get('label', '') or field.get('question', '') or 'Untitled Field'
                     
-                    if field_type in ['date', 'age', 'calendar']:
+                    if field_type in ['date', 'age', 'calendar', 'time', 'zoom-meeting']:
                         # Get the value from submission data
                         field_value = submission_data.get(field_id)
                         
@@ -107,8 +107,20 @@ async def get_user_schedules(
                             # Parse date value
                             event_date = None
                             event_time = None
+                            zoom_meeting_data = None
                             
-                            if isinstance(field_value, str):
+                            # Handle zoom-meeting field type (stores object with meeting details)
+                            if field_type == 'zoom-meeting' and isinstance(field_value, dict):
+                                # Extract date and time from zoom meeting object
+                                zoom_date = field_value.get('date', '')
+                                zoom_time = field_value.get('time', '')
+                                zoom_meeting_data = field_value  # Store full meeting data
+                                
+                                if zoom_date:
+                                    event_date = zoom_date
+                                if zoom_time:
+                                    event_time = zoom_time
+                            elif isinstance(field_value, str):
                                 # Try to parse ISO date or datetime
                                 try:
                                     dt = datetime.fromisoformat(field_value.replace('Z', '+00:00'))
@@ -120,7 +132,7 @@ async def get_user_schedules(
                                     event_date = field_value
                             
                             if event_date:
-                                events.append({
+                                event_obj = {
                                     "id": f"{row['id']}_{field_id}",
                                     "submission_id": row['id'],
                                     "form_id": row['form_id'],
@@ -131,7 +143,19 @@ async def get_user_schedules(
                                     "time": event_time,
                                     "submitted_at": row['submitted_at'].isoformat() if row.get('submitted_at') else None,
                                     "all_data": submission_data
-                                })
+                                }
+                                
+                                # Add zoom meeting details if available
+                                if zoom_meeting_data:
+                                    event_obj["zoom_meeting"] = {
+                                        "topic": zoom_meeting_data.get('topic', ''),
+                                        "duration": zoom_meeting_data.get('duration', 30),
+                                        "agenda": zoom_meeting_data.get('agenda', ''),
+                                        "join_url": zoom_meeting_data.get('join_url', ''),
+                                        "meeting_id": zoom_meeting_data.get('id', '')
+                                    }
+                                
+                                events.append(event_obj)
             
             return {
                 "events": events,

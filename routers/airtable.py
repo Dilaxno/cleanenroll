@@ -599,13 +599,13 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
 
     form = await _read_form_schema(formId)
     fields = form.get("fields") or []
-    field_order: List[str] = []  # Store labels, not IDs (answers are keyed by label)
+    field_order: List[str] = []  # Store field IDs (for ordering)
     headers: List[str] = ["submittedAt"]
     for f in fields:
         fid = str(f.get("id"))
         label = str(f.get("label") or fid)
-        field_order.append(label)  # Store label to match answers dict keys
-        headers.append(label)
+        field_order.append(fid)  # Store field ID
+        headers.append(label)  # Headers contain labels for column names
 
     token = await _get_valid_access_token(userId)
 
@@ -727,7 +727,10 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
             ans = rec.get("answers") or {}
             for idx, fid in enumerate(field_order):
                 try:
-                    fields_map[headers[idx+1]] = _flatten(ans.get(fid))
+                    # Use the header label to get the value (same as Google Sheets)
+                    label = headers[idx + 1] if idx + 1 < len(headers) else None
+                    value = ans.get(label) if label else None
+                    fields_map[headers[idx+1]] = _flatten(value)
                 except Exception:
                     fields_map[headers[idx+1]] = ""
             batch.append({"fields": fields_map})
@@ -960,7 +963,10 @@ async def try_append_submission_for_form(user_id: str, form_id: str, record: Dic
         fields_map = {headers[0]: str(record.get("submittedAt") or "")}
         for idx, fid in enumerate(field_order):
             try:
-                fields_map[headers[idx+1]] = _flatten(answers.get(fid))
+                # Use the header label to get the value (same as Google Sheets pattern)
+                label = headers[idx + 1] if idx + 1 < len(headers) else None
+                value = answers.get(label) if label else None
+                fields_map[headers[idx+1]] = _flatten(value)
             except Exception:
                 fields_map[headers[idx+1]] = ""
         url_path = (table_id or table_name)

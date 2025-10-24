@@ -110,3 +110,90 @@ async def get_live_visitors():
     except Exception as e:
         logger.exception("Failed to fetch live visitors")
         raise HTTPException(status_code=500, detail=f"Failed to fetch live visitors: {str(e)}")
+
+
+@router.post("/track-owner")
+async def track_owner(data: dict):
+    """
+    Track site owner activity and page visits.
+    Stores data in owners_tracking table for real-time monitoring.
+    """
+    try:
+        from db.database import async_session_maker
+    except Exception:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    try:
+        session_id = data.get("sessionId")
+        user_id = data.get("userId")
+        user_email = data.get("userEmail")
+        current_page = data.get("currentPage", "/")
+        referrer = data.get("referrer")
+        timestamp = data.get("timestamp")
+        
+        if not session_id or not user_id:
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        async with async_session_maker() as session:
+            # Check if session exists
+            result = await session.execute(
+                text("""
+                    SELECT id FROM owners_tracking 
+                    WHERE session_id = :session_id
+                """),
+                {"session_id": session_id}
+            )
+            existing = result.fetchone()
+            
+            now = datetime.utcnow()
+            
+            if existing:
+                # Update existing session
+                await session.execute(
+                    text("""
+                        UPDATE owners_tracking 
+                        SET 
+                            current_page = :current_page,
+                            last_seen = :last_seen,
+                            is_active = true,
+                            updated_at = :updated_at
+                        WHERE session_id = :session_id
+                    """),
+                    {
+                        "session_id": session_id,
+                        "current_page": current_page,
+                        "last_seen": now,
+                        "updated_at": now,
+                    }
+                )
+            else:
+                # Create new session
+                await session.execute(
+                    text("""
+                        INSERT INTO owners_tracking (
+                            session_id, user_id, user_email, current_page, 
+                            referrer, first_seen, last_seen, is_active
+                        ) VALUES (
+                            :session_id, :user_id, :user_email, :current_page,
+                            :referrer, :first_seen, :last_seen, :is_active
+                        )
+                    """),
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "user_email": user_email,
+                        "current_page": current_page,
+                        "referrer": referrer,
+                        "first_seen": now,
+                        "last_seen": now,
+                        "is_active": True,
+                    }
+                )
+            
+            await session.commit()
+            
+            return {"success": True, "message": "Owner activity tracked"}
+            
+    except Exception as e:
+        logger.exception("Failed to track owner activity")
+        raise HTTPException(status_code=500, detail=f"Failed to track owner: {str(e)}")

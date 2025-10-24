@@ -555,7 +555,10 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
     want_create = bool(payload.get("create"))
     want_backfill = bool(payload.get("backfill"))
     sync_enabled = bool(payload.get("sync"))
-    title = (payload.get("title") or "Form Submissions").strip() or "Form Submissions"
+    # Use tableName if provided, otherwise use title, otherwise default to "Form Submissions"
+    title = (payload.get("title") or "").strip()
+    if not title:
+        title = table_name or "Form Submissions"
 
     if not base_id:
         raise HTTPException(status_code=400, detail="Missing baseId")
@@ -612,8 +615,10 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
     if want_create and not resolved_table_id:
         # Create a new table via Metadata API (best-effort)
         # All fields as singleLineText for simplicity
+        # Use tableName if provided, otherwise fall back to title
+        actual_table_name = resolved_table_name if resolved_table_name else title
         schema = {
-            "name": resolved_table_name or title,
+            "name": actual_table_name,
             "fields": (
                 [{"name": headers[0], "type": "singleLineText"}] +
                 [{"name": h, "type": "singleLineText"} for h in headers[1:]]
@@ -626,7 +631,8 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
             raise HTTPException(status_code=400, detail=f"Failed to create Airtable table: {r.text}")
         data = r.json() or {}
         resolved_table_id = data.get("id") or ""
-        resolved_table_name = data.get("name") or (resolved_table_name or title)
+        # Use the name returned by Airtable, or keep the requested name
+        resolved_table_name = data.get("name") or actual_table_name
 
     if not resolved_table_id:
         # Try to resolve by name via Meta tables list

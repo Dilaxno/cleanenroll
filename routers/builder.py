@@ -2029,12 +2029,21 @@ async def public_get_form(form_id: str):
                     "color": (btn.get("color") if isinstance(btn, dict) else None) or primary,
                     "textColor": (btn.get("textColor") if isinstance(btn, dict) else None) or "#ffffff",
                 }
-                # Ensure theme.submitButton exists for clients that read theme
+                # Extract titleStyle and subtitleStyle from theme
+                title_style_data = (data.get("titleStyle") or theme.get("titleStyle") or {})
+                computed_title_style = title_style_data if isinstance(title_style_data, dict) else {"bold": True, "italic": False, "level": 1}
+                
+                subtitle_style_data = (data.get("subtitleStyle") or theme.get("subtitleStyle") or {})
+                computed_subtitle_style = subtitle_style_data if isinstance(subtitle_style_data, dict) else {"bold": False, "italic": False, "level": 3}
+                
+                # Ensure theme.submitButton, titleStyle, subtitleStyle exist for clients that read theme
                 try:
                     if not isinstance(theme, dict):
                         theme = {}
                     theme = dict(theme)
                     theme["submitButton"] = computed_btn
+                    theme["titleStyle"] = computed_title_style
+                    theme["subtitleStyle"] = computed_subtitle_style
                     data["theme"] = theme
                 except Exception:
                     pass
@@ -2123,6 +2132,8 @@ async def public_get_form(form_id: str):
                     "branding": _json_or(data.get("branding"), data.get("branding") or {}) or {},
                     "fields": _json_or(data.get("fields"), data.get("fields") or []) or [],
                     "submitButton": computed_btn,  # Add submitButton at root level for FormViewPage
+                    "titleStyle": computed_title_style,  # Add titleStyle at root level for FormViewPage
+                    "subtitleStyle": computed_subtitle_style,  # Add subtitleStyle at root level for FormViewPage
                 }
                 # Final normalization pass to ensure all booleans (including nested ones) are proper Python booleans
                 # This is critical for React components that check boolean props with strict equality

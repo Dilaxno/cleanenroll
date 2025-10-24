@@ -193,6 +193,7 @@ SCOPES = [
     "data.records:read",
     "data.records:write",
     "schema.bases:read",
+    "schema.bases:write",  # Required for creating tables
 ]
 
 

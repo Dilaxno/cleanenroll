@@ -156,8 +156,111 @@ async def get_user_analytics(
             if iso:
                 countries[str(iso).upper()] = count
         
+        # Get device, browser, and OS distribution from device_info JSONB
+        device_query = text(f"""
+            SELECT 
+                device_info->>'type' as device_type,
+                device_info->>'browser' as browser,
+                device_info->>'os' as os,
+                COUNT(*) as count
+            FROM analytics a
+            INNER JOIN forms f ON a.form_id = f.id
+            WHERE f.user_id = :uid
+              AND a.device_info IS NOT NULL
+              {form_filter}
+              {date_filter}
+            GROUP BY device_info->>'type', device_info->>'browser', device_info->>'os'
+            ORDER BY count DESC
+        """)
+        device_result = await session.execute(device_query, params)
+        device_rows = device_result.mappings().all()
+        
+        devices = {"mobile": 0, "desktop": 0, "tablet": 0, "unknown": 0}
+        browsers = {}
+        os_stats = {}
+        
+        for row in device_rows:
+            device_type = (row.get("device_type") or "unknown").lower()
+            browser = row.get("browser") or "Unknown"
+            os = row.get("os") or "Unknown"
+            count = int(row.get("count") or 0)
+            
+            # Aggregate device types
+            if device_type in devices:
+                devices[device_type] += count
+            else:
+                devices["unknown"] += count
+            
+            # Aggregate browsers
+            browsers[browser] = browsers.get(browser, 0) + count
+            
+            # Aggregate OS
+            os_stats[os] = os_stats.get(os, 0) + count
+        
+        # Calculate average completion time (time between form_started and submission)
+        completion_time_query = text(f"""
+            WITH starts AS (
+                SELECT a.session_id, a.form_id, MIN(a.created_at) as start_time
+                FROM analytics a
+                INNER JOIN forms f ON a.form_id = f.id
+                WHERE f.user_id = :uid
+                  AND a.type = 'form_started'
+                  AND a.session_id IS NOT NULL
+                  {form_filter}
+                  {date_filter}
+                GROUP BY a.session_id, a.form_id
+            ),
+            completions AS (
+                SELECT s.session_id, s.form_id, s.submitted_at as end_time
+                FROM submissions s
+                INNER JOIN forms f ON s.form_id = f.id
+                WHERE f.user_id = :uid
+                  AND s.session_id IS NOT NULL
+                  {form_filter.replace("f.id", "s.form_id")}
+                  {sub_date_filter}
+            )
+            SELECT AVG(EXTRACT(EPOCH FROM (c.end_time - st.start_time))) as avg_seconds
+            FROM starts st
+            INNER JOIN completions c ON st.session_id = c.session_id AND st.form_id = c.form_id
+            WHERE c.end_time > st.start_time
+        """)
+        completion_result = await session.execute(completion_time_query, params)
+        avg_completion_seconds = completion_result.scalar() or 0
+        
+        # Get field-level analytics (errors and focus)
+        field_analytics_query = text(f"""
+            SELECT 
+                a.type,
+                a.data->>'fieldId' as field_id,
+                a.data->>'fieldLabel' as field_label,
+                COUNT(*) as count
+            FROM analytics a
+            INNER JOIN forms f ON a.form_id = f.id
+            WHERE f.user_id = :uid
+              AND a.type IN ('field_error', 'field_focus')
+              AND a.data IS NOT NULL
+              {form_filter}
+              {date_filter}
+            GROUP BY a.type, a.data->>'fieldId', a.data->>'fieldLabel'
+            ORDER BY count DESC
+        """)
+        field_result = await session.execute(field_analytics_query, params)
+        field_rows = field_result.mappings().all()
+        
+        field_errors = {}
+        field_focus = {}
+        
+        for row in field_rows:
+            event_type = row.get("type")
+            field_label = row.get("field_label") or row.get("field_id") or "Unknown"
+            count = int(row.get("count") or 0)
+            
+            if event_type == "field_error":
+                field_errors[field_label] = count
+            elif event_type == "field_focus":
+                field_focus[field_label] = count
+        
         # Get daily time series data for charts
-        # Group by day for views and submissions
         daily_query = text(f"""
             WITH daily_views AS (
                 SELECT DATE(a.created_at) as day, COUNT(*) as views
@@ -191,24 +294,86 @@ async def get_user_analytics(
         
         # Format time series data
         points = []
+        daily_activity = {}
         for row in daily_rows:
             day = row.get("day")
             if day:
+                day_str = day.isoformat() if hasattr(day, 'isoformat') else str(day)
+                views_count = int(row.get("views") or 0)
+                subs_count = int(row.get("submissions") or 0)
+                
                 points.append({
-                    "date": day.isoformat() if hasattr(day, 'isoformat') else str(day),
-                    "views": int(row.get("views") or 0),
-                    "submissions": int(row.get("submissions") or 0)
+                    "date": day_str,
+                    "views": views_count,
+                    "submissions": subs_count
                 })
+                
+                daily_activity[day_str] = {
+                    "views": views_count,
+                    "submissions": subs_count
+                }
+        
+        # Get top forms by month (if not filtering by specific form)
+        top_forms_monthly = {}
+        if not form_id:
+            monthly_forms_query = text(f"""
+                SELECT 
+                    TO_CHAR(s.submitted_at, 'YYYY-MM') as month,
+                    f.id as form_id,
+                    f.name as form_name,
+                    COUNT(*) as submissions
+                FROM submissions s
+                INNER JOIN forms f ON s.form_id = f.id
+                WHERE f.user_id = :uid
+                  {sub_date_filter}
+                GROUP BY TO_CHAR(s.submitted_at, 'YYYY-MM'), f.id, f.name
+                ORDER BY month DESC, submissions DESC
+            """)
+            monthly_forms_result = await session.execute(monthly_forms_query, params)
+            monthly_forms_rows = monthly_forms_result.mappings().all()
+            
+            for row in monthly_forms_rows:
+                month = row.get("month")
+                if month and month not in top_forms_monthly:
+                    top_forms_monthly[month] = {
+                        "formId": row.get("form_id"),
+                        "formName": row.get("form_name") or "Untitled",
+                        "submissions": int(row.get("submissions") or 0)
+                    }
+        
+        # Count unique visitors
+        unique_visitors_query = text(f"""
+            SELECT COUNT(DISTINCT visitor_id) as unique_visitors
+            FROM analytics a
+            INNER JOIN forms f ON a.form_id = f.id
+            WHERE f.user_id = :uid
+              AND a.visitor_id IS NOT NULL
+              {form_filter}
+              {date_filter}
+        """)
+        unique_visitors_result = await session.execute(unique_visitors_query, params)
+        unique_visitors = unique_visitors_result.scalar() or 0
         
         return {
             "totals": {
                 "views": total_views,
                 "starts": total_starts,
                 "submissions": total_submissions,
-                "conversionRate": round(conversion_rate, 2)
+                "conversionRate": round(conversion_rate, 2),
+                "avgCompletionTime": round(avg_completion_seconds, 1),
+                "uniqueVisitors": unique_visitors
+            },
+            "devices": devices,
+            "browsers": browsers,
+            "os": os_stats,
+            "fields": {
+                "errors": field_errors,
+                "focus": field_focus
             },
             "countries": countries,
             "points": points,
+            "dailyActivity": daily_activity,
+            "topFormsMonthly": top_forms_monthly,
             "dateRange": {
                 "from": from_dt.isoformat() if from_dt else None,
                 "to": to_dt.isoformat() if to_dt else None

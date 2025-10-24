@@ -723,13 +723,13 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
         # Batch in chunks of 10
         batch: List[Dict[str, Any]] = []
         for rec in responses:
+            # After flattening in _list_responses, field values are accessible by label directly
             fields_map = {headers[0]: str(rec.get("submittedAt") or "")}
-            ans = rec.get("answers") or {}
             for idx, fid in enumerate(field_order):
                 try:
-                    # Use the header label to get the value (same as Google Sheets)
+                    # Use the header label to get the value (same as Google Sheets pattern)
                     label = headers[idx + 1] if idx + 1 < len(headers) else None
-                    value = ans.get(label) if label else None
+                    value = rec.get(label) if label else None
                     fields_map[headers[idx+1]] = _flatten(value)
                 except Exception:
                     fields_map[headers[idx+1]] = ""

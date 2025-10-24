@@ -2157,6 +2157,7 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     theme = payload.get("theme")
     branding = payload.get("branding")
     redirect_cfg = payload.get("redirect")
+    submit_button = payload.get("submitButton")
     # Spam/GDPR flags and geo restrictions
     recaptcha_enabled = payload.get("recaptchaEnabled")
     gdpr_compliance_enabled = payload.get("gdprComplianceEnabled")
@@ -2363,10 +2364,17 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
                 theme["titleStyle"] = title_style
             if isinstance(subtitle_style, dict):
                 theme["subtitleStyle"] = subtitle_style
+            # Merge submitButton into theme for persistence
+            if isinstance(submit_button, dict):
+                theme["submitButton"] = submit_button
         except Exception:
             pass
         sets.append("theme = CAST(:theme AS JSONB)")
         params["theme"] = json.dumps(theme)
+    elif isinstance(submit_button, dict):
+        # If theme not provided but submitButton is, merge it into existing theme
+        sets.append("theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButton}', CAST(:submit_button AS JSONB), true)")
+        params["submit_button"] = json.dumps(submit_button)
     if not sets:
         return {"success": True, "updated": 0}
 

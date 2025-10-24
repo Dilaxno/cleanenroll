@@ -2371,10 +2371,17 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
             pass
         sets.append("theme = CAST(:theme AS JSONB)")
         params["theme"] = json.dumps(theme)
-    elif isinstance(submit_button, dict):
-        # If theme not provided but submitButton is, merge it into existing theme
-        sets.append("theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButton}', CAST(:submit_button AS JSONB), true)")
-        params["submit_button"] = json.dumps(submit_button)
+    else:
+        # If theme not provided but individual style properties are, merge them into existing theme
+        if isinstance(submit_button, dict):
+            sets.append("theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{submitButton}', CAST(:submit_button AS JSONB), true)")
+            params["submit_button"] = json.dumps(submit_button)
+        if isinstance(title_style, dict):
+            sets.append("theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{titleStyle}', CAST(:title_style AS JSONB), true)")
+            params["title_style"] = json.dumps(title_style)
+        if isinstance(subtitle_style, dict):
+            sets.append("theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{subtitleStyle}', CAST(:subtitle_style AS JSONB), true)")
+            params["subtitle_style"] = json.dumps(subtitle_style)
     if not sets:
         return {"success": True, "updated": 0}
 

@@ -599,12 +599,12 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
 
     form = await _read_form_schema(formId)
     fields = form.get("fields") or []
-    field_order: List[str] = []
+    field_order: List[str] = []  # Store labels, not IDs (answers are keyed by label)
     headers: List[str] = ["submittedAt"]
     for f in fields:
         fid = str(f.get("id"))
         label = str(f.get("label") or fid)
-        field_order.append(fid)
+        field_order.append(label)  # Store label to match answers dict keys
         headers.append(label)
 
     token = await _get_valid_access_token(userId)

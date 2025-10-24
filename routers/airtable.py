@@ -290,9 +290,20 @@ async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
 async def _get_tokens(user_id: str) -> Tuple[str, Optional[str], int]:
     data = await _read_integration(user_id)
     integ = (data.get("airtable") or {})
-    tok = integ.get("accessToken")  # Changed from "token" to "accessToken"
+    tok = integ.get("accessToken")
     rtok = integ.get("refreshToken")
-    expiry = int(integ.get("expiresAt") or 0)  # Changed from "expiry" to "expiresAt"
+    expires_at_str = integ.get("expiresAt")
+    
+    # Convert ISO datetime string to Unix timestamp
+    expiry = 0
+    if expires_at_str:
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+            expiry = int(dt.timestamp())
+        except (ValueError, AttributeError):
+            expiry = 0
+    
     if not tok:
         raise HTTPException(status_code=400, detail="Airtable not connected for this user")
     return _decrypt_token(tok), (_decrypt_token(rtok) if rtok else None), expiry

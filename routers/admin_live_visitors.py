@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy import text
 
 logger = logging.getLogger("backend.admin_live_visitors")
@@ -113,7 +113,7 @@ async def get_live_visitors():
 
 
 @router.post("/track-owner")
-async def track_owner(data: dict):
+async def track_owner(data: dict, request: Request):
     """
     Track site owner activity and page visits.
     Stores data in owners_tracking table for real-time monitoring.
@@ -130,9 +130,42 @@ async def track_owner(data: dict):
         current_page = data.get("currentPage", "/")
         referrer = data.get("referrer")
         timestamp = data.get("timestamp")
+        device_type = data.get("deviceType", "desktop")
+        browser = data.get("browser", "Unknown")
+        os = data.get("os", "Unknown")
+        user_agent = data.get("userAgent", "")
+        screen_width = data.get("screenWidth")
+        screen_height = data.get("screenHeight")
         
         if not session_id or not user_id:
             raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # Extract IP address from request
+        ip_address = None
+        if hasattr(request, 'client') and request.client:
+            ip_address = request.client.host
+        # Check forwarded headers for real IP behind proxies
+        if not ip_address or ip_address in ['127.0.0.1', 'localhost']:
+            forwarded = request.headers.get('x-forwarded-for')
+            if forwarded:
+                ip_address = forwarded.split(',')[0].strip()
+            elif request.headers.get('x-real-ip'):
+                ip_address = request.headers.get('x-real-ip')
+        
+        # Geolocate IP using GeoIP
+        country_code = None
+        city = None
+        try:
+            import geoip2.database
+            import os as os_module
+            mmdb_path = os_module.path.join('data', 'geoip', 'GeoLite2-City.mmdb')
+            if os_module.path.exists(mmdb_path) and ip_address:
+                with geoip2.database.Reader(mmdb_path) as reader:
+                    response = reader.city(ip_address)
+                    country_code = response.country.iso_code
+                    city = response.city.name
+        except Exception as geo_err:
+            logger.debug(f"Geolocation failed: {geo_err}")
         
         async with async_session_maker() as session:
             # Check if session exists
@@ -156,7 +189,16 @@ async def track_owner(data: dict):
                             current_page = :current_page,
                             last_seen = :last_seen,
                             is_active = true,
-                            updated_at = :updated_at
+                            updated_at = :updated_at,
+                            ip_address = :ip_address,
+                            country_code = :country_code,
+                            city = :city,
+                            device_type = :device_type,
+                            browser = :browser,
+                            os = :os,
+                            user_agent = :user_agent,
+                            screen_width = :screen_width,
+                            screen_height = :screen_height
                         WHERE session_id = :session_id
                     """),
                     {
@@ -164,6 +206,15 @@ async def track_owner(data: dict):
                         "current_page": current_page,
                         "last_seen": now,
                         "updated_at": now,
+                        "ip_address": ip_address,
+                        "country_code": country_code,
+                        "city": city,
+                        "device_type": device_type,
+                        "browser": browser,
+                        "os": os,
+                        "user_agent": user_agent,
+                        "screen_width": screen_width,
+                        "screen_height": screen_height,
                     }
                 )
             else:
@@ -172,10 +223,14 @@ async def track_owner(data: dict):
                     text("""
                         INSERT INTO owners_tracking (
                             session_id, user_id, user_email, current_page, 
-                            referrer, first_seen, last_seen, is_active
+                            referrer, first_seen, last_seen, is_active,
+                            ip_address, country_code, city, device_type,
+                            browser, os, user_agent, screen_width, screen_height
                         ) VALUES (
                             :session_id, :user_id, :user_email, :current_page,
-                            :referrer, :first_seen, :last_seen, :is_active
+                            :referrer, :first_seen, :last_seen, :is_active,
+                            :ip_address, :country_code, :city, :device_type,
+                            :browser, :os, :user_agent, :screen_width, :screen_height
                         )
                     """),
                     {
@@ -187,6 +242,15 @@ async def track_owner(data: dict):
                         "first_seen": now,
                         "last_seen": now,
                         "is_active": True,
+                        "ip_address": ip_address,
+                        "country_code": country_code,
+                        "city": city,
+                        "device_type": device_type,
+                        "browser": browser,
+                        "os": os,
+                        "user_agent": user_agent,
+                        "screen_width": screen_width,
+                        "screen_height": screen_height,
                     }
                 )
             

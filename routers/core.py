@@ -250,7 +250,7 @@ async def get_user_info(request: Request, userId: str = Query(..., description="
                        forms_count, signup_ip, signup_country,
                        signup_geo_lat, signup_geo_lon, signup_user_agent,
                        signup_at, created_at, updated_at,
-                       subscription_id, last_payment_id
+                       subscription_id, last_payment_id, plan_details
                 FROM users WHERE uid = :uid LIMIT 1
                 """
             ), {"uid": userId})

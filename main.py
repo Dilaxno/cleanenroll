@@ -95,6 +95,7 @@ from routers.geocoding import router as geocoding_router  # type: ignore
 from routers.schedules import router as schedules_router  # type: ignore
 from routers.admin_live_visitors import router as admin_live_visitors_router  # type: ignore
 from routers.user_analytics import router as user_analytics_router  # type: ignore
+from routers.billing import router as billing_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -288,6 +289,7 @@ app.include_router(geocoding_router)
 app.include_router(schedules_router)
 app.include_router(admin_live_visitors_router)
 app.include_router(user_analytics_router)
+app.include_router(billing_router)
 
 
 if __name__ == "__main__":

@@ -65,11 +65,39 @@ def _verify_id_token_from_header(request: Request) -> Optional[str]:
 
 async def _update_user_billing(uid: str, updates: Dict):
     """
-    Minimal Neon-backed billing updater.
-    Note: current schema does not include a billing column; persist only what fits or ignore.
-    For now, we no-op but keep the function async to preserve call sites.
+    Update user billing information in Neon plan_details JSONB column.
+    Merges new updates with existing plan_details data.
     """
-    return
+    if not uid or not updates:
+        return
+    
+    try:
+        from sqlalchemy import text as _text
+        async with async_session_maker() as session:
+            # Fetch current plan_details
+            result = await session.execute(
+                _text("SELECT plan_details FROM users WHERE uid = :uid"),
+                {"uid": uid}
+            )
+            row = result.fetchone()
+            
+            # Merge with existing data
+            current_details = {}
+            if row and row[0]:
+                current_details = row[0] if isinstance(row[0], dict) else {}
+            
+            # Update with new data
+            current_details.update(updates)
+            
+            # Save back to database
+            await session.execute(
+                _text("UPDATE users SET plan_details = :details, updated_at = NOW() WHERE uid = :uid"),
+                {"details": json.dumps(current_details), "uid": uid}
+            )
+            await session.commit()
+            logger.info('[payments] updated billing for uid=%s keys=%s', uid, list(updates.keys()))
+    except Exception:
+        logger.exception('[payments] failed to update billing for uid=%s', uid)
 
 
 async def _set_user_plan(uid: str, plan: str):

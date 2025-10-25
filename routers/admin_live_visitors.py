@@ -48,6 +48,8 @@ async def get_live_visitors():
             # Fetch active owners from last 30 minutes
             cutoff_time = datetime.utcnow() - timedelta(minutes=30)
             
+            logger.info(f"Fetching live visitors since {cutoff_time}")
+            
             result = await session.execute(
                 text("""
                     SELECT 
@@ -71,6 +73,7 @@ async def get_live_visitors():
             )
             
             rows = result.fetchall()
+            logger.info(f"Found {len(rows)} visitors in owners_tracking table")
             
             visitors = []
             for row in rows:
@@ -182,6 +185,7 @@ async def track_owner(data: dict, request: Request):
             
             if existing:
                 # Update existing session
+                logger.info(f"Updating existing owner session {session_id} for user {user_id}")
                 await session.execute(
                     text("""
                         UPDATE owners_tracking 
@@ -219,6 +223,7 @@ async def track_owner(data: dict, request: Request):
                 )
             else:
                 # Create new session
+                logger.info(f"Creating new owner session {session_id} for user {user_id}")
                 await session.execute(
                     text("""
                         INSERT INTO owners_tracking (

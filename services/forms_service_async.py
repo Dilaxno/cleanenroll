@@ -104,10 +104,10 @@ class AsyncFormsService:
                 "views": data.get("views") or 0,
                 "submissions": data.get("submissions") or 0,
                 "submissionLimit": data.get("submission_limit") or 0,
-                "fields": data.get("fields") or [],
-                "theme": data.get("theme") or {},
-                "branding": data.get("branding") or {},
-                "allowedDomains": data.get("allowed_domains") or [],
+                "fields": data.get("fields") if data.get("fields") is not None else [],
+                "theme": data.get("theme") if data.get("theme") is not None else {},
+                "branding": data.get("branding") if data.get("branding") is not None else {},
+                "allowedDomains": data.get("allowed_domains") if data.get("allowed_domains") is not None else [],
                 # Settings fields - all booleans default to False when NULL
                 "language": data.get("language") or "en",
                 "thankYouMessage": data.get("thank_you_message") or "",
@@ -126,8 +126,8 @@ class AsyncFormsService:
                 "autoReplyButtonLabel": data.get("auto_reply_button_label") or "",
                 "autoReplyButtonUrl": data.get("auto_reply_button_url") or "",
                 "autoReplyButtonColor": data.get("auto_reply_button_color") or "#4f46e5",
-                # Redirect
-                "redirect": data.get("redirect"),
+                # Redirect - ensure JSONB object is returned properly
+                "redirect": data.get("redirect") if data.get("redirect") is not None else None,
                 # Email validation - all booleans default to False
                 "emailValidationEnabled": bool(data.get("email_validation_enabled")) if data.get("email_validation_enabled") is not None else False,
                 "professionalEmailsOnly": bool(data.get("professional_emails_only")) if data.get("professional_emails_only") is not None else False,
@@ -147,17 +147,17 @@ class AsyncFormsService:
                 "privacyPolicyUrl": data.get("privacy_policy_url") or "",
                 "passwordProtectionEnabled": bool(data.get("password_protection_enabled")) if data.get("password_protection_enabled") is not None else False,
                 "passwordHash": data.get("password_hash") or "",
-                # Geo restrictions
-                "restrictedCountries": data.get("restricted_countries") or [],
-                "allowedCountries": data.get("allowed_countries") or [],
+                # Geo restrictions - ensure JSONB arrays are always returned as arrays
+                "restrictedCountries": data.get("restricted_countries") if data.get("restricted_countries") is not None else [],
+                "allowedCountries": data.get("allowed_countries") if data.get("allowed_countries") is not None else [],
                 # Custom domain - booleans default to False
                 "customDomain": data.get("custom_domain") or "",
                 "customDomainVerified": bool(data.get("custom_domain_verified")) if data.get("custom_domain_verified") is not None else False,
                 "sslVerified": bool(data.get("ssl_verified")) if data.get("ssl_verified") is not None else False,
-                # Submit button, styles
-                "submitButton": data.get("submit_button"),
-                "titleStyle": data.get("title_style"),
-                "subtitleStyle": data.get("subtitle_style"),
+                # Submit button, styles - ensure JSONB objects are returned properly
+                "submitButton": data.get("submit_button") if data.get("submit_button") is not None else None,
+                "titleStyle": data.get("title_style") if data.get("title_style") is not None else None,
+                "subtitleStyle": data.get("subtitle_style") if data.get("subtitle_style") is not None else None,
                 # Full page layout - booleans default to False
                 "fullPageProgressEnabled": bool(data.get("full_page_progress_enabled")) if data.get("full_page_progress_enabled") is not None else False,
                 "fullPageKeyboardHintsEnabled": bool(data.get("full_page_keyboard_hints_enabled")) if data.get("full_page_keyboard_hints_enabled") is not None else False,

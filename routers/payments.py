@@ -128,19 +128,22 @@ async def _get_user_email(uid: str) -> Optional[str]:
     return None
 
 
-def _send_billing_email(to_email: str, subject: str, intro: str, content_html: Optional[str] = None, cta_label: Optional[str] = None, cta_url: Optional[str] = None):
-    """Render and send a branded billing email from billing@cleanenroll.com."""
+def _send_billing_email(to_email: str, subject: str, intro: str, content_html: Optional[str] = None, cta_label: Optional[str] = None, cta_url: Optional[str] = None, title: Optional[str] = None):
+    """Render and send a branded billing email from billing@cleanenroll.com using base.html template."""
     try:
+        from datetime import datetime
         html = render_email('base.html', {
             'subject': subject,
             'preheader': intro,
-            'title': subject,
+            'title': title or subject,  # Use custom title or fallback to subject
             'intro': intro,
             'content_html': content_html or '',
             'cta_label': cta_label,
             'cta_url': cta_url,
+            'year': datetime.now().year,
         })
         send_email_html(to_email, subject, html, from_addr='billing@cleanenroll.com')
+        logger.info('[payments] sent billing email to %s with subject: %s', to_email, subject)
     except Exception:
         logger.exception('[payments] failed to send billing email to %s', to_email)
 
@@ -555,16 +558,67 @@ async def _process_dodo_event(payload: Dict):
                     email = await _get_user_email(uid)
                     if email:
                         portal = os.getenv('DODO_MANAGE_SUBSCRIPTION_URL') or (os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/billing/portal')
-                        subject = 'Your CleanEnroll subscription is active'
-                        intro = 'Your plan has been upgraded/renewed successfully.'
-                        extra = ''
+                        
+                        # Differentiate between new subscription (upgrade) and renewal
+                        is_new_subscription = event_type == 'subscription.created'
+                        
+                        if is_new_subscription:
+                            # Thank you email for new upgrades
+                            subject = 'Thank you for upgrading to CleanEnroll Pro! 🎉'
+                            title = 'Welcome to CleanEnroll Pro!'
+                            intro = 'Thank you for upgrading your account! We\'re thrilled to have you as a Pro member.'
+                            content_parts = [
+                                '<p style="margin:0 0 12px 0;color:#c7c7c7">Your upgrade unlocks powerful features to help you collect more submissions and grow your business:</p>',
+                                '<ul style="margin:0 0 16px 0;color:#c7c7c7;padding-left:20px;">',
+                                '<li style="margin-bottom:8px;">Unlimited forms and submissions</li>',
+                                '<li style="margin-bottom:8px;">Advanced analytics and insights</li>',
+                                '<li style="margin-bottom:8px;">Priority support</li>',
+                                '<li style="margin-bottom:8px;">Custom branding options</li>',
+                                '<li>And much more!</li>',
+                                '</ul>',
+                            ]
+                        else:
+                            # Confirmation email for renewals
+                            subject = 'Your CleanEnroll subscription has been renewed'
+                            title = 'Subscription Renewed'
+                            intro = 'Your CleanEnroll Pro subscription has been successfully renewed.'
+                            content_parts = [
+                                '<p style="margin:0 0 12px 0;color:#c7c7c7">Thank you for continuing to use CleanEnroll Pro!</p>',
+                            ]
+                        
+                        # Add payment amount info
                         if isinstance(price_amount, (int, float)) and currency:
                             try:
                                 amt = float(price_amount) / (100.0 if price_amount and price_amount > 50 else 1.0)
-                                extra = f"<p style='margin:0;color:#c7c7c7'>Amount: <strong>{amt:.2f} {currency}</strong></p>"
+                                content_parts.append(f'<p style="margin:16px 0 0 0;color:#c7c7c7">Amount charged: <strong style="color:#7ED957">${amt:.2f} {currency}</strong></p>')
                             except Exception:
-                                extra = ''
-                        _send_billing_email(email, subject, intro, content_html=extra, cta_label='Manage Billing', cta_url=portal)
+                                pass
+                        
+                        # Add next billing date if available
+                        if next_billing:
+                            try:
+                                from datetime import datetime
+                                if isinstance(next_billing, (int, float)):
+                                    next_date = datetime.fromtimestamp(int(next_billing))
+                                else:
+                                    next_date = datetime.fromisoformat(str(next_billing).replace('Z', '+00:00'))
+                                content_parts.append(f'<p style="margin:8px 0 0 0;color:#c7c7c7">Next billing date: <strong>{next_date.strftime("%B %d, %Y")}</strong></p>')
+                            except Exception:
+                                pass
+                        
+                        extra = ''.join(content_parts)
+                        
+                        # Send the email using base.html template
+                        _send_billing_email(
+                            email, 
+                            subject, 
+                            intro, 
+                            content_html=extra, 
+                            cta_label='View Dashboard' if is_new_subscription else 'Manage Billing', 
+                            cta_url=os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/dashboard' if is_new_subscription else portal,
+                            title=title
+                        )
+                        logger.info('[payments] sent %s email to %s', 'upgrade thank you' if is_new_subscription else 'renewal confirmation', email)
                 except Exception:
                     logger.exception('[payments] failed to send upgrade/renewal email for uid=%s', uid)
         else:

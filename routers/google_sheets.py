@@ -131,7 +131,7 @@ async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
         async with async_session_maker() as session:
             result = await session.execute(
                 _text(
-                    "SELECT id, data, metadata, submitted_at FROM submissions "
+                    "SELECT id, data, metadata, submitted_at, country_code FROM submissions "
                     "WHERE form_id = :form_id ORDER BY submitted_at ASC"
                 ),
                 {"form_id": form_id}
@@ -144,7 +144,8 @@ async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
                     "id": row[0],
                     "data": row[1] or {},
                     "metadata": row[2] or {},
-                    "submittedAt": row[3].isoformat() if row[3] else None
+                    "submittedAt": row[3].isoformat() if row[3] else None,
+                    "countryCode": row[4] or ""
                 }
                 # Flatten data into submission for compatibility
                 if isinstance(submission.get("data"), dict):
@@ -322,9 +323,9 @@ async def create_sheet(userId: str = Query(...), formId: str = Query(...), paylo
     # Build headers and rows from form schema + responses
     form = await _read_form_schema(formId)
     fields = form.get("fields") or []
-    # Order headers: submittedAt then field labels
+    # Order headers: submittedAt, Country, then field labels
     field_order: List[str] = []
-    headers: List[str] = ["submittedAt"]
+    headers: List[str] = ["submittedAt", "Country"]
     for f in fields:
         fid = str(f.get("id"))
         label = str(f.get("label") or fid)
@@ -351,10 +352,11 @@ async def create_sheet(userId: str = Query(...), formId: str = Query(...), paylo
         row_values = []
         for idx, fid in enumerate(field_order):
             # Use the header label to get the value (headers are in same order as field_order)
-            label = headers[idx + 1] if idx + 1 < len(headers) else None
+            # Skip first 2 headers (submittedAt and Country) when mapping to field_order
+            label = headers[idx + 2] if idx + 2 < len(headers) else None
             value = rec.get(label) if label else None
             row_values.append(_flatten(value))
-        row = [str(rec.get("submittedAt") or "")] + row_values
+        row = [str(rec.get("submittedAt") or ""), str(rec.get("countryCode") or "")] + row_values
         rows.append(row)
 
     token = _get_valid_access_token(userId)
@@ -578,15 +580,16 @@ def try_append_submission_for_form(user_id: str, form_id: str, record: Dict[str,
                 continue
             
             # Build row for this sheet using field labels from headers
-            # Record structure from builder.py: {"answers": {"Full Name": "John", "Email": "john@example.com"}, "submittedAt": "..."}
+            # Record structure from builder.py: {"answers": {"Full Name": "John", "Email": "john@example.com"}, "submittedAt": "...", "countryCode": "US"}
             answers = record.get("answers") or {}
+            country_code = record.get("countryCode") or ""
             row_values = []
             for idx, fid in enumerate(field_order):
-                # Use the header label to get the value (headers[0] is 'submittedAt', so offset by 1)
-                label = headers[idx + 1] if idx + 1 < len(headers) else None
+                # Use the header label to get the value (headers[0] is 'submittedAt', headers[1] is 'Country', so offset by 2)
+                label = headers[idx + 2] if idx + 2 < len(headers) else None
                 value = answers.get(label) if label else None
                 row_values.append(_flatten(value))
-            row = [str(record.get("submittedAt") or "")] + row_values
+            row = [str(record.get("submittedAt") or ""), str(country_code)] + row_values
             rng = f"{sheet_name}!A1"
             token = _get_valid_access_token(user_id)
             url = f"{SHEETS_BASE}/{spreadsheet_id}/values/{requests.utils.quote(rng, safe='')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"

@@ -271,7 +271,7 @@ async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
         async with async_session_maker() as session:
             result = await session.execute(
                 _text(
-                    "SELECT id, data, metadata, submitted_at FROM submissions "
+                    "SELECT id, data, metadata, submitted_at, country_code FROM submissions "
                     "WHERE form_id = :form_id ORDER BY submitted_at ASC"
                 ),
                 {"form_id": form_id}
@@ -284,7 +284,8 @@ async def _list_responses(form_id: str) -> List[Dict[str, Any]]:
                     "id": row[0],
                     "data": row[1] or {},
                     "metadata": row[2] or {},
-                    "submittedAt": row[3].isoformat() if row[3] else None
+                    "submittedAt": row[3].isoformat() if row[3] else None,
+                    "countryCode": row[4] or ""
                 }
                 # Flatten data into submission for compatibility
                 if isinstance(submission.get("data"), dict):
@@ -600,7 +601,7 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
     form = await _read_form_schema(formId)
     fields = form.get("fields") or []
     field_order: List[str] = []  # Store field IDs (for ordering)
-    headers: List[str] = ["submittedAt"]
+    headers: List[str] = ["submittedAt", "Country"]
     for f in fields:
         fid = str(f.get("id"))
         label = str(f.get("label") or fid)
@@ -724,15 +725,18 @@ async def link_table(userId: str = Query(...), formId: str = Query(...), payload
         batch: List[Dict[str, Any]] = []
         for rec in responses:
             # After flattening in _list_responses, field values are accessible by label directly
-            fields_map = {headers[0]: str(rec.get("submittedAt") or "")}
+            fields_map = {
+                headers[0]: str(rec.get("submittedAt") or ""),
+                headers[1]: str(rec.get("countryCode") or "")
+            }
             for idx, fid in enumerate(field_order):
                 try:
-                    # Use the header label to get the value (same as Google Sheets pattern)
-                    label = headers[idx + 1] if idx + 1 < len(headers) else None
+                    # Use the header label to get the value (headers[0] is submittedAt, headers[1] is Country, so offset by 2)
+                    label = headers[idx + 2] if idx + 2 < len(headers) else None
                     value = rec.get(label) if label else None
-                    fields_map[headers[idx+1]] = _flatten(value)
+                    fields_map[headers[idx+2]] = _flatten(value)
                 except Exception:
-                    fields_map[headers[idx+1]] = ""
+                    fields_map[headers[idx+2]] = ""
             batch.append({"fields": fields_map})
             if len(batch) >= 10:
                 r = requests.post(post_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, data=json.dumps({"records": batch}), timeout=30)
@@ -960,15 +964,19 @@ async def try_append_submission_for_form(user_id: str, form_id: str, record: Dic
                     return str(val)
             return str(val)
         answers = record.get("answers") or {}
-        fields_map = {headers[0]: str(record.get("submittedAt") or "")}
+        country_code = record.get("countryCode") or ""
+        fields_map = {
+            headers[0]: str(record.get("submittedAt") or ""),
+            headers[1]: str(country_code)
+        }
         for idx, fid in enumerate(field_order):
             try:
-                # Use the header label to get the value (same as Google Sheets pattern)
-                label = headers[idx + 1] if idx + 1 < len(headers) else None
+                # Use the header label to get the value (headers[0] is submittedAt, headers[1] is Country, so offset by 2)
+                label = headers[idx + 2] if idx + 2 < len(headers) else None
                 value = answers.get(label) if label else None
-                fields_map[headers[idx+1]] = _flatten(value)
+                fields_map[headers[idx+2]] = _flatten(value)
             except Exception:
-                fields_map[headers[idx+1]] = ""
+                fields_map[headers[idx+2]] = ""
         url_path = (table_id or table_name)
         if not url_path:
             return

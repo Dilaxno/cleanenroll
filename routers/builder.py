@@ -3979,6 +3979,7 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         "submittedAt": submitted_at.isoformat() if submitted_at else datetime.utcnow().isoformat(),
         "clientIp": ip,
         "country": country_code,
+        "countryCode": country_code,  # For integrations (Google Sheets, Airtable)
         "lat": lat,
         "lon": lon,
         "userAgent": str(request.headers.get("user-agent") or ""),

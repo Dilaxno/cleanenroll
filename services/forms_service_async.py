@@ -90,7 +90,81 @@ class AsyncFormsService:
         row = result.mappings().first()
         
         if row:
-            form_data = dict(row)
+            data = dict(row)
+            # Convert snake_case DB columns to camelCase for frontend (Builder)
+            form_data = {
+                "id": data.get("id"),
+                "userId": data.get("user_id"),
+                "title": data.get("title"),
+                "name": data.get("name"),
+                "description": data.get("description"),
+                "formType": data.get("form_type") or "simple",
+                "isPublished": data.get("is_published"),
+                "views": data.get("views") or 0,
+                "submissions": data.get("submissions") or 0,
+                "submissionLimit": data.get("submission_limit") or 0,
+                "fields": data.get("fields") or [],
+                "theme": data.get("theme") or {},
+                "branding": data.get("branding") or {},
+                "allowedDomains": data.get("allowed_domains") or [],
+                # Settings fields
+                "language": data.get("language") or "en",
+                "thankYouMessage": data.get("thank_you_message"),
+                "thankYouDisplay": data.get("thank_you_display"),
+                "celebrationEnabled": data.get("celebration_enabled"),
+                "showTopProgress": data.get("show_top_progress"),
+                "showKeyboardHints": data.get("show_keyboard_hints"),
+                # Auto-reply
+                "autoReplyEnabled": data.get("auto_reply_enabled"),
+                "autoReplyEmailFieldId": data.get("auto_reply_email_field_id"),
+                "autoReplySubject": data.get("auto_reply_subject"),
+                "autoReplyMessageHtml": data.get("auto_reply_message_html"),
+                "autoReplyMessageText": data.get("auto_reply_message_text"),
+                "autoReplyContentMode": data.get("auto_reply_content_mode"),
+                "autoReplyFooterHtml": data.get("auto_reply_footer_html"),
+                "autoReplyButtonLabel": data.get("auto_reply_button_label"),
+                "autoReplyButtonUrl": data.get("auto_reply_button_url"),
+                "autoReplyButtonColor": data.get("auto_reply_button_color"),
+                # Redirect
+                "redirect": data.get("redirect"),
+                # Email validation
+                "emailValidationEnabled": data.get("email_validation_enabled"),
+                "professionalEmailsOnly": data.get("professional_emails_only"),
+                "blockRoleEmails": data.get("block_role_emails"),
+                "emailRejectBadReputation": data.get("email_reject_bad_reputation"),
+                "minDomainAgeDays": data.get("min_domain_age_days"),
+                # Duplicate prevention
+                "preventDuplicateByUID": data.get("prevent_duplicate_by_uid"),
+                "preventDuplicateByIP": data.get("prevent_duplicate_by_ip"),
+                "duplicateWindowHours": data.get("duplicate_window_hours"),
+                # Security
+                "recaptchaEnabled": data.get("recaptcha_enabled"),
+                "urlScanEnabled": data.get("url_scan_enabled"),
+                "fileScanEnabled": data.get("file_scan_enabled"),
+                "gdprComplianceEnabled": data.get("gdpr_compliance_enabled"),
+                "showPoweredBy": data.get("show_powered_by"),
+                "privacyPolicyUrl": data.get("privacy_policy_url"),
+                "passwordProtectionEnabled": data.get("password_protection_enabled"),
+                "passwordHash": data.get("password_hash"),
+                # Geo restrictions
+                "restrictedCountries": data.get("restricted_countries") or [],
+                "allowedCountries": data.get("allowed_countries") or [],
+                # Custom domain
+                "customDomain": data.get("custom_domain"),
+                "customDomainVerified": data.get("custom_domain_verified"),
+                "sslVerified": data.get("ssl_verified"),
+                # Submit button, styles
+                "submitButton": data.get("submit_button"),
+                "titleStyle": data.get("title_style"),
+                "subtitleStyle": data.get("subtitle_style"),
+                # Full page layout
+                "fullPageProgressEnabled": data.get("full_page_progress_enabled"),
+                "fullPageKeyboardHintsEnabled": data.get("full_page_keyboard_hints_enabled"),
+                # Metadata
+                "idempotencyKey": data.get("idempotency_key"),
+                "createdAt": data.get("created_at"),
+                "updatedAt": data.get("updated_at"),
+            }
             return normalize_booleans(form_data)
         return None
     

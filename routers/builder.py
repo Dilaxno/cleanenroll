@@ -2160,26 +2160,53 @@ async def public_get_form(form_id: str):
                     "thankYouMessage": data.get("thankYouMessage") or data.get("thank_you_message") or "Thank you for your submission! We'll get back to you soon.",
                     "thankYouDisplay": data.get("thank_you_display") or data.get("thankYouDisplay") or "toast",
                     "celebrationEnabled": bool(data.get("celebration_enabled") if data.get("celebration_enabled") is not None else data.get("celebrationEnabled")),
+                    "showTopProgress": bool(data.get("show_top_progress") if data.get("show_top_progress") is not None else data.get("showTopProgress")),
+                    "showKeyboardHints": bool(data.get("show_keyboard_hints") if data.get("show_keyboard_hints") is not None else data.get("showKeyboardHints")),
+                    # Auto-reply email settings
+                    "autoReplyEnabled": bool(data.get("auto_reply_enabled") if data.get("auto_reply_enabled") is not None else data.get("autoReplyEnabled")),
+                    "autoReplyEmailFieldId": data.get("auto_reply_email_field_id") or data.get("autoReplyEmailFieldId") or "",
+                    "autoReplySubject": data.get("auto_reply_subject") or data.get("autoReplySubject") or "",
+                    "autoReplyMessageHtml": data.get("auto_reply_message_html") or data.get("autoReplyMessageHtml") or "",
+                    "autoReplyMessageText": data.get("auto_reply_message_text") or data.get("autoReplyMessageText") or "",
+                    "autoReplyContentMode": data.get("auto_reply_content_mode") or data.get("autoReplyContentMode") or "html",
+                    "autoReplyFooterHtml": data.get("auto_reply_footer_html") or data.get("autoReplyFooterHtml") or "",
+                    "autoReplyButtonLabel": data.get("auto_reply_button_label") or data.get("autoReplyButtonLabel") or "",
+                    "autoReplyButtonUrl": data.get("auto_reply_button_url") or data.get("autoReplyButtonUrl") or "",
+                    "autoReplyButtonColor": data.get("auto_reply_button_color") or data.get("autoReplyButtonColor") or "",
+                    # Redirect
                     "redirect": _json_or(data.get("redirect"), {}) or {},
+                    # Email validation
                     "emailValidationEnabled": bool(data.get("email_validation_enabled") if data.get("email_validation_enabled") is not None else data.get("emailValidationEnabled")),
                     "professionalEmailsOnly": bool(data.get("professional_emails_only") if data.get("professional_emails_only") is not None else data.get("professionalEmailsOnly")),
                     "blockRoleEmails": bool(data.get("block_role_emails") if data.get("block_role_emails") is not None else data.get("blockRoleEmails")),
                     "emailRejectBadReputation": bool(data.get("email_reject_bad_reputation") if data.get("email_reject_bad_reputation") is not None else data.get("emailRejectBadReputation")),
                     "minDomainAgeDays": int(data.get("min_domain_age_days") or data.get("minDomainAgeDays") or 30),
+                    # Duplicate prevention
+                    "preventDuplicateByUID": bool(data.get("prevent_duplicate_by_uid") if data.get("prevent_duplicate_by_uid") is not None else data.get("preventDuplicateByUID")),
+                    "preventDuplicateByIP": bool(data.get("prevent_duplicate_by_ip") if data.get("prevent_duplicate_by_ip") is not None else data.get("preventDuplicateByIP")),
+                    "duplicateWindowHours": int(data.get("duplicate_window_hours") or data.get("duplicateWindowHours") or 24),
+                    # Security settings
                     "recaptchaEnabled": bool(data.get("recaptcha_enabled") if data.get("recaptcha_enabled") is not None else data.get("recaptchaEnabled")),
                     "urlScanEnabled": bool(data.get("url_scan_enabled") if data.get("url_scan_enabled") is not None else data.get("urlScanEnabled")),
-                    "fileSafetyCheckEnabled": bool(data.get("file_safety_check_enabled") if data.get("file_safety_check_enabled") is not None else data.get("fileSafetyCheckEnabled")),
+                    "fileScanEnabled": bool(data.get("file_scan_enabled") if data.get("file_scan_enabled") is not None else (data.get("file_safety_check_enabled") if data.get("file_safety_check_enabled") is not None else data.get("fileScanEnabled"))),
                     "gdprComplianceEnabled": bool(data.get("gdpr_compliance_enabled") if data.get("gdpr_compliance_enabled") is not None else data.get("gdprComplianceEnabled")),
                     "showPoweredBy": True if data.get("show_powered_by") is None and data.get("showPoweredBy") is None else bool(data.get("show_powered_by") if data.get("show_powered_by") is not None else data.get("showPoweredBy")),
                     "privacyPolicyUrl": data.get("privacyPolicyUrl") or data.get("privacy_policy_url") or "",
                     "passwordProtectionEnabled": bool(data.get("password_protection_enabled") if data.get("password_protection_enabled") is not None else data.get("passwordProtectionEnabled")),
                     "passwordHash": data.get("password_hash") or data.get("passwordHash"),
-                    "preventDuplicateByIP": bool(data.get("prevent_duplicate_by_ip") if data.get("prevent_duplicate_by_ip") is not None else data.get("preventDuplicateByIP")),
-                    "duplicateWindowHours": int(data.get("duplicate_window_hours") or data.get("duplicateWindowHours") or 24),
+                    # Geo restrictions
                     "restrictedCountries": _json_or(data.get("restricted_countries"), data.get("restrictedCountries") or []) or [],
                     "allowedCountries": _json_or(data.get("allowed_countries"), data.get("allowedCountries") or []) or [],
+                    # Custom domain
+                    "customDomain": data.get("custom_domain") or data.get("customDomain") or "",
+                    "customDomainVerified": bool(data.get("custom_domain_verified") if data.get("custom_domain_verified") is not None else data.get("customDomainVerified")),
+                    "sslVerified": bool(data.get("ssl_verified") if data.get("ssl_verified") is not None else data.get("sslVerified")),
+                    # Form metadata
                     "isPublished": bool(data.get("is_published") if data.get("is_published") is not None else data.get("isPublished")),
                     "formType": data.get("formType") or data.get("form_type") or "simple",
+                    # Full page layout settings
+                    "fullPageProgressEnabled": bool(data.get("full_page_progress_enabled") if data.get("full_page_progress_enabled") is not None else data.get("fullPageProgressEnabled")),
+                    "fullPageKeyboardHintsEnabled": bool(data.get("full_page_keyboard_hints_enabled") if data.get("full_page_keyboard_hints_enabled") is not None else data.get("fullPageKeyboardHintsEnabled")),
                     # Large JSON blobs already normalized above
                     "theme": _json_or(data.get("theme"), {}) or {},
                     "branding": _json_or(data.get("branding"), data.get("branding") or {}) or {},

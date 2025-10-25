@@ -1974,6 +1974,59 @@ async def list_form_abandons(form_id: str, limit: int = 100):
         logger.exception("list abandons failed form_id=%s", form_id)
         raise HTTPException(status_code=500, detail=f"Failed to list abandoned sessions: {e}")
 
+@router.get("/forms/{form_id}/abandons/count")
+async def count_form_abandons(form_id: str, request: Request):
+    """Count abandoned submissions for a form owned by the authenticated user.
+    Returns: { count: number }
+    """
+    try:
+        uid = _verify_firebase_uid(request)
+        async with async_session_maker() as session:
+            # Verify form ownership
+            form_check = await session.execute(
+                text("SELECT user_id FROM forms WHERE id = :fid"),
+                {"fid": form_id}
+            )
+            form_row = form_check.fetchone()
+            if not form_row or form_row[0] != uid:
+                raise HTTPException(status_code=404, detail="Form not found")
+            
+            # Count abandoned submissions
+            try:
+                # Try extended schema first
+                count_result = await session.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) FROM form_abandons
+                        WHERE form_id = :fid AND abandoned = TRUE
+                        """
+                    ),
+                    {"fid": form_id}
+                )
+                count = count_result.scalar() or 0
+            except Exception:
+                # Fallback to legacy schema
+                try:
+                    count_result = await session.execute(
+                        text(
+                            """
+                            SELECT COUNT(*) FROM form_abandons
+                            WHERE form_id = :fid
+                            """
+                        ),
+                        {"fid": form_id}
+                    )
+                    count = count_result.scalar() or 0
+                except Exception:
+                    count = 0
+            
+            return {"count": count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("count abandons failed form_id=%s", form_id)
+        raise HTTPException(status_code=500, detail=f"Failed to count abandoned submissions: {e}")
+
 def _safe_int(v):
     try:
         if v is None:

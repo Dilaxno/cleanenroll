@@ -83,13 +83,61 @@ class FormModel(BaseDBModel):
     theme: Dict[str, Any] = Field(default_factory=dict)
     branding: Dict[str, Any] = Field(default_factory=dict)
     allowed_domains: List[str] = Field(default_factory=list)
-    # New controls synced from builder to Neon (DB columns expected)
-    password_protection_enabled: bool = Field(default=False, alias="passwordProtectionEnabled")
+    # Form settings (all optional to maintain backward compatibility)
+    language: Optional[str] = None
+    thank_you_message: Optional[str] = Field(default=None, alias="thankYouMessage")
+    thank_you_display: Optional[str] = Field(default=None, alias="thankYouDisplay")
+    celebration_enabled: Optional[bool] = Field(default=None, alias="celebrationEnabled")
+    show_top_progress: Optional[bool] = Field(default=None, alias="showTopProgress")
+    show_keyboard_hints: Optional[bool] = Field(default=None, alias="showKeyboardHints")
+    # Auto-reply email settings
+    auto_reply_enabled: Optional[bool] = Field(default=None, alias="autoReplyEnabled")
+    auto_reply_email_field_id: Optional[str] = Field(default=None, alias="autoReplyEmailFieldId")
+    auto_reply_subject: Optional[str] = Field(default=None, alias="autoReplySubject")
+    auto_reply_message_html: Optional[str] = Field(default=None, alias="autoReplyMessageHtml")
+    auto_reply_message_text: Optional[str] = Field(default=None, alias="autoReplyMessageText")
+    auto_reply_content_mode: Optional[str] = Field(default=None, alias="autoReplyContentMode")
+    auto_reply_footer_html: Optional[str] = Field(default=None, alias="autoReplyFooterHtml")
+    auto_reply_button_label: Optional[str] = Field(default=None, alias="autoReplyButtonLabel")
+    auto_reply_button_url: Optional[str] = Field(default=None, alias="autoReplyButtonUrl")
+    auto_reply_button_color: Optional[str] = Field(default=None, alias="autoReplyButtonColor")
+    # Redirect settings
+    redirect: Optional[Dict[str, Any]] = None
+    # Email validation settings
+    email_validation_enabled: Optional[bool] = Field(default=None, alias="emailValidationEnabled")
+    professional_emails_only: Optional[bool] = Field(default=None, alias="professionalEmailsOnly")
+    block_role_emails: Optional[bool] = Field(default=None, alias="blockRoleEmails")
+    email_reject_bad_reputation: Optional[bool] = Field(default=None, alias="emailRejectBadReputation")
+    min_domain_age_days: Optional[int] = Field(default=None, alias="minDomainAgeDays")
+    # Duplicate prevention
+    prevent_duplicate_by_uid: Optional[bool] = Field(default=None, alias="preventDuplicateByUID")
+    prevent_duplicate_by_ip: Optional[bool] = Field(default=None, alias="preventDuplicateByIP")
+    duplicate_window_hours: Optional[int] = Field(default=None, alias="duplicateWindowHours")
+    # Security settings
+    recaptcha_enabled: Optional[bool] = Field(default=None, alias="recaptchaEnabled")
+    url_scan_enabled: Optional[bool] = Field(default=None, alias="urlScanEnabled")
+    file_scan_enabled: Optional[bool] = Field(default=None, alias="fileScanEnabled")
+    gdpr_compliance_enabled: Optional[bool] = Field(default=None, alias="gdprComplianceEnabled")
+    show_powered_by: Optional[bool] = Field(default=None, alias="showPoweredBy")
+    privacy_policy_url: Optional[str] = Field(default=None, alias="privacyPolicyUrl")
+    password_protection_enabled: Optional[bool] = Field(default=None, alias="passwordProtectionEnabled")
     password_hash: Optional[str] = Field(default=None, alias="passwordHash")
-    prevent_duplicate_by_ip: bool = Field(default=False, alias="preventDuplicateByIP")
-    duplicate_window_hours: int = Field(default=24, alias="duplicateWindowHours")
-    show_powered_by: bool = Field(default=True, alias="showPoweredBy")
-    privacy_policy_url: Optional[AnyHttpUrl] = Field(default=None, alias="privacyPolicyUrl")
+    # Geo restrictions
+    restricted_countries: Optional[List[str]] = Field(default=None, alias="restrictedCountries")
+    allowed_countries: Optional[List[str]] = Field(default=None, alias="allowedCountries")
+    # Custom domain
+    custom_domain: Optional[str] = Field(default=None, alias="customDomain")
+    custom_domain_verified: Optional[bool] = Field(default=None, alias="customDomainVerified")
+    ssl_verified: Optional[bool] = Field(default=None, alias="sslVerified")
+    # Submit button
+    submit_button: Optional[Dict[str, Any]] = Field(default=None, alias="submitButton")
+    # Title/subtitle styles
+    title_style: Optional[Dict[str, Any]] = Field(default=None, alias="titleStyle")
+    subtitle_style: Optional[Dict[str, Any]] = Field(default=None, alias="subtitleStyle")
+    # Full page layout settings
+    full_page_progress_enabled: Optional[bool] = Field(default=None, alias="fullPageProgressEnabled")
+    full_page_keyboard_hints_enabled: Optional[bool] = Field(default=None, alias="fullPageKeyboardHintsEnabled")
+    # Metadata
     idempotency_key: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

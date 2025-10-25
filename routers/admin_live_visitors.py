@@ -121,6 +121,8 @@ async def track_owner(data: dict, request: Request):
     Track site owner activity and page visits.
     Stores data in owners_tracking table for real-time monitoring.
     """
+    logger.info(f"track-owner endpoint called with data keys: {list(data.keys())}")
+    
     try:
         from db.database import async_session_maker
     except Exception:
@@ -130,6 +132,8 @@ async def track_owner(data: dict, request: Request):
         session_id = data.get("sessionId")
         user_id = data.get("userId")
         user_email = data.get("userEmail")
+        
+        logger.info(f"Tracking request: sessionId={session_id}, userId={user_id}, email={user_email}")
         current_page = data.get("currentPage", "/")
         referrer = data.get("referrer")
         timestamp = data.get("timestamp")

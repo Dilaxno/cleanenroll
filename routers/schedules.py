@@ -99,7 +99,7 @@ async def get_user_schedules(
                     field_id = field.get('id', '')
                     field_label = field.get('label', '') or field.get('question', '') or 'Untitled Field'
                     
-                    if field_type in ['date', 'age', 'calendar', 'time', 'zoom-meeting']:
+                    if field_type in ['date', 'age', 'calendar', 'time']:
                         # Get the value from submission data (submissions use field labels as keys, not IDs)
                         field_value = submission_data.get(field_label)
                         
@@ -109,12 +109,6 @@ async def get_user_schedules(
                             event_time = None
                             zoom_meeting_data = None
                             
-                            # Handle zoom-meeting field type (stores object with meeting details)
-                            if field_type == 'zoom-meeting' and isinstance(field_value, dict):
-                                # Extract date and time from zoom meeting object
-                                zoom_date = field_value.get('date', '')
-                                zoom_time = field_value.get('time', '')
-                                zoom_meeting_data = field_value  # Store full meeting data
                                 
                                 if zoom_date:
                                     event_date = zoom_date

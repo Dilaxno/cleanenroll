@@ -85,7 +85,6 @@ from routers.form_versions import router as form_versions_router  # type: ignore
 from routers.virus_scan import router as virus_scan_router  # type: ignore
 from routers.live_visitors import router as live_visitors_router  # type: ignore
 from routers.file_redirects import router as file_redirects_router  # type: ignore
-from routers.zoom import router as zoom_router  # type: ignore
 from routers.custom_domain import router as custom_domain_router  # type: ignore
 from routers.client_notifications import router as client_notifications_router  # type: ignore
 from routers.geo_restrictions import router as geo_restrictions_router  # type: ignore
@@ -279,7 +278,6 @@ app.include_router(form_versions_router)
 app.include_router(virus_scan_router)
 app.include_router(live_visitors_router)
 app.include_router(file_redirects_router)
-app.include_router(zoom_router)
 app.include_router(custom_domain_router, prefix="/api")
 app.include_router(client_notifications_router, prefix="/api")
 app.include_router(geo_restrictions_router, prefix="/api")

@@ -3806,61 +3806,6 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         signatures[label] = meta
                     except Exception:
                         continue
-            elif ftype == "zoom-meeting" and val is not None:
-                # Create Zoom meeting automatically using helper function
-                try:
-                    from .zoom import create_meeting_for_submission
-                    
-                    meeting_data = val if isinstance(val, dict) else {}
-                    topic = meeting_data.get("topic", "Meeting")
-                    date = meeting_data.get("date", "")
-                    time = meeting_data.get("time", "")
-                    duration = int(meeting_data.get("duration", 30))
-                    agenda = meeting_data.get("agenda", "")
-                    
-                    # Only create if we have date and time
-                    if topic and date and time:
-                        # Combine date and time into ISO 8601 format
-                        start_time = f"{date}T{time}:00"
-                        
-                        # Use helper function that handles token refresh
-                        meeting = await create_meeting_for_submission(
-                            user_id=owner_id,
-                            meeting_details={
-                                "topic": topic,
-                                "start_time": start_time,
-                                "duration": duration,
-                                "timezone": "UTC",
-                                "agenda": agenda
-                            }
-                        )
-                        
-                        if meeting:
-                            # Store meeting details in answers
-                            answers[label] = {
-                                "topic": topic,
-                                "date": date,
-                                "time": time,
-                                "duration": duration,
-                                "agenda": agenda,
-                                "meeting_id": meeting.get("id"),
-                                "join_url": meeting.get("join_url"),
-                                "start_url": meeting.get("start_url"),
-                                "password": meeting.get("password"),
-                                "created": True
-                            }
-                            logger.info(f"Zoom meeting created: {meeting.get('id')} for form {form_id}")
-                        else:
-                            # Failed to create meeting (user not connected or error)
-                            answers[label] = {**meeting_data, "created": False, "error": "Zoom not connected or failed"}
-                            logger.warning(f"Zoom meeting creation failed for form {form_id}")
-                    else:
-                        # Missing required fields
-                        answers[label] = {**meeting_data, "created": False}
-                except Exception as e:
-                    # Log error but don't fail submission
-                    logger.exception(f"Zoom meeting creation error: {e}")
-                    answers[label] = val
             else:
                 # Store all other field types (text, email, number, etc.)
                 if val is not None:

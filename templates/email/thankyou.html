@@ -17,23 +17,24 @@
       body, table, td, a, h1, h2, h3, p, strong, em, span, div { 
         font-family: '{{ font_family | default("Inter") }}', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; 
       }
-      /* Basic email-safe styles */
+      /* Basic email-safe styles - Dark theme to match preview */
       .container { max-width: 640px; margin: 0 auto; }
-      .card { background: #ffffff; border-radius: 12px; padding: 32px; border: 1px solid #e5e7eb; }
-      .muted { color: #6b7280; }
+      .card { background: #111418; border-radius: 12px; padding: 16px; border: none; }
+      .subject { font-weight: 700; margin-bottom: 8px; color: #ffffff; }
+      .muted { color: #c7c7c7; }
       .btn {
         display: inline-block;
-        background: {{button_color | default('#3b82f6')}};
-        color: {{button_text_color | default('#ffffff')}} !important;
-        padding: 12px 24px;
+        background: {{button_color | default('#4f46e5')}};
+        color: #ffffff !important;
+        padding: 10px 14px;
         border-radius: 8px;
         text-decoration: none;
         font-weight: 600;
         font-size: 15px;
       }
       @media screen and (max-width: 600px) {
-        .container { padding: 0 16px; }
-        .card { padding: 24px; }
+        .container { padding: 0 12px; }
+        .card { padding: 16px; }
         .btn { display: block; width: 100%; text-align: center; padding: 10px 14px !important; font-size: 15px !important; }
       }
     </style>
@@ -46,7 +47,7 @@
     </xml>
     <![endif]-->
   </head>
-  <body style="margin:0; padding:24px; background:#f9fafb; color:#111827; font-family: '{{ font_family | default("Inter") }}', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;">
+  <body style="margin:0; padding:12px; background:#0B0F19; color:#f5f5f5; font-family: '{{ font_family | default("Inter") }}', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;">
     <!-- Preheader (hidden in clients, visible for preview) -->
     <div style="display:none; max-height:0; overflow:hidden; opacity:0; visibility:hidden;">
       {{preheader}}
@@ -58,10 +59,17 @@
     <![endif]-->
 
     <div class="container">
-      <!-- Card -->
+      <!-- Logo (centered at top) -->
+      {% if logo_url %}
+      <div style="text-align:center; margin-bottom:8px;">
+        <img src="{{logo_url}}" alt="Logo" style="max-width:160px; height:auto; display:inline-block;" />
+      </div>
+      {% endif %}
+      
+      <!-- Card (dark theme) -->
       <div class="card">
         <!-- Email content (HTML from form builder) -->
-        <div style="font-size:15px; line-height:1.7; color:#374151;">
+        <div style="font-size:15px; line-height:1.7; color:#f5f5f5;">
           {% if content_html %}
             <div style="margin:0;">{{content_html|safe}}</div>
           {% endif %}
@@ -69,30 +77,30 @@
           <!-- CTA Button (with Outlook VML fallback) -->
           {% if cta_url and cta_label %}
             <!--[if mso]>
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="left" style="margin:24px 0 0 0;"><tr><td>
-              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{cta_url}}" style="height:44px; v-text-anchor:middle; width:220px;" arcsize="10%" stroke="f" fillcolor="{{button_color | default('#3b82f6')}}">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="left" style="margin:12px 0 0 0;"><tr><td>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{cta_url}}" style="height:40px; v-text-anchor:middle; width:180px;" arcsize="10%" stroke="f" fillcolor="{{button_color | default('#4f46e5')}}">
                 <w:anchorlock/>
-                <center style="color:{{button_text_color | default('#ffffff')}}; font-family: Arial, Helvetica, sans-serif; font-size:15px; font-weight:600;">{{cta_label}}</center>
+                <center style="color:#ffffff; font-family: Arial, Helvetica, sans-serif; font-size:15px; font-weight:600;">{{cta_label}}</center>
               </v:roundrect>
             </td></tr></table>
             <![endif]-->
             <!--[if !mso]><!-- -->
-            <p style="margin:24px 0 0 0;">
+            <div style="margin-top:12px;">
               <a class="btn" href="{{cta_url}}">{{cta_label}}</a>
-            </p>
+            </div>
             <!--<![endif]-->
           {% endif %}
         </div>
       </div>
 
       <!-- Footer with copyright -->
-      <p class="muted" style="font-size:12px; text-align:center; margin-top:20px; color:#9ca3af;">
+      <div class="muted" style="font-size:12px; text-align:center; margin-top:8px; color:#c7c7c7;">
         {% if copyright_name %}
           © {{year}} {{copyright_name}}
         {% else %}
           © {{year}} {{form_title | default('Our Team')}}
         {% endif %}
-      </p>
+      </div>
     </div>
   </body>
 </html>

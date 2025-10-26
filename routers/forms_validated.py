@@ -4,12 +4,39 @@ Forms router with Pydantic validation
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from db.database import get_session
 from services.forms_service_async import AsyncFormsService
 from models.base import FormModel
 
 router = APIRouter(prefix="/forms", tags=["forms"])
+
+async def ensure_user_exists(session: AsyncSession, user_id: str) -> None:
+    """Ensure user exists in database before creating form. Insert if missing."""
+    try:
+        result = await session.execute(
+            text("SELECT 1 FROM users WHERE uid = :uid"),
+            {"uid": user_id}
+        )
+        exists = result.scalar()
+        
+        if not exists:
+            # User doesn't exist, create minimal record
+            await session.execute(
+                text("""
+                    INSERT INTO users (uid, created_at, updated_at)
+                    VALUES (:uid, NOW(), NOW())
+                    ON CONFLICT (uid) DO NOTHING
+                """),
+                {"uid": user_id}
+            )
+            await session.commit()
+    except Exception as e:
+        # Log error but don't fail - let the form creation attempt proceed
+        # The foreign key constraint will catch any real issues
+        print(f"Error ensuring user exists: {e}")
+        await session.rollback()
 
 @router.get("/")
 async def get_forms(
@@ -58,6 +85,9 @@ async def create_form(
         form_dict["user_id"] = user_id
     if not form_dict.get("user_id"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing user_id")
+    
+    # Ensure user exists in database before creating form
+    await ensure_user_exists(session, form_dict["user_id"])
     
     # Create form with validation
     form = await AsyncFormsService.create_form(session, form_dict)

@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 # Initialize Firebase Admin if not disabled
 # This is a centralized initialization to prevent multiple initializations
 def initialize_firebase_admin():
-    # Honor FIRESTORE_DISABLED: skip any initialization / network calls
+    # FIRESTORE_DISABLED only disables Firestore, NOT Firebase Auth
+    # We still need Firebase Auth for user authentication
     firestore_disabled = str(os.environ.get('FIRESTORE_DISABLED', '0')).strip().lower()
     if firestore_disabled in {"1", "true", "yes", "on"}:
-        logger.warning(f"Firebase initialization skipped: FIRESTORE_DISABLED={firestore_disabled}")
-        return None
+        logger.info(f"Firestore is disabled (FIRESTORE_DISABLED={firestore_disabled}), but initializing Firebase Auth")
     if firebase_admin is None:
         logger.error("Firebase Admin SDK not imported")
         return None

@@ -109,12 +109,7 @@ async def get_user_schedules(
                             event_time = None
                             zoom_meeting_data = None
                             
-                                
-                                if zoom_date:
-                                    event_date = zoom_date
-                                if zoom_time:
-                                    event_time = zoom_time
-                            elif isinstance(field_value, str):
+                            if isinstance(field_value, str):
                                 # Try to parse ISO date or datetime
                                 try:
                                     dt = datetime.fromisoformat(field_value.replace('Z', '+00:00'))

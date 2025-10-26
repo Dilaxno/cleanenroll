@@ -2384,6 +2384,14 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
         sets.append("prevent_duplicate_by_ip = :prevent_duplicate_by_ip")
         params["prevent_duplicate_by_ip"] = bool(prevent_duplicate_by_ip)
 
+    # Duplicate submissions by UID: persist flag (accept camelCase and snake_case)
+    prevent_duplicate_by_uid = payload.get("preventDuplicateByUID")
+    if not isinstance(prevent_duplicate_by_uid, bool):
+        prevent_duplicate_by_uid = payload.get("prevent_duplicate_by_uid")
+    if isinstance(prevent_duplicate_by_uid, bool):
+        sets.append("prevent_duplicate_by_uid = :prevent_duplicate_by_uid")
+        params["prevent_duplicate_by_uid"] = bool(prevent_duplicate_by_uid)
+
     duplicate_window_hours = payload.get("duplicateWindowHours")
     if duplicate_window_hours is None:
         duplicate_window_hours = payload.get("duplicate_window_hours")

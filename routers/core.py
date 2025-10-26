@@ -638,29 +638,39 @@ async def signup_enrich(request: Request):
     """Record the caller's signup IP and country onto their Neon user row.
     Requires a valid Firebase ID token in the Authorization header.
     """
-    # Extract bearer token
-    authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-    if not authz.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization")
-    token = authz.split(" ", 1)[1].strip()
-
-    # Initialize Firebase Admin
     try:
-        _ensure_firebase_initialized()
-    except HTTPException as e:
-        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
-    # Only require Firebase Auth
-    if not (_FB_AVAILABLE and admin_auth is not None):
-        raise HTTPException(status_code=500, detail="Firebase Auth unavailable")
+        # Extract bearer token
+        authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+        if not authz.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Missing Authorization")
+        token = authz.split(" ", 1)[1].strip()
 
-    # Verify token -> uid
-    try:
-        decoded = admin_auth.verify_id_token(token)
-        uid = decoded.get("uid")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    if not uid:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        # Initialize Firebase Admin
+        try:
+            _ensure_firebase_initialized()
+        except HTTPException as e:
+            logger.error(f"[signup_enrich] Firebase init failed: {e.detail}")
+            raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
+        # Only require Firebase Auth
+        if not (_FB_AVAILABLE and admin_auth is not None):
+            logger.error("[signup_enrich] Firebase Auth unavailable")
+            raise HTTPException(status_code=500, detail="Firebase Auth unavailable")
+
+        # Verify token -> uid
+        try:
+            decoded = admin_auth.verify_id_token(token)
+            uid = decoded.get("uid")
+        except Exception as e:
+            logger.error(f"[signup_enrich] Token verification failed: {e}")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if not uid:
+            logger.error("[signup_enrich] No uid in token")
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[signup_enrich] Unexpected error in auth: {e}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
 
     # Determine client IP and geo
     ip = _ip_from_req(request)
@@ -700,9 +710,9 @@ async def signup_enrich(request: Request):
                 },
             )
             await session.commit()
-    except Exception:
-        # Do not fail the request on storage errors
-        pass
+    except Exception as e:
+        # Log but don't fail the request on storage errors
+        logger.warning(f"[signup_enrich] Failed to update user geo data: {e}")
 
     return {"status": "ok", "ip": ip, "country": (str(country).upper() if country else None)}
 
@@ -740,29 +750,39 @@ async def signup_upsert(request: Request, body: SignupUpsertPayload):
     """Create or update the caller's user row in Neon users table.
     Requires a valid Firebase ID token in the Authorization header.
     """
-    # Extract bearer token
-    authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-    if not authz.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization")
-    token = authz.split(" ", 1)[1].strip()
-
-    # Initialize Firebase Admin
     try:
-        _ensure_firebase_initialized()
-    except HTTPException as e:
-        raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
-    if not (_FB_AVAILABLE and admin_auth is not None):
-        raise HTTPException(status_code=500, detail="Firebase Auth unavailable")
+        # Extract bearer token
+        authz = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+        if not authz.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Missing Authorization")
+        token = authz.split(" ", 1)[1].strip()
 
-    # Verify token -> uid, claims email when present
-    try:
-        decoded = admin_auth.verify_id_token(token)
-        uid = decoded.get("uid")
-        claim_email = decoded.get("email")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    if not uid:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        # Initialize Firebase Admin
+        try:
+            _ensure_firebase_initialized()
+        except HTTPException as e:
+            logger.error(f"[signup_upsert] Firebase init failed: {e.detail}")
+            raise HTTPException(status_code=500, detail=f"Firebase initialization failed: {e.detail}")
+        if not (_FB_AVAILABLE and admin_auth is not None):
+            logger.error("[signup_upsert] Firebase Auth unavailable")
+            raise HTTPException(status_code=500, detail="Firebase Auth unavailable")
+
+        # Verify token -> uid, claims email when present
+        try:
+            decoded = admin_auth.verify_id_token(token)
+            uid = decoded.get("uid")
+            claim_email = decoded.get("email")
+        except Exception as e:
+            logger.error(f"[signup_upsert] Token verification failed: {e}")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if not uid:
+            logger.error("[signup_upsert] No uid in token")
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[signup_upsert] Unexpected error in auth: {e}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
 
     # Determine final fields to upsert
     email = (body.email or claim_email) or None

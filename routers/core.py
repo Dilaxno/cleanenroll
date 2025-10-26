@@ -800,6 +800,21 @@ async def signup_upsert(request: Request, body: SignupUpsertPayload):
     use_cases_json = _json.dumps(body.useCases) if body.useCases else None
     business_json = _json.dumps(body.business) if body.business else None
 
+    # Check if user is new (doesn't exist yet) for welcome email
+    is_new_user = False
+    try:
+        from sqlalchemy import text as _text  # type: ignore
+        async with async_session_maker() as session:
+            result = await session.execute(
+                _text("SELECT uid FROM users WHERE uid = :uid"),
+                {"uid": uid}
+            )
+            existing_user = result.fetchone()
+            is_new_user = existing_user is None
+    except Exception as e:
+        logger.warning(f"[signup_upsert] Could not check if user exists: {e}")
+        is_new_user = False
+
     # Upsert into Neon
     try:
         from sqlalchemy import text as _text  # type: ignore
@@ -853,6 +868,53 @@ async def signup_upsert(request: Request, body: SignupUpsertPayload):
     except Exception as e:
         logger.exception("[signup_upsert] Neon upsert failed")
         raise HTTPException(status_code=500, detail="Failed to persist user")
+
+    # Send welcome email for new users
+    if is_new_user and email:
+        try:
+            from utils.email import render_email, send_email_html
+            
+            # Determine user's name for personalization
+            user_name = first_name or display_name or "there"
+            
+            # Render welcome email using base.html template
+            html_body = render_email(
+                "base.html",
+                {
+                    "subject": "Welcome to CleanEnroll! 🎉",
+                    "preheader": "Start creating beautiful forms in minutes",
+                    "title": f"Welcome to CleanEnroll, {user_name}!",
+                    "intro": "We're thrilled to have you here. CleanEnroll makes it easy to create beautiful, secure forms that convert.",
+                    "content_html": """
+                        <p style="margin:0 0 16px 0; color:#c7c7c7;">
+                            With CleanEnroll, you can:
+                        </p>
+                        <ul style="margin:0 0 16px 0; padding-left:20px; color:#c7c7c7;">
+                            <li style="margin-bottom:8px;">Build forms with drag-and-drop simplicity</li>
+                            <li style="margin-bottom:8px;">Customize every detail to match your brand</li>
+                            <li style="margin-bottom:8px;">Collect responses securely and view analytics</li>
+                            <li style="margin-bottom:8px;">Integrate with your favorite tools</li>
+                        </ul>
+                        <p style="margin:0 0 4px 0; color:#c7c7c7;">
+                            Ready to get started? Click the button below to create your first form.
+                        </p>
+                    """,
+                    "cta_url": "https://cleanenroll.com/builder",
+                    "cta_label": "Create Your First Form",
+                }
+            )
+            
+            # Send the email
+            send_email_html(
+                to_email=email,
+                subject="Welcome to CleanEnroll! 🎉",
+                html_body=html_body
+            )
+            
+            logger.info(f"[signup_upsert] Welcome email sent to {email}")
+        except Exception as e:
+            # Don't fail the signup if email fails
+            logger.error(f"[signup_upsert] Failed to send welcome email to {email}: {e}")
 
     return {"status": "ok", "uid": uid}
 

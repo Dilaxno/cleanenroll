@@ -23,31 +23,58 @@ logger = logging.getLogger(__name__)
 # This is a centralized initialization to prevent multiple initializations
 def initialize_firebase_admin():
     # Honor FIRESTORE_DISABLED: skip any initialization / network calls
-    if str(os.environ.get('FIRESTORE_DISABLED', '0')).strip().lower() in {"1", "true", "yes", "on"}:
+    firestore_disabled = str(os.environ.get('FIRESTORE_DISABLED', '0')).strip().lower()
+    if firestore_disabled in {"1", "true", "yes", "on"}:
+        logger.warning(f"Firebase initialization skipped: FIRESTORE_DISABLED={firestore_disabled}")
         return None
-    if firebase_admin is None or credentials is None:
+    if firebase_admin is None:
+        logger.error("Firebase Admin SDK not imported")
+        return None
+    if credentials is None:
+        logger.error("Firebase credentials module not imported")
         return None
     try:
-        return firebase_admin.get_app()
-    except Exception:
+        app = firebase_admin.get_app()
+        logger.info("Firebase Admin already initialized")
+        return app
+    except Exception as e:
+        logger.info(f"Firebase Admin not initialized yet, initializing now: {e}")
         # Check for credentials file
         try:
             cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-            if cred_path and os.path.exists(cred_path):
-                cred = credentials.Certificate(cred_path)
-                return firebase_admin.initialize_app(cred)
+            if cred_path:
+                if os.path.exists(cred_path):
+                    logger.info(f"Initializing Firebase with credentials file: {cred_path}")
+                    cred = credentials.Certificate(cred_path)
+                    app = firebase_admin.initialize_app(cred)
+                    logger.info("Firebase Admin initialized successfully with credentials file")
+                    return app
+                else:
+                    logger.error(f"Credentials file not found: {cred_path}")
             else:
-                # Use application default credentials
-                return firebase_admin.initialize_app()
-        except Exception:
+                logger.info("GOOGLE_APPLICATION_CREDENTIALS not set, trying application default")
+            # Use application default credentials
+            app = firebase_admin.initialize_app()
+            logger.info("Firebase Admin initialized successfully with application default credentials")
+            return app
+        except Exception as init_error:
             # If initialization fails, return None and rely on dummy objects below
+            logger.error(f"Firebase Admin initialization failed: {init_error}")
             return None
 
 # Initialize Firebase Admin (may be None when disabled)
 default_app = initialize_firebase_admin()
 
 # Export Firebase Admin auth for authentication (None when disabled)
-admin_auth = auth if default_app is not None and auth is not None else None
+if default_app is not None and auth is not None:
+    admin_auth = auth
+    logger.info("Firebase Admin Auth is available")
+else:
+    admin_auth = None
+    if default_app is None:
+        logger.warning("Firebase Admin Auth is NOT available: default_app is None")
+    if auth is None:
+        logger.warning("Firebase Admin Auth is NOT available: auth module is None")
 
 # Forward declarations for circular references
 class DummyAdminCollection:

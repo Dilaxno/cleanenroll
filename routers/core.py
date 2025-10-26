@@ -392,9 +392,9 @@ async def set_marketing_opt_in(request: Request, userId: str = Query(..., descri
 @router.delete("/api/user/account")
 @limiter.limit("5/minute")
 async def delete_user_account(request: Request, userId: str = Query(..., description="Firebase Auth UID")):
-    """Delete user account and all associated data from Neon DB.
+    """Delete user account and all associated data from Neon DB and Firebase Auth.
     This will CASCADE delete all forms, submissions, analytics, sessions, abandons, etc.
-    Should be called BEFORE deleting the Firebase auth account.
+    Also deletes the Firebase Auth account so user cannot login again.
     """
     if not userId:
         raise HTTPException(status_code=400, detail="userId is required")
@@ -415,16 +415,31 @@ async def delete_user_account(request: Request, userId: str = Query(..., descrip
             
             deleted_count = result.rowcount
             logger.info(f"Deleted user account {userId} from Neon DB (rows affected: {deleted_count})")
-            
-            return {
-                "status": "ok",
-                "userId": userId,
-                "deleted": deleted_count > 0,
-                "message": "All user data deleted from database"
-            }
     except Exception as e:
-        logger.exception(f"Failed to delete user account {userId}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete account: {str(e)}")
+        logger.exception(f"Failed to delete user account {userId} from database")
+        raise HTTPException(status_code=500, detail=f"Failed to delete account data: {str(e)}")
+    
+    # Delete Firebase Auth account so user cannot login again
+    firebase_deleted = False
+    try:
+        _ensure_firebase_initialized()
+        if _FB_AVAILABLE and admin_auth is not None:
+            admin_auth.delete_user(userId)
+            firebase_deleted = True
+            logger.info(f"Deleted Firebase Auth account for user {userId}")
+        else:
+            logger.warning(f"Firebase Auth unavailable, could not delete auth account for {userId}")
+    except Exception as e:
+        # Log but don't fail the request - database is already deleted
+        logger.error(f"Failed to delete Firebase Auth account for {userId}: {e}")
+    
+    return {
+        "status": "ok",
+        "userId": userId,
+        "deleted": deleted_count > 0,
+        "firebase_deleted": firebase_deleted,
+        "message": "Account deleted successfully" if firebase_deleted else "Account data deleted (Firebase Auth deletion failed)"
+    }
 
 
 class SignupCheckResponse(BaseModel):

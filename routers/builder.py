@@ -2637,6 +2637,78 @@ async def get_user_plan(request: Request, userId: str = Query(...)):
         logger.exception("get_user_plan failed userId=%s", userId)
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/user/submission-usage")
+@limiter.limit("120/minute")
+async def get_user_submission_usage(request: Request, userId: str = Query(...)):
+    """Return the user's current monthly submission usage and limit.
+    Response: { "used": int, "limit": int, "resetDate": str, "isPro": bool }
+    """
+    try:
+        uid = str(userId or "").strip()
+        if not uid:
+            raise HTTPException(status_code=400, detail="Missing userId")
+        
+        # Check if user is on a Pro plan
+        is_pro = await _is_pro_plan(uid)
+        
+        # For Pro users, return unlimited usage
+        if is_pro:
+            return {
+                "used": 0,
+                "limit": -1,  # -1 indicates unlimited
+                "resetDate": None,
+                "isPro": True
+            }
+        
+        # For free users, fetch usage from database
+        async with async_session_maker() as session:
+            # Reset counter if needed first
+            await session.execute(
+                text(
+                    """
+                    UPDATE users 
+                    SET submissions_this_month = 0,
+                        limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
+                    WHERE uid = :uid 
+                      AND limit_reset_date <= CURRENT_TIMESTAMP
+                    """
+                ),
+                {"uid": uid},
+            )
+            await session.commit()
+            
+            # Fetch current usage
+            res = await session.execute(
+                text(
+                    """
+                    SELECT submissions_this_month, submissions_limit, limit_reset_date
+                    FROM users
+                    WHERE uid = :uid
+                    """
+                ),
+                {"uid": uid},
+            )
+            row = res.mappings().first()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            used = int(row.get("submissions_this_month") or 0)
+            limit = int(row.get("submissions_limit") or FREE_MONTHLY_SUBMISSION_LIMIT)
+            reset_date = row.get("limit_reset_date")
+            
+            return {
+                "used": used,
+                "limit": limit,
+                "resetDate": reset_date.isoformat() if reset_date else None,
+                "isPro": False
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_user_submission_usage failed userId=%s", userId)
+        raise HTTPException(status_code=500, detail=str(e))
+
 # -----------------------------
 # Email integration status (Neon persistence)
 # -----------------------------
@@ -3373,22 +3445,40 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         try:
             owner_id = str(form_data.get("user_id") or "").strip() or None
             if owner_id and not (await _is_pro_plan(owner_id)):
-                # Count current month's submissions for this owner in Neon
+                # Check and reset limit if needed, then check current usage
                 async with async_session_maker() as session:
-                    res = await session.execute(
+                    # Reset counter if limit_reset_date has passed
+                    await session.execute(
                         text(
                             """
-                            SELECT COUNT(*) AS cnt
-                            FROM submissions
-                            WHERE form_owner_id = :uid
-                              AND submitted_at >= date_trunc('month', NOW())
+                            UPDATE users 
+                            SET submissions_this_month = 0,
+                                limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
+                            WHERE uid = :uid 
+                              AND limit_reset_date <= CURRENT_TIMESTAMP
                             """
                         ),
                         {"uid": owner_id},
                     )
-                    month_count = int((res.mappings().first() or {}).get("cnt") or 0)
-                if month_count >= FREE_MONTHLY_SUBMISSION_LIMIT:
-                    raise HTTPException(status_code=429, detail=f"Monthly submission limit reached ({FREE_MONTHLY_SUBMISSION_LIMIT}). Please try again next month or upgrade your plan.")
+                    await session.commit()
+                    
+                    # Fetch current usage and limit
+                    res = await session.execute(
+                        text(
+                            """
+                            SELECT submissions_this_month, submissions_limit
+                            FROM users
+                            WHERE uid = :uid
+                            """
+                        ),
+                        {"uid": owner_id},
+                    )
+                    row = res.mappings().first()
+                    if row:
+                        month_count = int(row.get("submissions_this_month") or 0)
+                        limit = int(row.get("submissions_limit") or FREE_MONTHLY_SUBMISSION_LIMIT)
+                        if month_count >= limit:
+                            raise HTTPException(status_code=429, detail=f"Monthly submission limit reached ({limit}). Please try again next month or upgrade your plan.")
         except HTTPException:
             raise
         except Exception:
@@ -4002,6 +4092,12 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
             text("UPDATE forms SET submissions = COALESCE(submissions,0) + 1, updated_at = NOW() WHERE id = :form_id"),
             {"form_id": form_id},
         )
+        # Increment user's monthly submission counter
+        if owner_id:
+            await session.execute(
+                text("UPDATE users SET submissions_this_month = COALESCE(submissions_this_month,0) + 1 WHERE uid = :uid"),
+                {"uid": owner_id},
+            )
         await session.commit()
     
     # Build record object for integrations (Google Sheets, Airtable, Slack, etc.)

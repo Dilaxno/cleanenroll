@@ -467,6 +467,30 @@ async def analytics_events(request: Request, payload: Dict[str, Any] | None = No
                 }
             )
             
+            # If this is a view event, recalculate conversion rate (submissions/views * 100)
+            if etype == "view":
+                try:
+                    views_result = await session.execute(
+                        text("SELECT COUNT(*) FROM analytics WHERE form_id = :form_id AND type = 'view'"),
+                        {"form_id": form_id}
+                    )
+                    total_views = views_result.scalar() or 0
+                    
+                    subs_result = await session.execute(
+                        text("SELECT COUNT(*) FROM submissions WHERE form_id = :form_id"),
+                        {"form_id": form_id}
+                    )
+                    total_submissions = subs_result.scalar() or 0
+                    
+                    conversion_rate = (total_submissions / total_views * 100) if total_views > 0 else 0.0
+                    
+                    await session.execute(
+                        text("UPDATE forms SET conversion_rate = :conversion_rate, updated_at = NOW() WHERE id = :form_id"),
+                        {"form_id": form_id, "conversion_rate": round(conversion_rate, 2)}
+                    )
+                except Exception:
+                    pass
+            
             await session.commit()
     except Exception:
         # Best effort only
@@ -4104,6 +4128,68 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                 text("UPDATE users SET submissions_this_month = COALESCE(submissions_this_month,0) + 1 WHERE uid = :uid"),
                 {"uid": owner_id},
             )
+        
+        # Recalculate and update conversion rate and avg completion time
+        try:
+            # Get total views
+            views_result = await session.execute(
+                text("SELECT COUNT(*) FROM analytics WHERE form_id = :form_id AND type = 'view'"),
+                {"form_id": form_id}
+            )
+            total_views = views_result.scalar() or 0
+            
+            # Get total submissions
+            subs_result = await session.execute(
+                text("SELECT COUNT(*) FROM submissions WHERE form_id = :form_id"),
+                {"form_id": form_id}
+            )
+            total_submissions = subs_result.scalar() or 0
+            
+            # Calculate conversion rate (submissions/views * 100)
+            conversion_rate = (total_submissions / total_views * 100) if total_views > 0 else 0.0
+            
+            # Calculate average completion time
+            avg_time_result = await session.execute(
+                text("""
+                    SELECT AVG(EXTRACT(EPOCH FROM (c.end_time - st.start_time))) as avg_seconds
+                    FROM (
+                        SELECT session_id, form_id, MIN(created_at) as start_time
+                        FROM analytics
+                        WHERE form_id = :form_id
+                          AND type = 'form_started'
+                          AND session_id IS NOT NULL
+                        GROUP BY session_id, form_id
+                    ) st
+                    INNER JOIN (
+                        SELECT session_id, form_id, submitted_at as end_time
+                        FROM submissions
+                        WHERE form_id = :form_id
+                          AND session_id IS NOT NULL
+                    ) c ON st.session_id = c.session_id AND st.form_id = c.form_id
+                    WHERE c.end_time > st.start_time
+                """),
+                {"form_id": form_id}
+            )
+            avg_completion_time = avg_time_result.scalar() or 0.0
+            
+            # Update forms table with calculated metrics
+            await session.execute(
+                text("""
+                    UPDATE forms 
+                    SET conversion_rate = :conversion_rate,
+                        avg_completion_time = :avg_completion_time,
+                        updated_at = NOW()
+                    WHERE id = :form_id
+                """),
+                {
+                    "form_id": form_id,
+                    "conversion_rate": round(conversion_rate, 2),
+                    "avg_completion_time": round(avg_completion_time, 2)
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update analytics metrics for form {form_id}: {e}")
+        
         await session.commit()
     
     # Build record object for integrations (Google Sheets, Airtable, Slack, etc.)

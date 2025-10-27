@@ -28,7 +28,7 @@ class AsyncFormsService:
 
         # Query forms with actual counts from submissions and analytics tables
         # This ensures we show ALL submissions/views from Neon DB, not cached counters
-        # Also calculates conversion rate (submissions/views * 100)
+        # Returns cached conversion_rate and avg_completion_time from forms table
         query = (
             text(
                 """
@@ -37,11 +37,8 @@ class AsyncFormsService:
                     COALESCE(s.submission_count, 0) as submissions,
                     COALESCE(v.view_count, 0) as views,
                     s.last_submission_at,
-                    CASE 
-                        WHEN COALESCE(v.view_count, 0) > 0 
-                        THEN ROUND((COALESCE(s.submission_count, 0)::numeric / v.view_count::numeric * 100), 1)
-                        ELSE 0 
-                    END as conversion_rate
+                    COALESCE(f.conversion_rate, 0) as conversion_rate,
+                    COALESCE(f.avg_completion_time, 0) as avg_completion_time
                 FROM forms f
                 LEFT JOIN (
                     SELECT form_id, COUNT(*) as submission_count, MAX(submitted_at) as last_submission_at

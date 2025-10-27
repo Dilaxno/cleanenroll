@@ -33,6 +33,8 @@ CREATE TABLE forms (
     views INTEGER DEFAULT 0,
     submissions INTEGER DEFAULT 0,
     submission_limit INTEGER DEFAULT 0,
+    conversion_rate DECIMAL(5,2) DEFAULT 0.0,
+    avg_completion_time DECIMAL(10,2) DEFAULT 0.0,
     fields JSONB,
     theme JSONB,
     branding JSONB,

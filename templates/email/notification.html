@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="x-apple-disable-message-reformatting" />
+    <meta name="format-detection" content="telephone=no, date=no, address=no, email=no" />
+    <title>{{title}}</title>
+    <meta name="description" content="{{intro}}" />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+      body, table, td, a, h1, h2, h3, p, strong, em, span, div { font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; }
+      .container { max-width: 640px; margin: 0 auto; }
+      .card { background: #111418; border-radius: 12px; padding: 24px; }
+      .muted { color: #c7c7c7; }
+      @media screen and (max-width: 600px) {
+        .container { padding: 0 16px; }
+        img.logo { max-width: 160px !important; height: auto !important; }
+      }
+    </style>
+  </head>
+  <body style="margin:0; padding:24px; background:#0B0F19; color:#f5f5f5;">
+    <!-- Preheader -->
+    <div style="display:none; max-height:0; overflow:hidden; opacity:0; visibility:hidden;">
+      {{intro}}
+    </div>
+
+    <div class="container">
+      <!-- Logo -->
+      <div style="text-align:center; margin-bottom:20px;">
+        <a href="https://cleanenroll.com" target="_blank" style="text-decoration:none;">
+          <img class="logo" src="https://cleanenroll.com/LogoCleanEnroll.png" width="160" alt="CleanEnroll" style="display:block; height:auto; border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; margin:0 auto;" />
+        </a>
+      </div>
+
+      <!-- Card -->
+      <div class="card">
+        <!-- Title -->
+        <h1 style="margin:0 0 12px 0; font-size:22px; line-height:1.2; font-weight:700; color:#ffffff;">{{title}}</h1>
+
+        <!-- Content -->
+        <div style="font-size:15px; line-height:1.6; color:#f5f5f5;">
+          {% if intro %}
+            <p style="margin:0 0 16px 0; color:#c7c7c7;">{{intro}}</p>
+          {% endif %}
+          {% if content_html %}
+            <div style="margin:0;">{{content_html|safe}}</div>
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <p class="muted" style="font-size:12px; text-align:center; margin-top:18px;">
+        © {{year}} CleanEnroll • <a href="https://cleanenroll.com/legal#privacy-policy" style="color:#9fe38e; text-decoration:none;">Privacy</a> • <a href="https://cleanenroll.com/legal#terms-of-service" style="color:#9fe38e; text-decoration:none;">Terms</a>
+      </p>
+    </div>
+  </body>
+</html>

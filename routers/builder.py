@@ -1004,7 +1004,10 @@ CUSTOM_DOMAIN_TARGET = (os.getenv("CUSTOM_DOMAIN_TARGET") or "api.cleanenroll.co
 # ACME/Certbot configuration
 ACME_WEBROOT = os.getenv("ACME_WEBROOT") or os.path.join(os.getcwd(), "data", "acme")
 ACME_CHALLENGE_DIR = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
-os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+try:
+    os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+except (OSError, PermissionError) as e:
+    logger.warning(f"Could not create ACME challenge directory at startup: {e}")
 CERTBOT_BIN = os.getenv("CERTBOT_BIN") or "certbot"
 EMAIL_FOR_LE = os.getenv("LETSENCRYPT_EMAIL") or os.getenv("LE_EMAIL") or "admin@cleanenroll.com"
 # Certbot writable directories (override defaults to avoid permission issues)
@@ -1013,10 +1016,13 @@ CERTBOT_WORK_DIR   = os.getenv("CERTBOT_WORK_DIR")   or os.path.join(os.getcwd()
 CERTBOT_LOGS_DIR   = os.getenv("CERTBOT_LOGS_DIR")   or os.path.join(os.getcwd(), "data", "letsencrypt", "logs")
 # Base directory where live certs are written
 CERT_LIVE_BASE     = os.path.join(CERTBOT_CONFIG_DIR, "live")
-# Ensure directories exist
-os.makedirs(CERTBOT_CONFIG_DIR, exist_ok=True)
-os.makedirs(CERTBOT_WORK_DIR, exist_ok=True)
-os.makedirs(CERTBOT_LOGS_DIR, exist_ok=True)
+# Ensure directories exist (non-fatal if permissions don't allow)
+try:
+    os.makedirs(CERTBOT_CONFIG_DIR, exist_ok=True)
+    os.makedirs(CERTBOT_WORK_DIR, exist_ok=True)
+    os.makedirs(CERTBOT_LOGS_DIR, exist_ok=True)
+except (OSError, PermissionError) as e:
+    logger.warning(f"Could not create Certbot directories at startup: {e}")
 
 # Renewal lock/state file
 _RENEW_LOCK_FILE = os.path.join(os.getcwd(), "data", "letsencrypt", "renew.lock")

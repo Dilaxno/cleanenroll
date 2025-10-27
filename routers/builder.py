@@ -4972,3 +4972,84 @@ async def cloudflare_connect_domain(request: Request, payload: Dict = None):
         result = {"success": True, "domain": full_domain, "mode": "fallback"}
 
     return {"connected": True, "domain": full_domain, "details": result}
+
+
+@router.post("/notify-submission")
+@limiter.limit("30/minute")
+async def notify_submission(request: Request, payload: Dict[str, Any] | None = None):
+    """
+    Send transactional email notifications (OTP codes, verification emails, etc.).
+    Used by frontend for sending email verification codes and other notifications.
+    
+    Body: {
+        to: str,
+        subject: str,
+        title: str,
+        intro: str,
+        content_html: str
+    }
+    """
+    try:
+        from utils.email import send_email_html, render_email
+        
+        if not payload:
+            raise HTTPException(status_code=400, detail="Missing payload")
+        
+        to_email = payload.get("to")
+        subject = payload.get("subject")
+        title = payload.get("title", subject)
+        intro = payload.get("intro", "")
+        content_html = payload.get("content_html", "")
+        
+        if not to_email or not subject:
+            raise HTTPException(status_code=400, detail="Missing required fields: to, subject")
+        
+        # Validate email format
+        if "@" not in to_email:
+            raise HTTPException(status_code=400, detail="Invalid email address")
+        
+        # Render email using template
+        try:
+            html_body = render_email("notification.html", {
+                "title": title,
+                "intro": intro,
+                "content_html": content_html
+            })
+        except Exception as template_error:
+            # Fallback to simple HTML if template not found
+            logger.warning("Email template not found, using fallback: %s", template_error)
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            </head>
+            <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5;">
+                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 32px; text-align: center;">
+                        <h1 style="margin: 0; color: #ffffff; font-size: 24px; font-weight: 600;">{title}</h1>
+                    </div>
+                    <div style="padding: 32px;">
+                        {f'<p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">{intro}</p>' if intro else ''}
+                        {content_html}
+                    </div>
+                    <div style="background-color: #f9fafb; padding: 24px; text-align: center; border-top: 1px solid #e5e7eb;">
+                        <p style="margin: 0; color: #6b7280; font-size: 14px;">© {datetime.now().year} CleanEnroll. All rights reserved.</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+        
+        # Send email
+        send_email_html(to_email, subject, html_body)
+        
+        logger.info("Notification email sent to=%s subject=%s", to_email, subject)
+        return {"success": True, "message": "Email sent successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("notify_submission failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to send email")

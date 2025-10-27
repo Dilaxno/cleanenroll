@@ -296,6 +296,8 @@ async def update_user_profile(request: Request, userId: str = Query(..., descrip
     if req.email is not None:
         updates.append("email = :email")
         params["email"] = req.email.strip().lower() if req.email else None
+        # When email is updated via this endpoint (after OTP verification), mark as verified
+        updates.append("email_verified = TRUE")
     
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")

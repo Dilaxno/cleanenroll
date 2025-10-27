@@ -278,6 +278,16 @@ async def get_user_analytics(
                   {date_filter}
                 GROUP BY DATE(a.created_at)
             ),
+            daily_starts AS (
+                SELECT DATE(a.created_at) as day, COUNT(*) as starts
+                FROM analytics a
+                INNER JOIN forms f ON a.form_id = f.id
+                WHERE f.user_id = :uid
+                  AND a.type = 'form_started'
+                  {form_filter}
+                  {date_filter}
+                GROUP BY DATE(a.created_at)
+            ),
             daily_subs AS (
                 SELECT DATE(s.submitted_at) as day, COUNT(*) as submissions
                 FROM submissions s
@@ -288,11 +298,13 @@ async def get_user_analytics(
                 GROUP BY DATE(s.submitted_at)
             )
             SELECT 
-                COALESCE(v.day, s.day) as day,
+                COALESCE(v.day, st.day, s.day) as day,
                 COALESCE(v.views, 0) as views,
+                COALESCE(st.starts, 0) as starts,
                 COALESCE(s.submissions, 0) as submissions
             FROM daily_views v
-            FULL OUTER JOIN daily_subs s ON v.day = s.day
+            FULL OUTER JOIN daily_starts st ON v.day = st.day
+            FULL OUTER JOIN daily_subs s ON COALESCE(v.day, st.day) = s.day
             ORDER BY day ASC
         """)
         daily_result = await session.execute(daily_query, params)
@@ -306,16 +318,19 @@ async def get_user_analytics(
             if day:
                 day_str = day.isoformat() if hasattr(day, 'isoformat') else str(day)
                 views_count = int(row.get("views") or 0)
+                starts_count = int(row.get("starts") or 0)
                 subs_count = int(row.get("submissions") or 0)
                 
                 points.append({
                     "date": day_str,
                     "views": views_count,
+                    "starts": starts_count,
                     "submissions": subs_count
                 })
                 
                 daily_activity[day_str] = {
                     "views": views_count,
+                    "starts": starts_count,
                     "submissions": subs_count
                 }
         

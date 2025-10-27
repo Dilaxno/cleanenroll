@@ -79,7 +79,7 @@ try:
     from db.database import async_session_maker
 except Exception:
     async_session_maker = None  # type: ignore
-    from ..db.database import async_session_maker  # type: ignore
+    from db.database import async_session_maker  # type: ignore
 
 def _mx_lookup(domain: str) -> list[str]:
     """Return list of MX hosts for a domain using dnspython; empty if none or on error."""
@@ -1722,7 +1722,7 @@ def _load_form(form_id: str) -> Dict:
     """Load form from Neon database (async context handled by endpoint)"""
     # Try loading from database first
     try:
-        from ..db.database import async_session_maker
+        from db.database import async_session_maker
         from sqlalchemy import text
         import asyncio
         
@@ -1869,7 +1869,7 @@ async def create_form(cfg: FormConfig):
 async def get_form(form_id: str):
     """Load form from Neon database with custom font metadata in theme"""
     try:
-        from ..db.database import async_session_maker
+        from db.database import async_session_maker
         from sqlalchemy import text
         
         # Load from database

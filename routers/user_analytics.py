@@ -117,7 +117,7 @@ async def get_user_analytics(
         submissions_result = await session.execute(submissions_query, params)
         total_submissions = submissions_result.scalar() or 0
         
-        # Count starts (form_started events)
+        # Count starts (form_started events) - kept for backwards compatibility
         starts_query = text(f"""
             SELECT COUNT(*) as total
             FROM analytics a
@@ -130,8 +130,8 @@ async def get_user_analytics(
         starts_result = await session.execute(starts_query, params)
         total_starts = starts_result.scalar() or 0
         
-        # Calculate conversion rate
-        conversion_rate = (total_submissions / total_starts * 100) if total_starts > 0 else 0
+        # Calculate conversion rate (submissions/views * 100)
+        conversion_rate = (total_submissions / total_views * 100) if total_views > 0 else 0
         
         # Get country distribution from submissions
         countries_query = text(f"""

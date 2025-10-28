@@ -724,6 +724,7 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
                 raise HTTPException(status_code=502, detail='Provider update failed')
 
     # Execute provider update
+    provider_success = False
     try:
         if tmpl:
             try:
@@ -734,6 +735,7 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
             provider_body = {**update_payload}
             _http_call(url, method, provider_body)
             logger.info('[dodo-cancel] provider updated via template url action=%s uid=%s sub=%s', action, uid, subscription_id)
+            provider_success = True
         elif manage_url:
             # Send a richer body so legacy proxy endpoints can perform the correct Dodo call
             proxy_body = {
@@ -744,23 +746,50 @@ async def dodo_cancel_or_resume(request: Request, payload: Dict):
             }
             _http_call(manage_url, 'POST', proxy_body)
             logger.info('[dodo-cancel] provider updated via manage url action=%s uid=%s sub=%s', action, uid, subscription_id)
+            provider_success = True
         else:
             logger.error('[dodo-cancel] no provider endpoint configured (set DODO_SUBSCRIPTION_UPDATE_URL_TEMPLATE or DODO_MANAGE_SUBSCRIPTION_URL)')
-            raise HTTPException(status_code=500, detail='Payments provider not configured')
+            # In development, allow local-only cancellation
+            if os.getenv('ENV', 'production').lower() in ('development', 'dev', 'local'):
+                logger.warning('[dodo-cancel] DEV MODE: proceeding with local-only cancellation')
+                provider_success = True
+            else:
+                raise HTTPException(status_code=500, detail='Payments provider not configured')
     except urllib.error.HTTPError as he:  # type: ignore[attr-defined]
         try:
             err_body = he.read().decode('utf-8', errors='replace')  # type: ignore[call-arg]
         except Exception:
             err_body = ''
-        logger.warning('[dodo-cancel] provider HTTPError status=%s body=%s', getattr(he, 'code', 'n/a'), err_body[:500])
-        raise HTTPException(status_code=502, detail='Provider update failed')
+        status_code = getattr(he, 'code', 'unknown')
+        logger.warning('[dodo-cancel] provider HTTPError status=%s body=%s', status_code, err_body[:500])
+        # In development, allow local-only cancellation on provider failure
+        if os.getenv('ENV', 'production').lower() in ('development', 'dev', 'local'):
+            logger.warning('[dodo-cancel] DEV MODE: provider failed, proceeding with local-only cancellation')
+            provider_success = True
+        else:
+            error_detail = f'Payment provider returned error (status {status_code}). Please contact support or try again later.'
+            raise HTTPException(status_code=502, detail=error_detail)
     except urllib.error.URLError as ue:  # type: ignore[attr-defined]
-        logger.warning('[dodo-cancel] provider URLError reason=%s', getattr(ue, 'reason', ue))
-        raise HTTPException(status_code=502, detail='Provider unreachable')
+        reason = str(getattr(ue, 'reason', ue))
+        logger.warning('[dodo-cancel] provider URLError reason=%s', reason)
+        # In development, allow local-only cancellation on provider failure
+        if os.getenv('ENV', 'production').lower() in ('development', 'dev', 'local'):
+            logger.warning('[dodo-cancel] DEV MODE: provider unreachable, proceeding with local-only cancellation')
+            provider_success = True
+        else:
+            raise HTTPException(status_code=502, detail='Payment provider is currently unreachable. Please try again later.')
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
         logger.exception('[dodo-cancel] provider call failed')
+        # In development, allow local-only cancellation on provider failure
+        if os.getenv('ENV', 'production').lower() in ('development', 'dev', 'local'):
+            logger.warning('[dodo-cancel] DEV MODE: provider error, proceeding with local-only cancellation')
+            provider_success = True
+        else:
+            raise HTTPException(status_code=502, detail=f'Failed to contact payment provider: {str(e)[:100]}')
+    
+    if not provider_success:
         raise HTTPException(status_code=502, detail='Provider update failed')
 
     # Provider succeeded -> update local state

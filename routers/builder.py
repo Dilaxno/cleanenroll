@@ -2178,6 +2178,25 @@ async def public_get_form(form_id: str):
                     except Exception:
                         pass
 
+                # Check if form is currently closed based on schedule
+                is_closed = False
+                now = datetime.now(timezone.utc)
+                closed_from = data.get("closed_from")
+                closed_to = data.get("closed_to")
+                
+                if closed_from and closed_to:
+                    # Both dates set - check if now is within the closed period
+                    if closed_from <= now <= closed_to:
+                        is_closed = True
+                elif closed_from and not closed_to:
+                    # Only start date set - form is closed from that date onwards
+                    if now >= closed_from:
+                        is_closed = True
+                elif closed_to and not closed_from:
+                    # Only end date set - form is closed until that date
+                    if now <= closed_to:
+                        is_closed = True
+                
                 # Build camelCase payload
                 out = {
                     "id": data.get("id"),
@@ -2192,6 +2211,11 @@ async def public_get_form(form_id: str):
                     "celebrationEnabled": bool(data.get("celebration_enabled") if data.get("celebration_enabled") is not None else data.get("celebrationEnabled")),
                     "showTopProgress": bool(data.get("show_top_progress") if data.get("show_top_progress") is not None else data.get("showTopProgress")),
                     "showKeyboardHints": bool(data.get("show_keyboard_hints") if data.get("show_keyboard_hints") is not None else data.get("showKeyboardHints")),
+                    # Scheduling
+                    "isClosed": is_closed,
+                    "closedFrom": closed_from.isoformat() if closed_from else None,
+                    "closedTo": closed_to.isoformat() if closed_to else None,
+                    "closedPageConfig": _json_or(data.get("closed_page_config"), {}) or {},
                     # Auto-reply email settings
                     "autoReplyEnabled": bool(data.get("auto_reply_enabled") if data.get("auto_reply_enabled") is not None else data.get("autoReplyEnabled")),
                     "autoReplyEmailFieldId": data.get("auto_reply_email_field_id") or data.get("autoReplyEmailFieldId") or "",
@@ -5241,3 +5265,148 @@ async def notify_submission(request: Request, payload: Dict[str, Any] | None = N
     except Exception as e:
         logger.exception("notify_submission failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to send email")
+
+# ============================================================================
+# FORM SCHEDULING ENDPOINTS
+# ============================================================================
+
+class FormSchedulePayload(BaseModel):
+    closed_from: Optional[str] = None  # ISO datetime string
+    closed_to: Optional[str] = None    # ISO datetime string
+    closed_page_config: Optional[Dict[str, Any]] = None
+
+@router.put("/forms/{form_id}/schedule")
+@limiter.limit("60/minute")
+async def update_form_schedule(form_id: str, request: Request, payload: FormSchedulePayload):
+    """Update form scheduling settings."""
+    try:
+        uid = await get_current_user_uid(request)
+        if not uid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        
+        db = await get_db()
+        
+        # Verify ownership
+        result = await db.fetch_one(
+            "SELECT id FROM forms WHERE id = :form_id AND uid = :uid",
+            {"form_id": form_id, "uid": uid}
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="Form not found")
+        
+        # Parse dates if provided
+        closed_from_dt = None
+        closed_to_dt = None
+        
+        if payload.closed_from:
+            try:
+                closed_from_dt = datetime.fromisoformat(payload.closed_from.replace('Z', '+00:00'))
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid closed_from date: {e}")
+        
+        if payload.closed_to:
+            try:
+                closed_to_dt = datetime.fromisoformat(payload.closed_to.replace('Z', '+00:00'))
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid closed_to date: {e}")
+        
+        # Validate date range
+        if closed_from_dt and closed_to_dt and closed_from_dt >= closed_to_dt:
+            raise HTTPException(status_code=400, detail="closed_from must be before closed_to")
+        
+        # Update database
+        update_parts = []
+        values = {"form_id": form_id}
+        
+        if payload.closed_from is not None:
+            if payload.closed_from == "":  # Clear the date
+                update_parts.append("closed_from = NULL")
+            else:
+                update_parts.append("closed_from = :closed_from")
+                values["closed_from"] = closed_from_dt
+        
+        if payload.closed_to is not None:
+            if payload.closed_to == "":  # Clear the date
+                update_parts.append("closed_to = NULL")
+            else:
+                update_parts.append("closed_to = :closed_to")
+                values["closed_to"] = closed_to_dt
+        
+        if payload.closed_page_config is not None:
+            update_parts.append("closed_page_config = :config::jsonb")
+            values["config"] = json.dumps(payload.closed_page_config)
+        
+        if update_parts:
+            query = f"UPDATE forms SET {', '.join(update_parts)} WHERE id = :form_id"
+            await db.execute(query, values)
+        
+        logger.info("Form schedule updated: form_id=%s uid=%s", form_id, uid)
+        return {"success": True, "message": "Schedule updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("update_form_schedule failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to update schedule")
+
+@router.post("/forms/{form_id}/schedule/background")
+@limiter.limit("10/minute")
+async def upload_schedule_background(form_id: str, request: Request, file: UploadFile = File(...)):
+    """Upload background image for closed page to R2."""
+    try:
+        uid = await get_current_user_uid(request)
+        if not uid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        
+        db = await get_db()
+        
+        # Verify ownership
+        result = await db.fetch_one(
+            "SELECT id FROM forms WHERE id = :form_id AND uid = :uid",
+            {"form_id": form_id, "uid": uid}
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="Form not found")
+        
+        # Validate file
+        if not file.content_type or not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Size limit: 5MB
+        content = await file.read()
+        if len(content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File size must be less than 5MB")
+        
+        # Upload to R2
+        r2_client = boto3.client(
+            's3',
+            endpoint_url=os.getenv('R2_ENDPOINT'),
+            aws_access_key_id=os.getenv('R2_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('R2_SECRET_ACCESS_KEY'),
+            config=BotoConfig(signature_version='s3v4'),
+            region_name='auto'
+        )
+        
+        bucket = os.getenv('R2_BUCKET_NAME')
+        file_ext = os.path.splitext(file.filename)[1] if file.filename else '.jpg'
+        file_key = f"schedule-backgrounds/{form_id}/{uuid.uuid4()}{file_ext}"
+        
+        r2_client.put_object(
+            Bucket=bucket,
+            Key=file_key,
+            Body=content,
+            ContentType=file.content_type
+        )
+        
+        # Generate URL
+        r2_public_base = os.getenv('R2_PUBLIC_BASE', f"https://{bucket}.r2.dev")
+        background_url = f"{r2_public_base}/{file_key}"
+        
+        logger.info("Schedule background uploaded: form_id=%s url=%s", form_id, background_url)
+        return {"success": True, "url": background_url}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("upload_schedule_background failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to upload background")

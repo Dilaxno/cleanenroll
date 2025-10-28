@@ -5331,7 +5331,7 @@ async def update_form_schedule(form_id: str, request: Request, payload: FormSche
                     values["closed_to"] = closed_to_dt
             
             if payload.closed_page_config is not None:
-                update_parts.append("closed_page_config = :config::jsonb")
+                update_parts.append("closed_page_config = CAST(:config AS jsonb)")
                 values["config"] = json.dumps(payload.closed_page_config)
             
             if update_parts:
@@ -5374,33 +5374,23 @@ async def upload_schedule_background(form_id: str, request: Request, file: Uploa
         if len(content) > 5 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size must be less than 5MB")
         
-        # Upload to R2
-        r2_client = boto3.client(
-            's3',
-            endpoint_url=os.getenv('R2_ENDPOINT'),
-            aws_access_key_id=os.getenv('R2_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.getenv('R2_SECRET_ACCESS_KEY'),
-            config=BotoConfig(signature_version='s3v4'),
-            region_name='auto'
-        )
-        
-        bucket = os.getenv('R2_BUCKET_NAME')
+        # Upload to R2 using existing helper
+        s3 = _r2_client()
         file_ext = os.path.splitext(file.filename)[1] if file.filename else '.jpg'
         file_key = f"schedule-backgrounds/{form_id}/{uuid.uuid4()}{file_ext}"
         
-        r2_client.put_object(
-            Bucket=bucket,
+        s3.put_object(
+            Bucket=R2_BUCKET,
             Key=file_key,
             Body=content,
             ContentType=file.content_type
         )
         
-        # Generate URL
-        r2_public_base = os.getenv('R2_PUBLIC_BASE', f"https://{bucket}.r2.dev")
-        background_url = f"{r2_public_base}/{file_key}"
+        # Generate public URL using existing helper
+        public_url = _public_url_for_key(file_key)
         
-        logger.info("Schedule background uploaded: form_id=%s url=%s", form_id, background_url)
-        return {"success": True, "url": background_url}
+        logger.info("Schedule background uploaded: form_id=%s url=%s", form_id, public_url)
+        return {"success": True, "url": public_url}
         
     except HTTPException:
         raise

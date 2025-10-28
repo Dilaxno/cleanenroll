@@ -5282,61 +5282,62 @@ async def update_form_schedule(form_id: str, request: Request, payload: FormSche
     try:
         uid = _verify_firebase_uid(request)
         
-        db = await get_db()
-        
-        # Verify ownership
-        result = await db.fetch_one(
-            "SELECT id FROM forms WHERE id = :form_id AND uid = :uid",
-            {"form_id": form_id, "uid": uid}
-        )
-        if not result:
-            raise HTTPException(status_code=404, detail="Form not found")
-        
-        # Parse dates if provided
-        closed_from_dt = None
-        closed_to_dt = None
-        
-        if payload.closed_from:
-            try:
-                closed_from_dt = datetime.fromisoformat(payload.closed_from.replace('Z', '+00:00'))
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid closed_from date: {e}")
-        
-        if payload.closed_to:
-            try:
-                closed_to_dt = datetime.fromisoformat(payload.closed_to.replace('Z', '+00:00'))
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid closed_to date: {e}")
-        
-        # Validate date range
-        if closed_from_dt and closed_to_dt and closed_from_dt >= closed_to_dt:
-            raise HTTPException(status_code=400, detail="closed_from must be before closed_to")
-        
-        # Update database
-        update_parts = []
-        values = {"form_id": form_id}
-        
-        if payload.closed_from is not None:
-            if payload.closed_from == "":  # Clear the date
-                update_parts.append("closed_from = NULL")
-            else:
-                update_parts.append("closed_from = :closed_from")
-                values["closed_from"] = closed_from_dt
-        
-        if payload.closed_to is not None:
-            if payload.closed_to == "":  # Clear the date
-                update_parts.append("closed_to = NULL")
-            else:
-                update_parts.append("closed_to = :closed_to")
-                values["closed_to"] = closed_to_dt
-        
-        if payload.closed_page_config is not None:
-            update_parts.append("closed_page_config = :config::jsonb")
-            values["config"] = json.dumps(payload.closed_page_config)
-        
-        if update_parts:
-            query = f"UPDATE forms SET {', '.join(update_parts)} WHERE id = :form_id"
-            await db.execute(query, values)
+        async with async_session_maker() as session:
+            # Verify ownership
+            result = await session.execute(
+                text("SELECT id FROM forms WHERE id = :form_id AND uid = :uid"),
+                {"form_id": form_id, "uid": uid}
+            )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Form not found")
+            
+            # Parse dates if provided
+            closed_from_dt = None
+            closed_to_dt = None
+            
+            if payload.closed_from:
+                try:
+                    closed_from_dt = datetime.fromisoformat(payload.closed_from.replace('Z', '+00:00'))
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid closed_from date: {e}")
+            
+            if payload.closed_to:
+                try:
+                    closed_to_dt = datetime.fromisoformat(payload.closed_to.replace('Z', '+00:00'))
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid closed_to date: {e}")
+            
+            # Validate date range
+            if closed_from_dt and closed_to_dt and closed_from_dt >= closed_to_dt:
+                raise HTTPException(status_code=400, detail="closed_from must be before closed_to")
+            
+            # Update database
+            update_parts = []
+            values = {"form_id": form_id}
+            
+            if payload.closed_from is not None:
+                if payload.closed_from == "":  # Clear the date
+                    update_parts.append("closed_from = NULL")
+                else:
+                    update_parts.append("closed_from = :closed_from")
+                    values["closed_from"] = closed_from_dt
+            
+            if payload.closed_to is not None:
+                if payload.closed_to == "":  # Clear the date
+                    update_parts.append("closed_to = NULL")
+                else:
+                    update_parts.append("closed_to = :closed_to")
+                    values["closed_to"] = closed_to_dt
+            
+            if payload.closed_page_config is not None:
+                update_parts.append("closed_page_config = :config::jsonb")
+                values["config"] = json.dumps(payload.closed_page_config)
+            
+            if update_parts:
+                query = f"UPDATE forms SET {', '.join(update_parts)} WHERE id = :form_id"
+                await session.execute(text(query), values)
+                await session.commit()
         
         logger.info("Form schedule updated: form_id=%s uid=%s", form_id, uid)
         return {"success": True, "message": "Schedule updated successfully"}
@@ -5354,15 +5355,15 @@ async def upload_schedule_background(form_id: str, request: Request, file: Uploa
     try:
         uid = _verify_firebase_uid(request)
         
-        db = await get_db()
-        
-        # Verify ownership
-        result = await db.fetch_one(
-            "SELECT id FROM forms WHERE id = :form_id AND uid = :uid",
-            {"form_id": form_id, "uid": uid}
-        )
-        if not result:
-            raise HTTPException(status_code=404, detail="Form not found")
+        async with async_session_maker() as session:
+            # Verify ownership
+            result = await session.execute(
+                text("SELECT id FROM forms WHERE id = :form_id AND uid = :uid"),
+                {"form_id": form_id, "uid": uid}
+            )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Form not found")
         
         # Validate file
         if not file.content_type or not file.content_type.startswith('image/'):

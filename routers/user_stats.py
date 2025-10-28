@@ -77,11 +77,11 @@ async def get_user_stats(
                 views_params = {"user_id": userId}
                 
                 if from_ts:
-                    views_query += " AND a.ts >= :from_date"
+                    views_query += " AND a.created_at >= :from_date"
                     views_params["from_date"] = from_ts
                 
                 if to_ts:
-                    views_query += " AND a.ts <= :to_date"
+                    views_query += " AND a.created_at <= :to_date"
                     views_params["to_date"] = to_ts
                 
                 views_result = await session.execute(

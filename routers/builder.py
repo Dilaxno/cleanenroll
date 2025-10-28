@@ -5280,9 +5280,7 @@ class FormSchedulePayload(BaseModel):
 async def update_form_schedule(form_id: str, request: Request, payload: FormSchedulePayload):
     """Update form scheduling settings."""
     try:
-        uid = await get_current_user_uid(request)
-        if not uid:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+        uid = _verify_firebase_uid(request)
         
         db = await get_db()
         
@@ -5354,9 +5352,7 @@ async def update_form_schedule(form_id: str, request: Request, payload: FormSche
 async def upload_schedule_background(form_id: str, request: Request, file: UploadFile = File(...)):
     """Upload background image for closed page to R2."""
     try:
-        uid = await get_current_user_uid(request)
-        if not uid:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+        uid = _verify_firebase_uid(request)
         
         db = await get_db()
         

@@ -5285,7 +5285,7 @@ async def update_form_schedule(form_id: str, request: Request, payload: FormSche
         async with async_session_maker() as session:
             # Verify ownership
             result = await session.execute(
-                text("SELECT id FROM forms WHERE id = :form_id AND uid = :uid"),
+                text("SELECT id FROM forms WHERE id = :form_id AND user_id = :uid"),
                 {"form_id": form_id, "uid": uid}
             )
             row = result.mappings().first()
@@ -5358,7 +5358,7 @@ async def upload_schedule_background(form_id: str, request: Request, file: Uploa
         async with async_session_maker() as session:
             # Verify ownership
             result = await session.execute(
-                text("SELECT id FROM forms WHERE id = :form_id AND uid = :uid"),
+                text("SELECT id FROM forms WHERE id = :form_id AND user_id = :uid"),
                 {"form_id": form_id, "uid": uid}
             )
             row = result.mappings().first()

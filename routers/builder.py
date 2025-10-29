@@ -651,6 +651,7 @@ class SubmitButton(BaseModel):
     label: str = "Submit"
     color: str = "#3b82f6"
     textColor: str = "#ffffff"
+    borderRadius: int = 6
 
 
 class Branding(BaseModel):
@@ -2111,6 +2112,7 @@ async def public_get_form(form_id: str):
                     "label": (btn.get("label") if isinstance(btn, dict) else None) or "Submit",
                     "color": (btn.get("color") if isinstance(btn, dict) else None) or primary,
                     "textColor": (btn.get("textColor") if isinstance(btn, dict) else None) or "#ffffff",
+                    "borderRadius": (btn.get("borderRadius") if isinstance(btn, dict) else None) or 6,
                 }
                 # Extract titleStyle and subtitleStyle from theme
                 title_style_data = (data.get("titleStyle") or theme.get("titleStyle") or {})
@@ -3228,11 +3230,12 @@ async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str
 @router.post("/forms/{form_id}/theme/submit-button")
 @limiter.limit("120/minute")
 async def update_theme_submit_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
-    """Persist submit button style (label, color, textColor) to Neon in forms.theme.submitButton."""
+    """Persist submit button style (label, color, textColor, borderRadius) to Neon in forms.theme.submitButton."""
     payload = payload or {}
     label = str(payload.get("label") or "").strip()
     color = str(payload.get("color") or "").strip() or None
     text_color = str(payload.get("textColor") or "").strip() or None
+    border_radius = payload.get("borderRadius")
 
     def _is_hex(c: Optional[str]) -> bool:
         try:
@@ -3250,11 +3253,19 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
         raise HTTPException(status_code=400, detail="Invalid color hex")
     if text_color and not _is_hex(text_color):
         raise HTTPException(status_code=400, detail="Invalid textColor hex")
+    if border_radius is not None:
+        try:
+            border_radius = int(border_radius)
+            if border_radius < 0 or border_radius > 50:
+                raise HTTPException(status_code=400, detail="borderRadius must be between 0 and 50")
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="borderRadius must be an integer")
 
     submit_button = {k: v for k, v in {
         "label": label or None,
         "color": color,
         "textColor": text_color,
+        "borderRadius": border_radius,
     }.items() if v is not None}
 
     async with async_session_maker() as session:

@@ -5,8 +5,9 @@ These endpoints are used by developers to integrate CleanEnroll validation and p
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Dict, Any
-from routers.api_middleware import APIKeyDependency, log_request_completion
-from db.database import get_db_connection
+from routers.api_middleware import APIKeyDependency, log_api_request
+from db.database import async_session_maker
+from sqlalchemy import text
 import re
 import time
 

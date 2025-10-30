@@ -9,7 +9,8 @@ import hashlib
 import secrets
 import os
 from datetime import datetime, timedelta
-from db.database import get_db_connection
+from db.database import async_session_maker
+from sqlalchemy import text
 
 router = APIRouter(prefix="/api/developer", tags=["API Keys"])
 
@@ -84,22 +85,24 @@ def generate_api_key(environment: str = "production") -> tuple[str, str, str]:
     
     return full_key, key_hash, key_prefix
 
-async def check_and_reset_quota(user_id: str, conn):
+async def check_and_reset_quota(user_id: str, session):
     """Check if quota needs reset and do it"""
-    result = await conn.fetchrow(
-        "SELECT * FROM api_quotas WHERE user_id = $1",
-        user_id
+    result = await session.execute(
+        text("SELECT * FROM api_quotas WHERE user_id = :user_id"),
+        {"user_id": user_id}
     )
+    row = result.fetchone()
     
-    if result and result['reset_date'] <= datetime.utcnow():
-        await conn.execute(
-            """UPDATE api_quotas 
+    if row and row[3] <= datetime.utcnow():  # reset_date is index 3
+        await session.execute(
+            text("""UPDATE api_quotas 
                SET requests_used = 0, 
                    reset_date = NOW() + INTERVAL '1 month',
                    updated_at = NOW()
-               WHERE user_id = $1""",
-            user_id
+               WHERE user_id = :user_id"""),
+            {"user_id": user_id}
         )
+        await session.commit()
 
 # Endpoints
 @router.post("/keys", response_model=APIKeyCreatedResponse)
@@ -110,21 +113,22 @@ async def create_api_key(
     """Create a new API key for the authenticated user"""
     uid = _get_uid_from_token(authorization)
     
-    conn = await get_db_connection()
-    try:
+    async with async_session_maker() as session:
         # Check if user has quota (create if not exists)
-        quota = await conn.fetchrow(
-            "SELECT * FROM api_quotas WHERE user_id = $1",
-            uid
+        result = await session.execute(
+            text("SELECT * FROM api_quotas WHERE user_id = :uid"),
+            {"uid": uid}
         )
+        quota = result.fetchone()
         
         if not quota:
             # Create default quota for user
-            await conn.execute(
-                """INSERT INTO api_quotas (user_id, plan_type, monthly_requests)
-                   VALUES ($1, 'free', 1000)""",
-                uid
+            await session.execute(
+                text("""INSERT INTO api_quotas (user_id, plan_type, monthly_requests)
+                       VALUES (:uid, 'free', 1000)"""),
+                {"uid": uid}
             )
+            await session.commit()
         
         # Generate API key
         full_key, key_hash, key_prefix = generate_api_key(request.environment)
@@ -135,60 +139,57 @@ async def create_api_key(
             expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
         
         # Insert into database
-        result = await conn.fetchrow(
-            """INSERT INTO api_keys 
+        result = await session.execute(
+            text("""INSERT INTO api_keys 
                (user_id, key_hash, key_prefix, name, environment, expires_at)
-               VALUES ($1, $2, $3, $4, $5, $6)
-               RETURNING id, created_at""",
-            uid, key_hash, key_prefix, request.name, request.environment, expires_at
+               VALUES (:uid, :key_hash, :key_prefix, :name, :environment, :expires_at)
+               RETURNING id, created_at"""),
+            {"uid": uid, "key_hash": key_hash, "key_prefix": key_prefix, 
+             "name": request.name, "environment": request.environment, "expires_at": expires_at}
         )
+        row = result.fetchone()
+        await session.commit()
         
         return {
-            "id": str(result['id']),
+            "id": str(row[0]),
             "name": request.name,
             "key": full_key,  # Only time the full key is shown
             "key_prefix": key_prefix,
             "environment": request.environment,
-            "created_at": result['created_at'].isoformat(),
+            "created_at": row[1].isoformat(),
             "message": "Store this key securely. You won't be able to see it again."
         }
-        
-    finally:
-        await conn.close()
 
 @router.get("/keys", response_model=List[APIKeyResponse])
 async def list_api_keys(authorization: str = Header(None)):
     """List all API keys for the authenticated user"""
     uid = _get_uid_from_token(authorization)
     
-    conn = await get_db_connection()
-    try:
-        results = await conn.fetch(
-            """SELECT id, name, key_prefix, environment, permissions, 
-                      created_at, last_used_at, expires_at, is_active
-               FROM api_keys 
-               WHERE user_id = $1
-               ORDER BY created_at DESC""",
-            uid
+    async with async_session_maker() as session:
+        result = await session.execute(
+            text("""SELECT id, name, key_prefix, environment, permissions, 
+                          created_at, last_used_at, expires_at, is_active
+                   FROM api_keys 
+                   WHERE user_id = :uid
+                   ORDER BY created_at DESC"""),
+            {"uid": uid}
         )
+        results = result.fetchall()
         
         return [
             {
-                "id": str(r['id']),
-                "name": r['name'],
-                "key_prefix": r['key_prefix'],
-                "environment": r['environment'],
-                "permissions": r['permissions'],
-                "created_at": r['created_at'].isoformat(),
-                "last_used_at": r['last_used_at'].isoformat() if r['last_used_at'] else None,
-                "expires_at": r['expires_at'].isoformat() if r['expires_at'] else None,
-                "is_active": r['is_active']
+                "id": str(r[0]),
+                "name": r[1],
+                "key_prefix": r[2],
+                "environment": r[3],
+                "permissions": r[4],
+                "created_at": r[5].isoformat(),
+                "last_used_at": r[6].isoformat() if r[6] else None,
+                "expires_at": r[7].isoformat() if r[7] else None,
+                "is_active": r[8]
             }
             for r in results
         ]
-        
-    finally:
-        await conn.close()
 
 @router.patch("/keys/{key_id}", response_model=APIKeyResponse)
 async def update_api_key(
@@ -199,60 +200,54 @@ async def update_api_key(
     """Update an API key (name or active status)"""
     uid = _get_uid_from_token(authorization)
     
-    conn = await get_db_connection()
-    try:
+    async with async_session_maker() as session:
         # Verify ownership
-        existing = await conn.fetchrow(
-            "SELECT * FROM api_keys WHERE id = $1 AND user_id = $2",
-            key_id, uid
+        result = await session.execute(
+            text("SELECT * FROM api_keys WHERE id = :key_id AND user_id = :uid"),
+            {"key_id": key_id, "uid": uid}
         )
+        existing = result.fetchone()
         
         if not existing:
             raise HTTPException(status_code=404, detail="API key not found")
         
         # Build update query
         updates = []
-        params = []
-        param_count = 1
+        params = {"key_id": key_id, "uid": uid}
         
         if request.name is not None:
-            updates.append(f"name = ${param_count}")
-            params.append(request.name)
-            param_count += 1
+            updates.append("name = :name")
+            params["name"] = request.name
         
         if request.is_active is not None:
-            updates.append(f"is_active = ${param_count}")
-            params.append(request.is_active)
-            param_count += 1
+            updates.append("is_active = :is_active")
+            params["is_active"] = request.is_active
         
         if not updates:
             raise HTTPException(status_code=400, detail="No updates provided")
         
-        params.extend([key_id, uid])
-        
-        result = await conn.fetchrow(
-            f"""UPDATE api_keys 
+        result = await session.execute(
+            text(f"""UPDATE api_keys 
                SET {', '.join(updates)}
-               WHERE id = ${param_count} AND user_id = ${param_count + 1}
+               WHERE id = :key_id AND user_id = :uid
                RETURNING id, name, key_prefix, environment, permissions, 
-                         created_at, last_used_at, expires_at, is_active""",
-            *params
+                         created_at, last_used_at, expires_at, is_active"""),
+            params
         )
+        row = result.fetchone()
+        await session.commit()
         
         return {
-            "id": str(result['id']),
-            "name": result['name'],
-            "key_prefix": result['key_prefix'],
-            "environment": result['environment'],
-            "permissions": result['permissions'],
-            "created_at": result['created_at'].isoformat(),
-            "last_used_at": result['last_used_at'].isoformat() if result['last_used_at'] else None,
-            "expires_at": result['expires_at'].isoformat() if result['expires_at'] else None,
-            "is_active": result['is_active']
+            "id": str(row[0]),
+            "name": row[1],
+            "key_prefix": row[2],
+            "environment": row[3],
+            "permissions": row[4],
+            "created_at": row[5].isoformat(),
+            "last_used_at": row[6].isoformat() if row[6] else None,
+            "expires_at": row[7].isoformat() if row[7] else None,
+            "is_active": row[8]
         }
-        
-    finally:
-        await conn.close()
 
 @router.delete("/keys/{key_id}")
 async def delete_api_key(
@@ -262,99 +257,98 @@ async def delete_api_key(
     """Delete (revoke) an API key"""
     uid = _get_uid_from_token(authorization)
     
-    conn = await get_db_connection()
-    try:
-        result = await conn.execute(
-            "DELETE FROM api_keys WHERE id = $1 AND user_id = $2",
-            key_id, uid
+    async with async_session_maker() as session:
+        result = await session.execute(
+            text("DELETE FROM api_keys WHERE id = :key_id AND user_id = :uid"),
+            {"key_id": key_id, "uid": uid}
         )
+        await session.commit()
         
-        if result == "DELETE 0":
+        if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="API key not found")
         
         return {"message": "API key deleted successfully"}
-        
-    finally:
-        await conn.close()
 
 @router.get("/usage", response_model=APIUsageStats)
 async def get_api_usage_stats(authorization: str = Header(None)):
     """Get API usage statistics and quota information"""
     uid = _get_uid_from_token(authorization)
     
-    conn = await get_db_connection()
-    try:
+    async with async_session_maker() as session:
         # Check and reset quota if needed
-        await check_and_reset_quota(uid, conn)
+        await check_and_reset_quota(uid, session)
         
         # Get quota info
-        quota = await conn.fetchrow(
-            "SELECT * FROM api_quotas WHERE user_id = $1",
-            uid
+        result = await session.execute(
+            text("SELECT * FROM api_quotas WHERE user_id = :uid"),
+            {"uid": uid}
         )
+        quota = result.fetchone()
         
         if not quota:
             # Create default quota
-            await conn.execute(
-                """INSERT INTO api_quotas (user_id, plan_type, monthly_requests)
-                   VALUES ($1, 'free', 1000)""",
-                uid
+            await session.execute(
+                text("""INSERT INTO api_quotas (user_id, plan_type, monthly_requests)
+                       VALUES (:uid, 'free', 1000)"""),
+                {"uid": uid}
             )
-            quota = await conn.fetchrow(
-                "SELECT * FROM api_quotas WHERE user_id = $1",
-                uid
+            await session.commit()
+            result = await session.execute(
+                text("SELECT * FROM api_quotas WHERE user_id = :uid"),
+                {"uid": uid}
             )
+            quota = result.fetchone()
         
         # Get total requests
-        total_requests = await conn.fetchval(
-            """SELECT COUNT(*) FROM api_usage_logs 
+        result = await session.execute(
+            text("""SELECT COUNT(*) FROM api_usage_logs 
                WHERE api_key_id IN (
-                   SELECT id FROM api_keys WHERE user_id = $1
-               )""",
-            uid
+                   SELECT id FROM api_keys WHERE user_id = :uid
+               )"""),
+            {"uid": uid}
         )
+        total_requests = result.scalar()
         
         # Get requests today
-        requests_today = await conn.fetchval(
-            """SELECT COUNT(*) FROM api_usage_logs 
+        result = await session.execute(
+            text("""SELECT COUNT(*) FROM api_usage_logs 
                WHERE api_key_id IN (
-                   SELECT id FROM api_keys WHERE user_id = $1
+                   SELECT id FROM api_keys WHERE user_id = :uid
                )
-               AND created_at >= CURRENT_DATE""",
-            uid
+               AND created_at >= CURRENT_DATE"""),
+            {"uid": uid}
         )
+        requests_today = result.scalar()
         
         # Get top endpoints
-        top_endpoints_raw = await conn.fetch(
-            """SELECT endpoint, COUNT(*) as count
+        result = await session.execute(
+            text("""SELECT endpoint, COUNT(*) as count
                FROM api_usage_logs 
                WHERE api_key_id IN (
-                   SELECT id FROM api_keys WHERE user_id = $1
+                   SELECT id FROM api_keys WHERE user_id = :uid
                )
                AND created_at >= NOW() - INTERVAL '30 days'
                GROUP BY endpoint
                ORDER BY count DESC
-               LIMIT 5""",
-            uid
+               LIMIT 5"""),
+            {"uid": uid}
         )
+        top_endpoints_raw = result.fetchall()
         
         top_endpoints = [
-            {"endpoint": r['endpoint'], "count": r['count']}
+            {"endpoint": r[0], "count": r[1]}
             for r in top_endpoints_raw
         ]
         
         return {
             "total_requests": total_requests or 0,
             "requests_today": requests_today or 0,
-            "quota_limit": quota['monthly_requests'],
-            "quota_used": quota['requests_used'],
-            "quota_remaining": max(0, quota['monthly_requests'] - quota['requests_used']),
-            "reset_date": quota['reset_date'].isoformat(),
+            "quota_limit": quota[2],  # monthly_requests
+            "quota_used": quota[1],  # requests_used
+            "quota_remaining": max(0, quota[2] - quota[1]),
+            "reset_date": quota[3].isoformat(),  # reset_date
             "top_endpoints": top_endpoints
         }
-        
-    finally:
-        await conn.close()
 
 @router.get("/logs")
 async def get_api_logs(
@@ -365,33 +359,30 @@ async def get_api_logs(
     """Get recent API usage logs"""
     uid = _get_uid_from_token(authorization)
     
-    conn = await get_db_connection()
-    try:
-        logs = await conn.fetch(
-            """SELECT l.*, k.name as key_name, k.key_prefix
+    async with async_session_maker() as session:
+        result = await session.execute(
+            text("""SELECT l.*, k.name as key_name, k.key_prefix
                FROM api_usage_logs l
                JOIN api_keys k ON l.api_key_id = k.id
-               WHERE k.user_id = $1
+               WHERE k.user_id = :uid
                ORDER BY l.created_at DESC
-               LIMIT $2 OFFSET $3""",
-            uid, limit, offset
+               LIMIT :limit OFFSET :offset"""),
+            {"uid": uid, "limit": limit, "offset": offset}
         )
+        logs = result.fetchall()
         
         return [
             {
-                "id": str(log['id']),
-                "key_name": log['key_name'],
-                "key_prefix": log['key_prefix'],
-                "endpoint": log['endpoint'],
-                "method": log['method'],
-                "status_code": log['status_code'],
-                "response_time_ms": log['response_time_ms'],
-                "ip_address": str(log['ip_address']) if log['ip_address'] else None,
-                "error_message": log['error_message'],
-                "created_at": log['created_at'].isoformat()
+                "id": str(log[0]),
+                "key_name": log[9],  # key_name from join
+                "key_prefix": log[10],  # key_prefix from join
+                "endpoint": log[2],
+                "method": log[3],
+                "status_code": log[4],
+                "response_time_ms": log[5],
+                "ip_address": str(log[6]) if log[6] else None,
+                "error_message": log[8],
+                "created_at": log[1].isoformat()
             }
             for log in logs
         ]
-        
-    finally:
-        await conn.close()

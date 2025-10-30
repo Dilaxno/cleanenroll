@@ -1,9 +1,12 @@
+import os
 import logging
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from db.database import async_session_maker
 from sqlalchemy import text
 from datetime import datetime, timezone
 from typing import Optional
+import firebase_admin
+from firebase_admin import auth as admin_auth
 
 logger = logging.getLogger("backend.user_stats")
 
@@ -108,3 +111,33 @@ async def get_user_stats(
     except Exception as e:
         logger.exception("Failed to fetch user stats from Neon")
         raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+
+@router.get("/is-admin")
+async def check_is_admin(
+    authorization: Optional[str] = Header(None)
+):
+    """Check if the authenticated user is an admin based on ALLOW_ADMIN_EMAILS environment variable."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = authorization.split(" ", 1)[1].strip()
+    
+    try:
+        # Verify Firebase ID token
+        decoded = admin_auth.verify_id_token(token)
+        email = str(decoded.get("email") or "").lower()
+        
+        if not email:
+            return {"isAdmin": False}
+        
+        # Check if email is in ALLOW_ADMIN_EMAILS env variable
+        allowlist = os.getenv("ALLOW_ADMIN_EMAILS", "")
+        allowed_emails = {e.strip().lower() for e in allowlist.split(",") if e.strip()}
+        
+        is_admin = email in allowed_emails
+        
+        return {"isAdmin": is_admin}
+    except Exception as e:
+        logger.exception("Failed to verify admin status")
+        raise HTTPException(status_code=401, detail="Invalid token")

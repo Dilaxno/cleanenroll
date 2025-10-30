@@ -95,6 +95,8 @@ from routers.schedules import router as schedules_router  # type: ignore
 from routers.admin_live_visitors import router as admin_live_visitors_router  # type: ignore
 from routers.user_analytics import router as user_analytics_router  # type: ignore
 from routers.billing import router as billing_router  # type: ignore
+from routers.api_keys import router as api_keys_router  # type: ignore
+from routers.public_api import router as public_api_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -288,6 +290,8 @@ app.include_router(schedules_router)
 app.include_router(admin_live_visitors_router)
 app.include_router(user_analytics_router)
 app.include_router(billing_router)
+app.include_router(api_keys_router)  # Developer API key management
+app.include_router(public_api_router)  # Public API for developers
 
 
 if __name__ == "__main__":

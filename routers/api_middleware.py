@@ -6,7 +6,7 @@ from fastapi import HTTPException, Header, Request
 from typing import Optional
 import hashlib
 from datetime import datetime
-from backend.db.database import get_db_connection
+from db.database import get_db_connection
 import time
 
 async def verify_api_key(api_key: str = Header(None, alias="X-API-Key")) -> dict:

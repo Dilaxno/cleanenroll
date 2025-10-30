@@ -9,7 +9,7 @@ import hashlib
 import secrets
 import os
 from datetime import datetime, timedelta
-from backend.db.database import get_db_connection
+from db.database import get_db_connection
 
 router = APIRouter(prefix="/api/developer", tags=["API Keys"])
 

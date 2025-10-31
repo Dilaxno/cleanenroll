@@ -115,6 +115,8 @@ class FormModel(BaseDBModel):
     duplicate_window_hours: Optional[int] = Field(default=None, alias="duplicateWindowHours")
     # Bot protection
     honeypot_enabled: Optional[bool] = Field(default=None, alias="honeypotEnabled")
+    time_based_check_enabled: Optional[bool] = Field(default=None, alias="timeBasedCheckEnabled")
+    min_submission_time: Optional[int] = Field(default=None, alias="minSubmissionTime")
     # Security settings
     recaptcha_enabled: Optional[bool] = Field(default=None, alias="recaptchaEnabled")
     url_scan_enabled: Optional[bool] = Field(default=None, alias="urlScanEnabled")

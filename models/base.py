@@ -113,6 +113,8 @@ class FormModel(BaseDBModel):
     prevent_duplicate_by_uid: Optional[bool] = Field(default=None, alias="preventDuplicateByUID")
     prevent_duplicate_by_ip: Optional[bool] = Field(default=None, alias="preventDuplicateByIP")
     duplicate_window_hours: Optional[int] = Field(default=None, alias="duplicateWindowHours")
+    # Bot protection
+    honeypot_enabled: Optional[bool] = Field(default=None, alias="honeypotEnabled")
     # Security settings
     recaptcha_enabled: Optional[bool] = Field(default=None, alias="recaptchaEnabled")
     url_scan_enabled: Optional[bool] = Field(default=None, alias="urlScanEnabled")

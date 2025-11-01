@@ -5,6 +5,7 @@ Uses Neon PostgreSQL for storage with JWT tokens (not Firebase Auth)
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import text
 import secrets
 import hashlib
 import jwt
@@ -72,7 +73,7 @@ async def signup(request: SignupRequest):
         
         # Check if email already exists
         result = await session.execute(
-            'SELECT id FROM affiliates WHERE email = :email',
+            text('SELECT id FROM affiliates WHERE email = :email'),
             {'email': request.email.lower()}
         )
         existing = result.fetchone()
@@ -86,7 +87,7 @@ async def signup(request: SignupRequest):
         # Ensure affiliate code is unique
         while True:
             code_result = await session.execute(
-                'SELECT id FROM affiliates WHERE affiliate_code = :code',
+                text('SELECT id FROM affiliates WHERE affiliate_code = :code'),
                 {'code': affiliate_code}
             )
             if not code_result.fetchone():
@@ -98,12 +99,12 @@ async def signup(request: SignupRequest):
         
         # Insert new affiliate
         await session.execute(
-            '''
+            text('''
             INSERT INTO affiliates (id, email, password_hash, name, affiliate_code, 
                                  created_at, updated_at)
             VALUES (:id, :email, :password_hash, :name, :affiliate_code, 
                    NOW(), NOW())
-            ''',
+            '''),
             {
                 'id': affiliate_id,
                 'email': request.email.lower(),
@@ -146,20 +147,39 @@ async def signup(request: SignupRequest):
 @router.post('/login')
 async def login(request: LoginRequest):
     """Authenticate affiliate and return JWT tokens"""
+    session = None
     try:
-        pool = get_db_connection()
+        session = await get_db_connection()
         
-        async with pool.acquire() as conn:
-            # Find affiliate by email
-            affiliate = await conn.fetchrow(
-                '''
-                SELECT id, email, name, password_hash, affiliate_code, 
-                       is_active, email_verified
-                FROM affiliates
-                WHERE email = $1
-                ''',
-                request.email.lower()
-            )
+        # Find affiliate by email
+        result = await session.execute(
+            text('''
+            SELECT id, email, name, password_hash, affiliate_code, 
+                   is_active, email_verified
+            FROM affiliates
+            WHERE email = :email
+            '''),
+            {'email': request.email.lower()}
+        )
+        affiliate = result.fetchone()
+        
+        if not affiliate or not verify_password(request.password, affiliate['password_hash']):
+            raise HTTPException(status_code=401, detail='Invalid email or password')
+        
+        # Generate new tokens
+        access_token = generate_jwt(affiliate['id'], affiliate['email'])
+        refresh_token = generate_jwt(affiliate['id'], affiliate['email'], is_refresh=True)
+        
+        return {
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'token_type': 'bearer',
+            'affiliate_id': affiliate['id'],
+            'email': affiliate['email'],
+            'name': affiliate['name'],
+            'affiliate_code': affiliate['affiliate_code']
+        }
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -178,7 +198,7 @@ async def password_reset(request: PasswordResetRequest):
         
         # Find affiliate by email
         result = await session.execute(
-            'SELECT id, email, name FROM affiliates WHERE email = :email',
+            text('SELECT id, email, name FROM affiliates WHERE email = :email'),
             {'email': request.email.lower()}
         )
         affiliate = result.fetchone()
@@ -193,12 +213,12 @@ async def password_reset(request: PasswordResetRequest):
         
         # Store reset token in database
         await session.execute(
-            '''
+            text('''
             INSERT INTO password_reset_tokens (user_id, token, expires_at, is_used)
             VALUES (:user_id, :token, :expires_at, false)
             ON CONFLICT (user_id) 
             DO UPDATE SET token = :token, expires_at = :expires_at, is_used = false, created_at = NOW()
-            ''',
+            '''),
             {
                 'user_id': affiliate['id'],
                 'token': reset_token,
@@ -227,36 +247,37 @@ async def password_reset(request: PasswordResetRequest):
 @router.post('/verify-token')
 async def verify_token(token: str):
     """Verify JWT token and return affiliate info"""
+    session = None
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         
         if payload.get('type') != 'access':
             raise HTTPException(status_code=401, detail='Invalid token type')
         
-        pool = get_db_connection()
-        async with pool.acquire() as conn:
-            affiliate = await conn.fetchrow(
-                '''
-                SELECT id, email, name, affiliate_code, email_verified, is_active
-                FROM affiliates
-                WHERE id = $1
-                ''',
-                payload['affiliate_id']
-            )
-            
-            if not affiliate or not affiliate['is_active']:
-                raise HTTPException(status_code=401, detail='Invalid or inactive account')
-            
-            return {
-                'success': True,
-                'affiliate': {
-                    'id': affiliate['id'],
-                    'email': affiliate['email'],
-                    'name': affiliate['name'],
-                    'affiliate_code': affiliate['affiliate_code'],
-                    'email_verified': affiliate['email_verified']
-                }
+        session = await get_db_connection()
+        result = await session.execute(
+            text('''
+            SELECT id, email, name, affiliate_code, email_verified, is_active
+            FROM affiliates
+            WHERE id = :affiliate_id
+            '''),
+            {'affiliate_id': payload['affiliate_id']}
+        )
+        affiliate = result.fetchone()
+        
+        if not affiliate or not affiliate['is_active']:
+            raise HTTPException(status_code=401, detail='Invalid or inactive account')
+        
+        return {
+            'success': True,
+            'affiliate': {
+                'id': affiliate['id'],
+                'email': affiliate['email'],
+                'name': affiliate['name'],
+                'affiliate_code': affiliate['affiliate_code'],
+                'email_verified': affiliate['email_verified']
             }
+        }
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail='Token expired')
     except jwt.InvalidTokenError:
@@ -268,23 +289,44 @@ async def verify_token(token: str):
 @router.post('/refresh')
 async def refresh_token(refresh_token: str):
     """Refresh access token using refresh token"""
+    session = None
     try:
         payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         
         if payload.get('type') != 'refresh':
             raise HTTPException(status_code=401, detail='Invalid token type')
         
+        session = await get_db_connection()
+        
+        # Verify the affiliate exists and is active
+        result = await session.execute(
+            text('''
+            SELECT id, email, is_active
+            FROM affiliates
+            WHERE id = :affiliate_id
+            '''),
+            {'affiliate_id': payload['affiliate_id']}
+        )
+        affiliate = result.fetchone()
+        
+        if not affiliate or not affiliate['is_active']:
+            raise HTTPException(status_code=401, detail='Invalid or inactive account')
+        
         # Generate new access token
-        new_access_token = generate_jwt(payload['affiliate_id'], payload['email'])
+        new_access_token = generate_jwt(affiliate['id'], affiliate['email'])
         
         return {
-            'success': True,
-            'token': new_access_token
+            'access_token': new_access_token,
+            'token_type': 'bearer'
         }
+        
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail='Refresh token expired')
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail='Invalid refresh token')
     except Exception as e:
         print(f'Token refresh error: {e}')
-        raise HTTPException(status_code=401, detail='Failed to refresh token')
+        raise HTTPException(status_code=500, detail='Error refreshing token')
+    finally:
+        if session:
+            await session.close()

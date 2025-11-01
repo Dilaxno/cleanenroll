@@ -386,3 +386,116 @@ async def get_api_logs(
             }
             for log in logs
         ]
+
+@router.get("/live-visitors")
+async def get_live_visitors(authorization: str = Header(None)):
+    """Get live visitors for forms using user's API keys"""
+    uid = _get_uid_from_token(authorization)
+    
+    async with async_session_maker() as session:
+        # Get all API keys for this user
+        keys_result = await session.execute(
+            text("SELECT id FROM api_keys WHERE user_id = :user_id AND is_active = true"),
+            {"user_id": uid}
+        )
+        api_key_ids = [row[0] for row in keys_result.fetchall()]
+        
+        if not api_key_ids:
+            return []
+        
+        # Get live visitors from sessions where api_key_id matches user's keys
+        # Join with forms table to get form names
+        query = text("""
+            SELECT DISTINCT ON (s.visitor_id, s.form_id)
+                s.id,
+                s.visitor_id,
+                s.form_id,
+                f.name as form_name,
+                s.ip_address,
+                s.country,
+                s.device_type,
+                s.started_at,
+                s.last_activity_at
+            FROM live_sessions s
+            LEFT JOIN forms f ON s.form_id = f.id
+            WHERE s.api_key_id = ANY(:api_key_ids)
+                AND s.last_activity_at > NOW() - INTERVAL '5 minutes'
+            ORDER BY s.visitor_id, s.form_id, s.last_activity_at DESC
+            LIMIT 100
+        """)
+        
+        result = await session.execute(query, {"api_key_ids": api_key_ids})
+        visitors = result.fetchall()
+        
+        return [
+            {
+                "id": str(visitor[0]),
+                "visitor_id": visitor[1],
+                "form_id": visitor[2],
+                "form_name": visitor[3],
+                "ip_address": str(visitor[4]) if visitor[4] else None,
+                "country": visitor[5],
+                "device_type": visitor[6],
+                "started_at": visitor[7].isoformat() if visitor[7] else None,
+                "last_activity_at": visitor[8].isoformat() if visitor[8] else None,
+                "duration": str(visitor[8] - visitor[7]) if visitor[7] and visitor[8] else "0:00"
+            }
+            for visitor in visitors
+        ]
+
+@router.get("/submissions")
+async def get_submissions(
+    limit: int = 50,
+    offset: int = 0,
+    authorization: str = Header(None)
+):
+    """Get form submissions for forms using user's API keys"""
+    uid = _get_uid_from_token(authorization)
+    
+    async with async_session_maker() as session:
+        # Get all API keys for this user
+        keys_result = await session.execute(
+            text("SELECT id FROM api_keys WHERE user_id = :user_id AND is_active = true"),
+            {"user_id": uid}
+        )
+        api_key_ids = [row[0] for row in keys_result.fetchall()]
+        
+        if not api_key_ids:
+            return []
+        
+        # Get submissions where api_key_id matches user's keys
+        # Join with forms table to get form names
+        query = text("""
+            SELECT 
+                s.id,
+                s.form_id,
+                f.name as form_name,
+                s.data,
+                s.country_code,
+                s.created_at,
+                s.metadata
+            FROM submissions s
+            LEFT JOIN forms f ON s.form_id = f.id
+            WHERE s.api_key_id = ANY(:api_key_ids)
+            ORDER BY s.created_at DESC
+            LIMIT :limit OFFSET :offset
+        """)
+        
+        result = await session.execute(
+            query,
+            {"api_key_ids": api_key_ids, "limit": limit, "offset": offset}
+        )
+        submissions = result.fetchall()
+        
+        return [
+            {
+                "id": str(submission[0]),
+                "form_id": submission[1],
+                "form_name": submission[2],
+                "data": submission[3],
+                "country": submission[4],
+                "created_at": submission[5].isoformat() if submission[5] else None,
+                "metadata": submission[6]
+            }
+            for submission in submissions
+        ]

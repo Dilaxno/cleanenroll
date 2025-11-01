@@ -162,34 +162,46 @@ async def login(request: LoginRequest):
             '''),
             {'email': request.email.lower()}
         )
-        affiliate = result.fetchone()
+        affiliate = result.mappings().first()  # Changed to use mappings() for proper dict access
         
         if not affiliate or not verify_password(request.password, affiliate['password_hash']):
             raise HTTPException(status_code=401, detail='Invalid email or password')
         
         # Generate new tokens
-        access_token = generate_jwt(affiliate['id'], affiliate['email'])
-        refresh_token = generate_jwt(affiliate['id'], affiliate['email'], is_refresh=True)
+        access_token = generate_jwt(str(affiliate['id']), affiliate['email'])
+        refresh_token = generate_jwt(str(affiliate['id']), affiliate['email'], is_refresh=True)
         
-        return {
+        # Ensure we have all required fields
+        response_data = {
             'access_token': access_token,
             'refresh_token': refresh_token,
             'token_type': 'bearer',
-            'affiliate_id': affiliate['id'],
+            'affiliate_id': str(affiliate['id']),  # Ensure ID is string
             'email': affiliate['email'],
             'name': affiliate['name'],
-            'affiliate_code': affiliate['affiliate_code'],
+            'affiliate_code': affiliate.get('affiliate_code', ''),  # Use get with default
             'redirect_to': '/affiliate/dashboard'  # Add redirect URL
         }
         
+        # Commit any pending transactions before returning
+        await session.commit()
+        return response_data
+        
     except HTTPException:
+        if session:
+            await session.rollback()
         raise
     except Exception as e:
         print(f'Affiliate login error: {str(e)}')
+        if session:
+            await session.rollback()
         raise HTTPException(status_code=500, detail='Error during login')
     finally:
         if session:
-            await session.close()
+            try:
+                await session.close()
+            except Exception as e:
+                print(f'Error closing session: {str(e)}')
 
 @router.post('/password-reset')
 async def password_reset(request: PasswordResetRequest):

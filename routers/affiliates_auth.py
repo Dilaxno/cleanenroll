@@ -57,83 +57,91 @@ def generate_affiliate_code(email: str) -> str:
     random_suffix = secrets.token_hex(3).upper()
     return f"{base[:6]}{random_suffix}"
 
-def get_db_connection():
+async def get_db_connection():
     """Get database connection from pool"""
-    from db.database import get_connection
-    return get_connection()
+    from db.database import get_session
+    session = get_session()
+    return await session.__anext__()
 
 @router.post('/signup')
 async def signup(request: SignupRequest):
     """Create new affiliate account"""
+    session = None
     try:
-        pool = get_db_connection()
+        session = await get_db_connection()
         
-        async with pool.acquire() as conn:
-            # Check if email already exists
-            existing = await conn.fetchrow(
-                'SELECT id FROM affiliates WHERE email = $1',
-                request.email.lower()
+        # Check if email already exists
+        result = await session.execute(
+            'SELECT id FROM affiliates WHERE email = :email',
+            {'email': request.email.lower()}
+        )
+        existing = result.fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail='Email already registered')
+        
+        # Generate affiliate ID and code
+        affiliate_id = secrets.token_urlsafe(16)
+        affiliate_code = generate_affiliate_code(request.email)
+        
+        # Ensure affiliate code is unique
+        while True:
+            code_result = await session.execute(
+                'SELECT id FROM affiliates WHERE affiliate_code = :code',
+                {'code': affiliate_code}
             )
-            if existing:
-                raise HTTPException(status_code=400, detail='Email already registered')
-            
-            # Generate affiliate ID and code
-            affiliate_id = secrets.token_urlsafe(16)
-            affiliate_code = generate_affiliate_code(request.email)
-            
-            # Ensure affiliate code is unique
-            code_exists = await conn.fetchrow(
-                'SELECT id FROM affiliates WHERE affiliate_code = $1',
-                affiliate_code
-            )
-            while code_exists:
-                affiliate_code = generate_affiliate_code(request.email + secrets.token_hex(2))
-                code_exists = await conn.fetchrow(
-                    'SELECT id FROM affiliates WHERE affiliate_code = $1',
-                    affiliate_code
-                )
-            
-            # Hash password
-            password_hash = hash_password(request.password)
-            
-            # Insert new affiliate
-            await conn.execute(
-                '''
-                INSERT INTO affiliates (
-                    id, email, name, password_hash, affiliate_code,
-                    email_verified, is_active, created_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-                ''',
-                affiliate_id,
-                request.email.lower(),
-                request.name,
-                password_hash,
-                affiliate_code,
-                False,  # email_verified
-                True    # is_active
-            )
-            
-            # Generate tokens
-            access_token = generate_jwt(affiliate_id, request.email)
-            refresh_token = generate_jwt(affiliate_id, request.email, is_refresh=True)
-            
-            return {
-                'success': True,
-                'token': access_token,
-                'refreshToken': refresh_token,
-                'affiliate': {
-                    'id': affiliate_id,
-                    'email': request.email,
-                    'name': request.name,
-                    'affiliate_code': affiliate_code
-                }
+            if not code_result.fetchone():
+                break
+            affiliate_code = generate_affiliate_code(request.email + secrets.token_hex(2))
+        
+        # Hash password
+        password_hash = hash_password(request.password)
+        
+        # Insert new affiliate
+        await session.execute(
+            '''
+            INSERT INTO affiliates (id, email, password_hash, name, affiliate_code, 
+                                 created_at, updated_at)
+            VALUES (:id, :email, :password_hash, :name, :affiliate_code, 
+                   NOW(), NOW())
+            ''',
+            {
+                'id': affiliate_id,
+                'email': request.email.lower(),
+                'password_hash': password_hash,
+                'name': request.name,
+                'affiliate_code': affiliate_code
             }
+        )
+        
+        # Commit the transaction
+        await session.commit()
+        
+        # Generate tokens
+        access_token = generate_jwt(affiliate_id, request.email)
+        refresh_token = generate_jwt(affiliate_id, request.email, is_refresh=True)
+        
+        return {
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'token_type': 'bearer',
+            'affiliate_id': affiliate_id,
+            'email': request.email,
+            'name': request.name,
+            'affiliate_code': affiliate_code
+        }
+        
     except HTTPException:
+        if session:
+            await session.rollback()
         raise
     except Exception as e:
-        print(f'Affiliate signup error: {e}')
-        raise HTTPException(status_code=500, detail='Failed to create account')
+        print(f'Affiliate signup error: {str(e)}')
+        if session:
+            await session.rollback()
+        raise HTTPException(status_code=500, detail='Error creating account')
+    finally:
+        if session:
+            await session.close()
 
 @router.post('/login')
 async def login(request: LoginRequest):
@@ -152,97 +160,69 @@ async def login(request: LoginRequest):
                 ''',
                 request.email.lower()
             )
-            
-            if not affiliate:
-                raise HTTPException(status_code=401, detail='Invalid credentials')
-            
-            # Verify password
-            if not verify_password(request.password, affiliate['password_hash']):
-                raise HTTPException(status_code=401, detail='Invalid credentials')
-            
-            # Check if account is active
-            if not affiliate['is_active']:
-                raise HTTPException(status_code=403, detail='Account is disabled')
-            
-            # Update last login
-            await conn.execute(
-                'UPDATE affiliates SET last_login_at = NOW() WHERE id = $1',
-                affiliate['id']
-            )
-            
-            # Generate tokens
-            access_token = generate_jwt(affiliate['id'], affiliate['email'])
-            refresh_token = generate_jwt(affiliate['id'], affiliate['email'], is_refresh=True)
-            
-            return {
-                'success': True,
-                'token': access_token,
-                'refreshToken': refresh_token,
-                'affiliate': {
-                    'id': affiliate['id'],
-                    'email': affiliate['email'],
-                    'name': affiliate['name'],
-                    'affiliate_code': affiliate['affiliate_code'],
-                    'email_verified': affiliate['email_verified']
-                }
-            }
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Affiliate login error: {e}')
-        raise HTTPException(status_code=500, detail='Failed to authenticate')
+        print(f'Affiliate login error: {str(e)}')
+        raise HTTPException(status_code=500, detail='Error during login')
+    finally:
+        if session:
+            await session.close()
 
 @router.post('/password-reset')
 async def password_reset(request: PasswordResetRequest):
     """Send password reset email to affiliate"""
+    session = None
     try:
-        pool = get_db_connection()
+        session = await get_db_connection()
         
-        async with pool.acquire() as conn:
-            # Find affiliate by email
-            affiliate = await conn.fetchrow(
-                'SELECT id, email, name FROM affiliates WHERE email = $1',
-                request.email.lower()
-            )
-            
-            if not affiliate:
-                # Don't reveal if email exists or not
-                return {
-                    'success': True,
-                    'message': 'If the email exists, a reset link has been sent'
-                }
-            
-            # Generate reset token
-            reset_token = secrets.token_urlsafe(32)
-            token_id = secrets.token_urlsafe(16)
-            expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-            
-            # Store reset token
-            await conn.execute(
-                '''
-                INSERT INTO affiliate_reset_tokens (
-                    id, affiliate_id, token, expires_at, used
-                )
-                VALUES ($1, $2, $3, $4, $5)
-                ''',
-                token_id,
-                affiliate['id'],
-                reset_token,
-                expires_at,
-                False
-            )
-            
-            # TODO: Send email with reset link
-            # Reset link would be: https://yourapp.com/affiliates/reset-password?token={reset_token}
-            print(f"Password reset token for {affiliate['email']}: {reset_token}")
-            
-            return {
-                'success': True,
-                'message': 'Password reset email sent'
+        # Find affiliate by email
+        result = await session.execute(
+            'SELECT id, email, name FROM affiliates WHERE email = :email',
+            {'email': request.email.lower()}
+        )
+        affiliate = result.fetchone()
+        
+        if not affiliate:
+            # Don't reveal if email exists or not
+            return {'detail': 'If an account exists with this email, a password reset link has been sent'}
+        
+        # Generate reset token (valid for 1 hour)
+        reset_token = secrets.token_urlsafe(32)
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        
+        # Store reset token in database
+        await session.execute(
+            '''
+            INSERT INTO password_reset_tokens (user_id, token, expires_at, is_used)
+            VALUES (:user_id, :token, :expires_at, false)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET token = :token, expires_at = :expires_at, is_used = false, created_at = NOW()
+            ''',
+            {
+                'user_id': affiliate['id'],
+                'token': reset_token,
+                'expires_at': expires_at
             }
+        )
+        
+        await session.commit()
+        
+        # In a real app, you would send an email here with the reset link
+        # For now, we'll just log it
+        reset_link = f"https://yourdomain.com/reset-password?token={reset_token}"
+        print(f"Password reset link for {affiliate['email']}: {reset_link}")
+        
+        return {'detail': 'If an account exists with this email, a password reset link has been sent'}
+        
     except Exception as e:
-        print(f'Password reset error: {e}')
-        raise HTTPException(status_code=500, detail='Failed to send reset email')
+        if session:
+            await session.rollback()
+        print(f'Password reset error: {str(e)}')
+        raise HTTPException(status_code=500, detail='Error processing password reset')
+    finally:
+        if session:
+            await session.close()
 
 @router.post('/verify-token')
 async def verify_token(token: str):

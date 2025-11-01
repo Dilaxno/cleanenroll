@@ -280,7 +280,7 @@ async def get_api_usage_stats(authorization: str = Header(None)):
         
         # Get quota info
         result = await session.execute(
-            text("SELECT * FROM api_quotas WHERE user_id = :uid"),
+            text("SELECT monthly_requests, requests_used, reset_date FROM api_quotas WHERE user_id = :uid"),
             {"uid": uid}
         )
         quota = result.fetchone()
@@ -294,7 +294,7 @@ async def get_api_usage_stats(authorization: str = Header(None)):
             )
             await session.commit()
             result = await session.execute(
-                text("SELECT * FROM api_quotas WHERE user_id = :uid"),
+                text("SELECT monthly_requests, requests_used, reset_date FROM api_quotas WHERE user_id = :uid"),
                 {"uid": uid}
             )
             quota = result.fetchone()
@@ -343,10 +343,10 @@ async def get_api_usage_stats(authorization: str = Header(None)):
         return {
             "total_requests": total_requests or 0,
             "requests_today": requests_today or 0,
-            "quota_limit": quota[2],  # monthly_requests
-            "quota_used": quota[1],  # requests_used
-            "quota_remaining": max(0, quota[2] - quota[1]),
-            "reset_date": quota[3].isoformat(),  # reset_date
+            "quota_limit": quota.monthly_requests,
+            "quota_used": quota.requests_used,
+            "quota_remaining": max(0, quota.monthly_requests - quota.requests_used),
+            "reset_date": quota.reset_date.isoformat(),
             "top_endpoints": top_endpoints
         }
 

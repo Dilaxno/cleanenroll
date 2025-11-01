@@ -88,7 +88,7 @@ def generate_api_key(environment: str = "production") -> tuple[str, str, str]:
 async def check_and_reset_quota(user_id: str, session):
     """Check if quota needs reset and do it"""
     result = await session.execute(
-        text("SELECT user_id, requests_used, monthly_limit, reset_date FROM api_quotas WHERE user_id = :user_id"),
+        text("SELECT user_id, requests_used, monthly_requests, reset_date FROM api_quotas WHERE user_id = :user_id"),
         {"user_id": user_id}
     )
     row = result.fetchone()

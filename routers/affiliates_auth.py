@@ -59,8 +59,8 @@ def generate_affiliate_code(email: str) -> str:
 
 def get_db_connection():
     """Get database connection from pool"""
-    from db.database import get_db_pool
-    return get_db_pool()
+    from db.database import get_connection
+    return get_connection()
 
 @router.post('/signup')
 async def signup(request: SignupRequest):

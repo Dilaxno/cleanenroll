@@ -128,7 +128,8 @@ async def signup(request: SignupRequest):
             'affiliate_id': affiliate_id,
             'email': request.email,
             'name': request.name,
-            'affiliate_code': affiliate_code
+            'affiliate_code': affiliate_code,
+            'redirect_to': '/affiliate/dashboard'  # Add redirect URL
         }
         
     except HTTPException:
@@ -177,7 +178,8 @@ async def login(request: LoginRequest):
             'affiliate_id': affiliate['id'],
             'email': affiliate['email'],
             'name': affiliate['name'],
-            'affiliate_code': affiliate['affiliate_code']
+            'affiliate_code': affiliate['affiliate_code'],
+            'redirect_to': '/affiliate/dashboard'  # Add redirect URL
         }
         
     except HTTPException:

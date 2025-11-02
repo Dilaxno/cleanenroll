@@ -219,6 +219,56 @@ async def get_conversions_analytics(token: str, days: int = 30):
         if session:
             await session.close()
 
+@router.get('/analytics/countries')
+async def get_countries_analytics(token: str):
+    """Get sales distribution by country"""
+    session = None
+    try:
+        affiliate_id = await verify_affiliate_token(token)
+        session = await get_db_connection()
+        
+        # Get affiliate code
+        code_result = await session.execute(
+            text('SELECT affiliate_code FROM affiliates WHERE id = :affiliate_id'),
+            {'affiliate_id': affiliate_id}
+        )
+        affiliate_code = code_result.scalar()
+        
+        # Get conversions grouped by country
+        # Assuming affiliate_conversions table has country_code column
+        result = await session.execute(
+            text('''
+                SELECT 
+                    country_code as code,
+                    COUNT(*) as count
+                FROM affiliate_conversions
+                WHERE affiliate_id = :affiliate_id
+                AND country_code IS NOT NULL
+                GROUP BY country_code
+                ORDER BY count DESC
+            '''),
+            {'affiliate_id': affiliate_id}
+        )
+        
+        data = []
+        for row in result.mappings().all():
+            data.append({
+                'code': row['code'],
+                'count': int(row['count'])
+            })
+        
+        return data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching countries analytics: {str(e)}')
+        # Return empty array on error instead of failing
+        return []
+    finally:
+        if session:
+            await session.close()
+
 @router.post('/track-click')
 async def track_click(affiliate_code: str, ip_address: Optional[str] = None, 
                      user_agent: Optional[str] = None, referrer: Optional[str] = None):

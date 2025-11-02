@@ -129,7 +129,7 @@ async def signup(request: SignupRequest):
             'email': request.email,
             'name': request.name,
             'affiliate_code': affiliate_code,
-            'redirect_to': '/affiliate/dashboard'  # Add redirect URL
+            'redirect_to': '/affiliates/dashboard'  # Add redirect URL
         }
         
     except HTTPException:
@@ -180,7 +180,7 @@ async def login(request: LoginRequest):
             'email': affiliate['email'],
             'name': affiliate['name'],
             'affiliate_code': affiliate.get('affiliate_code', ''),  # Use get with default
-            'redirect_to': '/affiliate/dashboard'  # Add redirect URL
+            'redirect_to': '/affiliates/dashboard'  # Add redirect URL
         }
         
         # Commit any pending transactions before returning
@@ -258,7 +258,7 @@ async def password_reset(request: PasswordResetRequest):
         if session:
             await session.close()
 
-@router.post('/verify-token')
+@router.get('/verify-token')
 async def verify_token(token: str):
     """Verify JWT token and return affiliate info"""
     session = None

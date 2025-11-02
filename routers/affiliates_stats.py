@@ -269,6 +269,56 @@ async def get_countries_analytics(token: str):
         if session:
             await session.close()
 
+@router.get('/payouts')
+async def get_payouts(token: str):
+    """Get payout history for affiliate"""
+    session = None
+    try:
+        affiliate_id = await verify_affiliate_token(token)
+        session = await get_db_connection()
+        
+        # Fetch all payouts for this affiliate
+        result = await session.execute(
+            text('''
+                SELECT 
+                    id,
+                    amount,
+                    status,
+                    payment_method,
+                    created_at,
+                    paid_at
+                FROM affiliate_payouts
+                WHERE affiliate_id = :affiliate_id
+                ORDER BY created_at DESC
+            '''),
+            {'affiliate_id': affiliate_id}
+        )
+        
+        payouts = []
+        for row in result.mappings().all():
+            # Use paid_at if available, otherwise created_at
+            payout_date = row['paid_at'] if row['paid_at'] else row['created_at']
+            
+            payouts.append({
+                'id': row['id'],
+                'amount': float(row['amount']),
+                'status': row['status'],
+                'method': row['payment_method'] or 'PayPal',
+                'date': payout_date.strftime('%Y-%m-%d') if payout_date else 'N/A'
+            })
+        
+        return payouts
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching payouts: {str(e)}')
+        # Return empty array on error
+        return []
+    finally:
+        if session:
+            await session.close()
+
 @router.post('/track-click')
 async def track_click(affiliate_code: str, ip_address: Optional[str] = None, 
                      user_agent: Optional[str] = None, referrer: Optional[str] = None):

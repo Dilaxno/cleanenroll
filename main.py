@@ -98,6 +98,8 @@ from routers.billing import router as billing_router  # type: ignore
 from routers.api_keys import router as api_keys_router  # type: ignore
 from routers.public_api import router as public_api_router  # type: ignore
 from routers.affiliates_auth import router as affiliates_auth_router  # type: ignore
+from routers.affiliates_stats import router as affiliates_stats_router  # type: ignore
+from routers.affiliates_webhook import router as affiliates_webhook_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -294,6 +296,8 @@ app.include_router(billing_router)
 app.include_router(api_keys_router)  # Developer API key management
 app.include_router(public_api_router)  # Public API for developers
 app.include_router(affiliates_auth_router, prefix="/api/affiliates/auth")  # Affiliate authentication
+app.include_router(affiliates_stats_router, prefix="/api/affiliates")  # Affiliate stats and analytics
+app.include_router(affiliates_webhook_router, prefix="/api/affiliates")  # Affiliate webhook handlers
 
 
 if __name__ == "__main__":

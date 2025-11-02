@@ -313,7 +313,7 @@ async def track_click(
             text('SELECT id FROM affiliates WHERE affiliate_code = :code AND is_active = true'),
             {'code': affiliate_code}
         )
-        affiliate = result.fetchone()
+        affiliate = result.mappings().first()
         
         if not affiliate:
             raise HTTPException(status_code=404, detail='Affiliate not found')

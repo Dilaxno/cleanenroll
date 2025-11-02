@@ -3,7 +3,7 @@ Affiliate stats and analytics endpoints
 Tracks clicks, conversions, earnings, and analytics data
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -291,11 +291,22 @@ async def get_payouts(token: str, session: AsyncSession = Depends(get_session)):
         return []
 
 @router.post('/track-click')
-async def track_click(affiliate_code: str, ip_address: Optional[str] = None, 
-                     user_agent: Optional[str] = None, referrer: Optional[str] = None,
-                     session: AsyncSession = Depends(get_session)):
-    """Track affiliate click"""
+async def track_click(
+    request: Request,
+    affiliate_code: str, 
+    user_agent: Optional[str] = None, 
+    referrer: Optional[str] = None,
+    session: AsyncSession = Depends(get_session)
+):
+    """Track affiliate click with geolocation"""
     try:
+        # Extract real client IP address
+        client_ip = request.client.host if request.client else None
+        # Check for forwarded IP (behind proxy/load balancer)
+        forwarded_for = request.headers.get('X-Forwarded-For')
+        if forwarded_for:
+            client_ip = forwarded_for.split(',')[0].strip()
+        real_ip = request.headers.get('X-Real-IP') or client_ip
         
         # Get affiliate_id from code
         result = await session.execute(
@@ -307,23 +318,94 @@ async def track_click(affiliate_code: str, ip_address: Optional[str] = None,
         if not affiliate:
             raise HTTPException(status_code=404, detail='Affiliate not found')
         
-        # Insert click record
+        # Get geolocation data
+        country_code = None
+        country = None
+        city = None
+        region = None
+        latitude = None
+        longitude = None
+        
+        try:
+            from utils.geo import get_geo_info
+            geo_info = get_geo_info(real_ip)
+            if geo_info:
+                country_code = geo_info.get('country_code')
+                country = geo_info.get('country')
+                city = geo_info.get('city')
+                region = geo_info.get('region')
+                latitude = geo_info.get('latitude')
+                longitude = geo_info.get('longitude')
+        except Exception as e:
+            print(f'Error getting geo info: {str(e)}')
+        
+        # Parse device info from user agent
+        device_type = 'desktop'
+        browser = 'Unknown'
+        os_name = 'Unknown'
+        
+        if user_agent:
+            ua_lower = user_agent.lower()
+            # Device type
+            if 'mobile' in ua_lower or 'android' in ua_lower or 'iphone' in ua_lower:
+                device_type = 'mobile'
+            elif 'tablet' in ua_lower or 'ipad' in ua_lower:
+                device_type = 'tablet'
+            
+            # Browser
+            if 'edg' in ua_lower:
+                browser = 'Edge'
+            elif 'chrome' in ua_lower:
+                browser = 'Chrome'
+            elif 'safari' in ua_lower and 'chrome' not in ua_lower:
+                browser = 'Safari'
+            elif 'firefox' in ua_lower:
+                browser = 'Firefox'
+            elif 'opera' in ua_lower:
+                browser = 'Opera'
+            
+            # OS
+            if 'windows' in ua_lower:
+                os_name = 'Windows'
+            elif 'mac' in ua_lower:
+                os_name = 'macOS'
+            elif 'linux' in ua_lower:
+                os_name = 'Linux'
+            elif 'android' in ua_lower:
+                os_name = 'Android'
+            elif 'ios' in ua_lower or 'iphone' in ua_lower or 'ipad' in ua_lower:
+                os_name = 'iOS'
+        
+        # Insert click record with geolocation
         import secrets
         click_id = secrets.token_urlsafe(16)
         
         await session.execute(
             text('''
                 INSERT INTO affiliate_clicks 
-                (id, affiliate_id, affiliate_code, ip_address, user_agent, referrer, clicked_at)
-                VALUES (:id, :affiliate_id, :code, :ip, :user_agent, :referrer, NOW())
+                (id, affiliate_id, affiliate_code, ip_address, user_agent, referrer, 
+                 country_code, country, city, region, latitude, longitude,
+                 device_type, browser, os, clicked_at)
+                VALUES (:id, :affiliate_id, :code, :ip, :user_agent, :referrer,
+                        :country_code, :country, :city, :region, :latitude, :longitude,
+                        :device_type, :browser, :os, NOW())
             '''),
             {
                 'id': click_id,
                 'affiliate_id': affiliate['id'],
                 'code': affiliate_code,
-                'ip': ip_address,
+                'ip': real_ip,
                 'user_agent': user_agent,
-                'referrer': referrer
+                'referrer': referrer,
+                'country_code': country_code,
+                'country': country,
+                'city': city,
+                'region': region,
+                'latitude': latitude,
+                'longitude': longitude,
+                'device_type': device_type,
+                'browser': browser,
+                'os': os_name
             }
         )
         

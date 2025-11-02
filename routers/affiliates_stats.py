@@ -3,7 +3,7 @@ Affiliate stats and analytics endpoints
 Tracks clicks, conversions, earnings, and analytics data
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Form
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -293,9 +293,9 @@ async def get_payouts(token: str, session: AsyncSession = Depends(get_session)):
 @router.post('/track-click')
 async def track_click(
     request: Request,
-    affiliate_code: str, 
-    user_agent: Optional[str] = None, 
-    referrer: Optional[str] = None,
+    affiliate_code: str = Form(...), 
+    user_agent: Optional[str] = Form(None), 
+    referrer: Optional[str] = Form(None),
     session: AsyncSession = Depends(get_session)
 ):
     """Track affiliate click with geolocation"""

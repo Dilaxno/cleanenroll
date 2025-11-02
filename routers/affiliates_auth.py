@@ -426,3 +426,159 @@ async def update_profile(token: str, request: UpdateProfileRequest):
     finally:
         if session:
             await session.close()
+
+class UpdatePayoutRequest(BaseModel):
+    payout_method: Optional[str] = None  # 'paypal' or 'bank'
+    paypal_email: Optional[str] = None
+    bank_country: Optional[str] = None
+    bank_account_holder_name: Optional[str] = None
+    bank_iban: Optional[str] = None
+    bank_bic: Optional[str] = None
+    bank_account_number: Optional[str] = None
+    bank_routing_number: Optional[str] = None
+    bank_sort_code: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_address: Optional[str] = None
+
+@router.put('/payout-info')
+async def update_payout_info(token: str, request: UpdatePayoutRequest):
+    """Update affiliate payout information"""
+    session = None
+    try:
+        # Verify token
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        if payload.get('type') != 'access':
+            raise HTTPException(status_code=401, detail='Invalid token type')
+        
+        session = await get_db_connection()
+        affiliate_id = payload['affiliate_id']
+        
+        # Build dynamic update query
+        update_fields = []
+        params = {'affiliate_id': affiliate_id}
+        
+        if request.payout_method is not None:
+            update_fields.append('payout_method = :payout_method')
+            params['payout_method'] = request.payout_method
+        
+        if request.paypal_email is not None:
+            update_fields.append('paypal_email = :paypal_email')
+            params['paypal_email'] = request.paypal_email
+        
+        if request.bank_country is not None:
+            update_fields.append('bank_country = :bank_country')
+            params['bank_country'] = request.bank_country
+        
+        if request.bank_account_holder_name is not None:
+            update_fields.append('bank_account_holder_name = :bank_account_holder_name')
+            params['bank_account_holder_name'] = request.bank_account_holder_name
+        
+        if request.bank_iban is not None:
+            update_fields.append('bank_iban = :bank_iban')
+            params['bank_iban'] = request.bank_iban
+        
+        if request.bank_bic is not None:
+            update_fields.append('bank_bic = :bank_bic')
+            params['bank_bic'] = request.bank_bic
+        
+        if request.bank_account_number is not None:
+            update_fields.append('bank_account_number = :bank_account_number')
+            params['bank_account_number'] = request.bank_account_number
+        
+        if request.bank_routing_number is not None:
+            update_fields.append('bank_routing_number = :bank_routing_number')
+            params['bank_routing_number'] = request.bank_routing_number
+        
+        if request.bank_sort_code is not None:
+            update_fields.append('bank_sort_code = :bank_sort_code')
+            params['bank_sort_code'] = request.bank_sort_code
+        
+        if request.bank_name is not None:
+            update_fields.append('bank_name = :bank_name')
+            params['bank_name'] = request.bank_name
+        
+        if request.bank_address is not None:
+            update_fields.append('bank_address = :bank_address')
+            params['bank_address'] = request.bank_address
+        
+        if not update_fields:
+            raise HTTPException(status_code=400, detail='No fields to update')
+        
+        # Update payout info
+        update_fields.append('updated_at = NOW()')
+        query = f"UPDATE affiliates SET {', '.join(update_fields)} WHERE id = :affiliate_id"
+        
+        await session.execute(text(query), params)
+        await session.commit()
+        
+        return {
+            'success': True,
+            'message': 'Payout information updated successfully'
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail='Token expired')
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail='Invalid token')
+    except HTTPException:
+        if session:
+            await session.rollback()
+        raise
+    except Exception as e:
+        if session:
+            await session.rollback()
+        print(f'Payout info update error: {e}')
+        raise HTTPException(status_code=500, detail='Error updating payout information')
+    finally:
+        if session:
+            await session.close()
+
+@router.get('/payout-info')
+async def get_payout_info(token: str):
+    """Get affiliate payout information"""
+    session = None
+    try:
+        # Verify token
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        if payload.get('type') != 'access':
+            raise HTTPException(status_code=401, detail='Invalid token type')
+        
+        session = await get_db_connection()
+        affiliate_id = payload['affiliate_id']
+        
+        # Fetch payout info
+        result = await session.execute(
+            text('''
+            SELECT payout_method, paypal_email, bank_country, 
+                   bank_account_holder_name, bank_iban, bank_bic,
+                   bank_account_number, bank_routing_number, bank_sort_code,
+                   bank_name, bank_address
+            FROM affiliates
+            WHERE id = :affiliate_id
+            '''),
+            {'affiliate_id': affiliate_id}
+        )
+        payout_info = result.mappings().first()
+        
+        if not payout_info:
+            raise HTTPException(status_code=404, detail='Affiliate not found')
+        
+        return {
+            'success': True,
+            'payout_info': dict(payout_info)
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail='Token expired')
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail='Invalid token')
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Get payout info error: {e}')
+        raise HTTPException(status_code=500, detail='Error fetching payout information')
+    finally:
+        if session:
+            await session.close()

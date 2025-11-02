@@ -379,3 +379,121 @@ async def track_click(affiliate_code: str, ip_address: Optional[str] = None,
     finally:
         if session:
             await session.close()
+
+@router.get('/live-tracking')
+async def get_live_tracking(token: str, limit: int = 50):
+    """Get recent affiliate activities with geolocation for live tracking"""
+    session = None
+    try:
+        affiliate_id = await verify_affiliate_token(token)
+        session = await get_db_connection()
+        
+        # Get recent clicks with geolocation data (last 24 hours)
+        clicks_result = await session.execute(
+            text('''
+                SELECT 
+                    ac.id,
+                    ac.ip_address,
+                    ac.country_code,
+                    ac.country,
+                    ac.city,
+                    ac.region,
+                    ac.latitude,
+                    ac.longitude,
+                    ac.device_type,
+                    ac.browser,
+                    ac.os,
+                    ac.user_agent,
+                    ac.referrer,
+                    ac.clicked_at,
+                    'click' as activity_type
+                FROM affiliate_clicks ac
+                WHERE ac.affiliate_id = :affiliate_id
+                AND ac.clicked_at >= NOW() - INTERVAL '24 hours'
+                ORDER BY ac.clicked_at DESC
+                LIMIT :limit
+            '''),
+            {'affiliate_id': affiliate_id, 'limit': limit}
+        )
+        
+        activities = []
+        for row in clicks_result.mappings().all():
+            activity = {
+                'id': row['id'],
+                'type': 'click',
+                'timestamp': row['clicked_at'].isoformat() if row['clicked_at'] else None,
+                'location': {
+                    'country_code': row['country_code'],
+                    'country': row['country'],
+                    'city': row['city'],
+                    'region': row['region'],
+                    'latitude': float(row['latitude']) if row['latitude'] else None,
+                    'longitude': float(row['longitude']) if row['longitude'] else None
+                },
+                'device': {
+                    'type': row['device_type'],
+                    'browser': row['browser'],
+                    'os': row['os'],
+                    'user_agent': row['user_agent']
+                },
+                'referrer': row['referrer']
+            }
+            activities.append(activity)
+        
+        # Get recent activities from affiliate_activities table if exists
+        try:
+            activities_result = await session.execute(
+                text('''
+                    SELECT 
+                        id,
+                        activity_type,
+                        page_url,
+                        page_title,
+                        country_code,
+                        city,
+                        latitude,
+                        longitude,
+                        metadata,
+                        created_at
+                    FROM affiliate_activities
+                    WHERE affiliate_id = :affiliate_id
+                    AND created_at >= NOW() - INTERVAL '24 hours'
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                '''),
+                {'affiliate_id': affiliate_id, 'limit': limit}
+            )
+            
+            for row in activities_result.mappings().all():
+                activity = {
+                    'id': row['id'],
+                    'type': row['activity_type'],
+                    'timestamp': row['created_at'].isoformat() if row['created_at'] else None,
+                    'page_url': row['page_url'],
+                    'page_title': row['page_title'],
+                    'location': {
+                        'country_code': row['country_code'],
+                        'city': row['city'],
+                        'latitude': float(row['latitude']) if row['latitude'] else None,
+                        'longitude': float(row['longitude']) if row['longitude'] else None
+                    },
+                    'metadata': row['metadata']
+                }
+                activities.append(activity)
+        except Exception as e:
+            # Table might not exist yet
+            print(f'Note: affiliate_activities table not available: {str(e)}')
+        
+        # Sort all activities by timestamp
+        activities.sort(key=lambda x: x['timestamp'] or '', reverse=True)
+        
+        return {'activities': activities[:limit]}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching live tracking data: {str(e)}')
+        raise HTTPException(status_code=500, detail='Error fetching live tracking data')
+    finally:
+        if session:
+            await session.close()

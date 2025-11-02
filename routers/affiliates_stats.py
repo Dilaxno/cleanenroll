@@ -5,21 +5,17 @@ Tracks clicks, conversions, earnings, and analytics data
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import jwt
 from datetime import datetime, timedelta
 import os
+from db.database import get_session
 
 router = APIRouter()
 
 JWT_SECRET = os.getenv('JWT_SECRET', 'your-secret-key-change-in-production')
 JWT_ALGORITHM = 'HS256'
-
-async def get_db_connection():
-    """Get database connection from pool"""
-    from db.database import get_session
-    session = get_session()
-    return await session.__anext__()
 
 async def verify_affiliate_token(token: str):
     """Verify JWT token and return affiliate_id"""
@@ -34,12 +30,10 @@ async def verify_affiliate_token(token: str):
         raise HTTPException(status_code=401, detail='Invalid token')
 
 @router.get('/stats')
-async def get_affiliate_stats(token: str):
+async def get_affiliate_stats(token: str, session: AsyncSession = Depends(get_session)):
     """Get affiliate statistics"""
-    session = None
     try:
         affiliate_id = await verify_affiliate_token(token)
-        session = await get_db_connection()
         
         # Get total clicks
         clicks_result = await session.execute(
@@ -105,17 +99,12 @@ async def get_affiliate_stats(token: str):
     except Exception as e:
         print(f'Error fetching affiliate stats: {str(e)}')
         raise HTTPException(status_code=500, detail='Error fetching stats')
-    finally:
-        if session:
-            await session.close()
 
 @router.get('/analytics/clicks')
-async def get_clicks_analytics(token: str, days: int = 30):
+async def get_clicks_analytics(token: str, days: int = 30, session: AsyncSession = Depends(get_session)):
     """Get clicks and signups over time"""
-    session = None
     try:
         affiliate_id = await verify_affiliate_token(token)
-        session = await get_db_connection()
         
         # Get affiliate code
         code_result = await session.execute(
@@ -172,17 +161,12 @@ async def get_clicks_analytics(token: str, days: int = 30):
     except Exception as e:
         print(f'Error fetching clicks analytics: {str(e)}')
         raise HTTPException(status_code=500, detail='Error fetching analytics')
-    finally:
-        if session:
-            await session.close()
 
 @router.get('/analytics/conversions')
-async def get_conversions_analytics(token: str, days: int = 30):
+async def get_conversions_analytics(token: str, days: int = 30, session: AsyncSession = Depends(get_session)):
     """Get conversions and revenue over time"""
-    session = None
     try:
         affiliate_id = await verify_affiliate_token(token)
-        session = await get_db_connection()
         
         # Get conversions and revenue grouped by date
         result = await session.execute(
@@ -215,17 +199,12 @@ async def get_conversions_analytics(token: str, days: int = 30):
     except Exception as e:
         print(f'Error fetching conversions analytics: {str(e)}')
         raise HTTPException(status_code=500, detail='Error fetching analytics')
-    finally:
-        if session:
-            await session.close()
 
 @router.get('/analytics/countries')
-async def get_countries_analytics(token: str):
+async def get_countries_analytics(token: str, session: AsyncSession = Depends(get_session)):
     """Get sales distribution by country"""
-    session = None
     try:
         affiliate_id = await verify_affiliate_token(token)
-        session = await get_db_connection()
         
         # Get affiliate code
         code_result = await session.execute(
@@ -265,17 +244,12 @@ async def get_countries_analytics(token: str):
         print(f'Error fetching countries analytics: {str(e)}')
         # Return empty array on error instead of failing
         return []
-    finally:
-        if session:
-            await session.close()
 
 @router.get('/payouts')
-async def get_payouts(token: str):
+async def get_payouts(token: str, session: AsyncSession = Depends(get_session)):
     """Get payout history for affiliate"""
-    session = None
     try:
         affiliate_id = await verify_affiliate_token(token)
-        session = await get_db_connection()
         
         # Fetch all payouts for this affiliate
         result = await session.execute(
@@ -315,17 +289,13 @@ async def get_payouts(token: str):
         print(f'Error fetching payouts: {str(e)}')
         # Return empty array on error
         return []
-    finally:
-        if session:
-            await session.close()
 
 @router.post('/track-click')
 async def track_click(affiliate_code: str, ip_address: Optional[str] = None, 
-                     user_agent: Optional[str] = None, referrer: Optional[str] = None):
+                     user_agent: Optional[str] = None, referrer: Optional[str] = None,
+                     session: AsyncSession = Depends(get_session)):
     """Track affiliate click"""
-    session = None
     try:
-        session = await get_db_connection()
         
         # Get affiliate_id from code
         result = await session.execute(
@@ -368,25 +338,18 @@ async def track_click(affiliate_code: str, ip_address: Optional[str] = None,
         return {'success': True, 'click_id': click_id}
         
     except HTTPException:
-        if session:
-            await session.rollback()
+        await session.rollback()
         raise
     except Exception as e:
-        if session:
-            await session.rollback()
+        await session.rollback()
         print(f'Error tracking click: {str(e)}')
         raise HTTPException(status_code=500, detail='Error tracking click')
-    finally:
-        if session:
-            await session.close()
 
 @router.get('/live-tracking')
-async def get_live_tracking(token: str, limit: int = 50):
+async def get_live_tracking(token: str, limit: int = 50, session: AsyncSession = Depends(get_session)):
     """Get recent affiliate activities with geolocation for live tracking"""
-    session = None
     try:
         affiliate_id = await verify_affiliate_token(token)
-        session = await get_db_connection()
         
         # Get recent clicks with geolocation data (last 24 hours)
         clicks_result = await session.execute(
@@ -494,6 +457,3 @@ async def get_live_tracking(token: str, limit: int = 50):
     except Exception as e:
         print(f'Error fetching live tracking data: {str(e)}')
         raise HTTPException(status_code=500, detail='Error fetching live tracking data')
-    finally:
-        if session:
-            await session.close()

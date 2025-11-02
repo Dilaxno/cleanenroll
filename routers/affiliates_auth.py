@@ -344,3 +344,85 @@ async def refresh_token(refresh_token: str):
     finally:
         if session:
             await session.close()
+
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+@router.put('/profile')
+async def update_profile(token: str, request: UpdateProfileRequest):
+    """Update affiliate profile information"""
+    session = None
+    try:
+        # Verify token
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        if payload.get('type') != 'access':
+            raise HTTPException(status_code=401, detail='Invalid token type')
+        
+        session = await get_db_connection()
+        affiliate_id = payload['affiliate_id']
+        
+        # Build dynamic update query
+        update_fields = []
+        params = {'affiliate_id': affiliate_id}
+        
+        if request.name is not None:
+            update_fields.append('name = :name')
+            params['name'] = request.name
+        
+        if request.email is not None:
+            # Check if new email already exists
+            result = await session.execute(
+                text('SELECT id FROM affiliates WHERE email = :email AND id != :affiliate_id'),
+                {'email': request.email.lower(), 'affiliate_id': affiliate_id}
+            )
+            if result.fetchone():
+                raise HTTPException(status_code=400, detail='Email already in use')
+            
+            update_fields.append('email = :email')
+            params['email'] = request.email.lower()
+        
+        if not update_fields:
+            raise HTTPException(status_code=400, detail='No fields to update')
+        
+        # Update affiliate profile
+        update_fields.append('updated_at = NOW()')
+        query = f"UPDATE affiliates SET {', '.join(update_fields)} WHERE id = :affiliate_id"
+        
+        await session.execute(text(query), params)
+        await session.commit()
+        
+        # Return updated profile
+        result = await session.execute(
+            text('SELECT id, email, name, affiliate_code FROM affiliates WHERE id = :affiliate_id'),
+            {'affiliate_id': affiliate_id}
+        )
+        affiliate = result.mappings().first()
+        
+        return {
+            'success': True,
+            'affiliate': {
+                'id': affiliate['id'],
+                'email': affiliate['email'],
+                'name': affiliate['name'],
+                'affiliate_code': affiliate['affiliate_code']
+            }
+        }
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail='Token expired')
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail='Invalid token')
+    except HTTPException:
+        if session:
+            await session.rollback()
+        raise
+    except Exception as e:
+        if session:
+            await session.rollback()
+        print(f'Profile update error: {e}')
+        raise HTTPException(status_code=500, detail='Error updating profile')
+    finally:
+        if session:
+            await session.close()

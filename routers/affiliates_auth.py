@@ -277,7 +277,7 @@ async def verify_token(token: str):
             '''),
             {'affiliate_id': payload['affiliate_id']}
         )
-        affiliate = result.fetchone()
+        affiliate = result.mappings().first()
         
         if not affiliate or not affiliate['is_active']:
             raise HTTPException(status_code=401, detail='Invalid or inactive account')

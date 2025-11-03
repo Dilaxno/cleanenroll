@@ -35,10 +35,18 @@ async def get_affiliate_stats(token: str, session: AsyncSession = Depends(get_se
     try:
         affiliate_id = await verify_affiliate_token(token)
         
-        # Get total clicks
-        clicks_result = await session.execute(
-            text('SELECT COUNT(*) as count FROM affiliate_clicks WHERE affiliate_id = :affiliate_id'),
+        # Get affiliate code first
+        affiliate_result = await session.execute(
+            text('SELECT affiliate_code FROM affiliates WHERE id = :affiliate_id'),
             {'affiliate_id': affiliate_id}
+        )
+        affiliate = affiliate_result.mappings().first()
+        affiliate_code = affiliate['affiliate_code'] if affiliate else None
+        
+        # Get total clicks using affiliate_code for reliability
+        clicks_result = await session.execute(
+            text('SELECT COUNT(*) as count FROM affiliate_clicks WHERE affiliate_code = :code'),
+            {'code': affiliate_code}
         )
         total_clicks = clicks_result.scalar() or 0
         

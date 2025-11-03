@@ -53,13 +53,11 @@ async def get_affiliate_stats(token: str, session: AsyncSession = Depends(get_se
         # Get total signups (users who signed up with this affiliate code)
         signups_result = await session.execute(
             text('''
-                SELECT COUNT(DISTINCT user_id) as count 
+                SELECT COUNT(DISTINCT uid) as count 
                 FROM users 
-                WHERE referral_code = (
-                    SELECT affiliate_code FROM affiliates WHERE id = :affiliate_id
-                )
+                WHERE referral_code = :code
             '''),
-            {'affiliate_id': affiliate_id}
+            {'code': affiliate_code}
         )
         total_signups = signups_result.scalar() or 0
         

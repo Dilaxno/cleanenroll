@@ -1,37 +1,60 @@
 """
 Feature request endpoint to send user feature requests to founder email.
 """
-from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
+from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException, Request
 from typing import List, Optional
 import os
 from datetime import datetime
-import firebase_admin.auth as firebase_auth
-try:
-    from ..routers.builder import _get_current_user_uid  # type: ignore
-    from ..utils.email import send_email_html  # type: ignore
-except Exception:
-    from routers.builder import _get_current_user_uid  # type: ignore
-    from utils.email import send_email_html  # type: ignore
 import base64
+import logging
+
+try:
+    from ..utils.email import send_email_html  # type: ignore
+    from ..utils.firebase_admin_adapter import admin_auth  # type: ignore
+except Exception:
+    from utils.email import send_email_html  # type: ignore
+    from utils.firebase_admin_adapter import admin_auth  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 FOUNDER_EMAIL = "eric@cleanenroll.com"
 
+def _verify_firebase_token(request: Request) -> Optional[str]:
+    """Verify Firebase ID token from Authorization header. Returns uid or None."""
+    try:
+        authz = request.headers.get("authorization") or request.headers.get("Authorization")
+        if not authz or not authz.lower().startswith("bearer "):
+            return None
+        token = authz.split(" ", 1)[1].strip()
+        if not token:
+            return None
+        decoded = admin_auth.verify_id_token(token)
+        return decoded.get("uid")
+    except Exception as e:
+        logger.error(f"Failed to verify Firebase token: {e}")
+        return None
+
 @router.post("/feature-request")
 async def submit_feature_request(
+    request: Request,
     title: str = Form(...),
     description: str = Form(...),
     useCase: Optional[str] = Form(""),
     priority: str = Form("nice-to-have"),
     userEmail: str = Form(...),
     userName: str = Form("User"),
-    images: List[UploadFile] = File(default=[]),
-    uid: str = Depends(_get_current_user_uid)
+    images: List[UploadFile] = File(default=[])
 ):
     """
     Submit a feature request and send it to the founder's email.
     """
+    # Verify authentication
+    uid = _verify_firebase_token(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
     try:
         # Build email content
         priority_colors = {

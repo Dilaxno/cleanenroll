@@ -1612,8 +1612,21 @@ async def validate_email_deliverability(
     result["reputation_checked"] = False
     if rep_flag and _REPUTATION_HELPERS_AVAILABLE and domain:
         result["reputation_checked"] = True
+        
+        # Whitelist known legitimate domains to prevent false positives
+        KNOWN_GOOD_DOMAINS = {
+            'gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com',
+            'live.com', 'icloud.com', 'aol.com', 'protonmail.com', 'zoho.com',
+            'mail.com', 'yandex.com', 'gmx.com', 'fastmail.com', 'tutanota.com',
+            'me.com', 'mac.com', 'pm.me', 'ymail.com', 'rocketmail.com', 'msn.com'
+        }
+        
         try:
-            listed = _spamhaus_listed(domain) if _spamhaus_listed else None
+            # Skip blocklist check for known good domains
+            if domain.lower() in KNOWN_GOOD_DOMAINS:
+                listed = False
+            else:
+                listed = _spamhaus_listed(domain) if _spamhaus_listed else None
         except Exception:
             listed = None
         try:
@@ -1647,16 +1660,28 @@ async def validate_email_deliverability(
             md = int(min_domain_age) if min_domain_age is not None else None
         except Exception:
             md = None
-        if listed is True:
-            rep_bad = True
-            reasons.append("Domain appears on a blocklist")
+        
+        # Key change: If domain has valid MX records, don't reject it
+        # MX records = legitimate mail server = legitimate domain
+        has_valid_mx = result.get("has_mx", False) and len(result.get("mx_hosts", [])) > 0
+        
+        # Only apply blocklist/reputation checks if domain lacks MX records
+        # OR if it's already marked as disposable
+        if not has_valid_mx or result.get("disposable", False):
+            if listed is True:
+                rep_bad = True
+                reasons.append("Domain appears on a blocklist")
+        
+        # Domain age check - only for very new domains without established reputation
         if (age_days is not None) and (md is not None) and (age_days < max(1, md)):
-            rep_bad = True
-            reasons.append(f"Domain is very new ({age_days} days old; minimum {md})")
-        if spf_ok is False and dmarc_ok is False:
-            rep_bad = True
-            reasons.append("Domain lacks SPF and DMARC records")
-
+            # Only flag as bad if domain is VERY new (< 7 days) or lacks MX
+            if age_days < 7 or not has_valid_mx:
+                rep_bad = True
+                reasons.append(f"Domain is very new ({age_days} days old; minimum {md})")
+        
+        # SPF/DMARC - informational only, don't reject
+        # Many legitimate business domains don't have perfect email auth
+        
         result["reputation_bad"] = rep_bad
         if rep_bad:
             result["deliverable"] = False

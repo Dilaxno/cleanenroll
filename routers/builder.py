@@ -3776,10 +3776,20 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                     except Exception:
                         domain = ''
                     if domain:
-                        # Spamhaus listing -> reject
-                        listed = _spamhaus_listed(domain)
-                        if listed is True:
-                            raise HTTPException(status_code=400, detail=f"The email domain for '{lab}' appears on a well-known blocklist. Please use a different email.")
+                        # Check if domain has valid MX records first
+                        has_mx = False
+                        try:
+                            mx_records = _mx_lookup(domain)
+                            has_mx = len(mx_records) > 0
+                        except Exception:
+                            pass
+                        
+                        # Only check blocklist if domain lacks MX records
+                        # If domain has valid MX = legitimate mail server = accept it
+                        if not has_mx:
+                            listed = _spamhaus_listed(domain)
+                            if listed is True:
+                                raise HTTPException(status_code=400, detail=f"The email domain for '{lab}' appears on a well-known blocklist. Please use a different email.")
                         # WHOIS domain age -> reject when very new
                         try:
                             min_days = int(form_data.get('minDomainAgeDays') or 30)

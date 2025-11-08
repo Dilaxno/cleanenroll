@@ -1478,30 +1478,54 @@ def _is_role_based_email(email: str) -> bool:
 def _spamhaus_listed(domain: str) -> Optional[bool]:
     """Check domain reputation using Spamhaus DBL (domains).
     Returns True if listed (bad), False if not listed (good), None on error/timeouts.
+    Conservative: Only returns True when absolutely certain domain is listed.
     """
     if not _DNS_AVAILABLE or not domain:
         return None
+    
+    # Whitelist known legitimate domains to avoid false positives
+    KNOWN_GOOD_DOMAINS = {
+        'gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com',
+        'live.com', 'icloud.com', 'aol.com', 'protonmail.com', 'zoho.com',
+        'mail.com', 'yandex.com', 'gmx.com', 'fastmail.com', 'tutanota.com'
+    }
+    if domain.lower() in KNOWN_GOOD_DOMAINS:
+        return False
+    
     try:
-        # Query Spamhaus DBL for the domain
+        # Query Spamhaus DBL for the domain with timeout
         q = f"{domain}.dbl.spamhaus.org"
-        dns.resolver.resolve(q, "A")  # type: ignore[attr-defined]
-        return True
+        resolver = dns.resolver.Resolver()  # type: ignore[attr-defined]
+        resolver.timeout = 2.0  # 2 second timeout
+        resolver.lifetime = 2.0
+        
+        answers = resolver.resolve(q, "A")  # type: ignore[attr-defined]
+        # Only return True if we got actual answers (domain is listed)
+        if answers:
+            return True
+        return None
     except Exception as e:
         try:
             NXDOMAIN = getattr(dns.resolver, 'NXDOMAIN', None)
             NoAnswer = getattr(dns.resolver, 'NoAnswer', None)
             Timeout = getattr(dns.resolver, 'Timeout', None)
             NoNameservers = getattr(dns.resolver, 'NoNameservers', None)
+            
+            # NXDOMAIN or NoAnswer means domain is NOT on blocklist
             if NXDOMAIN and isinstance(e, NXDOMAIN):
                 return False
             if NoAnswer and isinstance(e, NoAnswer):
                 return False
+            
+            # On errors/timeouts, return None (inconclusive) - don't block
             if NoNameservers and isinstance(e, NoNameservers):
                 return None
             if Timeout and isinstance(e, Timeout):
                 return None
         except Exception:
             pass
+        
+        # Any other error - return None (inconclusive) instead of blocking
         return None
 
 

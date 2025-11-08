@@ -229,6 +229,14 @@ async def validate_url_get(request: Request, url: str):
     return await _validate_url_impl(url)
 
 
+@router.get("/api/builder/url/scan")
+@router.get("/api/builder/url/scan/")
+@limiter.limit("30/minute")
+async def url_scan_get(request: Request, url: str):
+    """Alias endpoint for URL scanning called by frontend."""
+    return await _validate_url_impl(url)
+
+
 @router.post("/api/validate-url")
 @router.post("/api/validate-url/")
 @limiter.limit("30/minute")

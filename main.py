@@ -101,6 +101,7 @@ from routers.affiliates_auth import router as affiliates_auth_router  # type: ig
 from routers.affiliates_stats import router as affiliates_stats_router  # type: ignore
 from routers.affiliates_webhook import router as affiliates_webhook_router  # type: ignore
 from routers.feature_requests import router as feature_requests_router  # type: ignore
+from routers.developer_waitlist import router as developer_waitlist_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -300,6 +301,7 @@ app.include_router(affiliates_auth_router, prefix="/api/affiliates/auth")  # Aff
 app.include_router(affiliates_stats_router, prefix="/api/affiliates")  # Affiliate stats and analytics
 app.include_router(affiliates_webhook_router, prefix="/api/affiliates")  # Affiliate webhook handlers
 app.include_router(feature_requests_router, prefix="/api")  # Feature requests
+app.include_router(developer_waitlist_router)  # Developer portal waitlist
 
 
 if __name__ == "__main__":

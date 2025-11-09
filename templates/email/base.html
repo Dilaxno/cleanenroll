@@ -17,18 +17,51 @@
     <style>
       /* Typography: use selected webfont (fallback Outfit) with safe fallbacks */
       body, table, td, a, h1, h2, h3, p, strong, em, span, div { font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; }
-      /* Basic email-safe styles to match email_basic.html */
+      /* Basic email-safe styles matching light mode theme */
       .container { max-width: 640px; margin: 0 auto; }
-      .card { background: #111418; border-radius: 12px; padding: 24px; }
-      .muted { color: #c7c7c7; }
+      .card { background: #f9fafb; border-radius: 12px; padding: 24px; border: 1px solid #e2e8f0; }
+      .muted { color: #64748b; }
+      
+      /* Unified button styles matching button.jsx primary variant (lg size) */
       .btn {
         display: inline-block;
-        background: #7ED957;
-        color: #000000 !important;
-        padding: 12px 18px;
-        border-radius: 8px;
+        background: #84cc16; /* lime-500 - light mode accent */
+        color: #022C22 !important; /* dark teal text */
+        padding: 12px 24px; /* px-6 py-3 */
+        border-radius: 6px; /* rounded-md */
         text-decoration: none;
-        font-weight: 600;
+        font-weight: 600; /* font-semibold */
+        font-size: 16px; /* text-base */
+        line-height: 1.5;
+        transition: all 0.2s;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      }
+      .btn:hover {
+        background: #65a30d; /* lime-600 - hover state */
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+      }
+      
+      /* Unified badge styles matching badge.jsx primary variant */
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #84cc16; /* lime-500 - light mode accent */
+        color: #022C22 !important; /* dark teal text */
+        padding: 2px 10px; /* px-2.5 py-0.5 */
+        border-radius: 9999px; /* rounded-full */
+        font-size: 12px; /* text-xs */
+        font-weight: 600; /* font-semibold */
+        line-height: 1;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      }
+      .badge-secondary {
+        background: #65a30d; /* lime-600 */
+      }
+      .badge-outline {
+        background: transparent;
+        border: 1px solid #84cc16;
+        color: #84cc16 !important;
       }
       @media screen and (max-width: 600px) {
         .container { padding: 0 16px; }
@@ -51,7 +84,7 @@
     </xml>
     <![endif]-->
   </head>
-  <body style="margin:0; padding:24px; background:#0B0F19; color:#f5f5f5;">
+  <body style="margin:0; padding:24px; background:#ffffff; color:#022C22;">
     <!-- Preheader (hidden in clients, visible for preview) -->
     <div style="display:none; max-height:0; overflow:hidden; opacity:0; visibility:hidden;">
       {{preheader}}
@@ -73,12 +106,12 @@
       <!-- Card -->
       <div class="card">
         <!-- Title -->
-        <h1 style="margin:0 0 12px 0; font-size:22px; line-height:1.2; font-weight:700; color:#ffffff;">{{title}}</h1>
+        <h1 style="margin:0 0 12px 0; font-size:22px; line-height:1.2; font-weight:700; color:#022C22;">{{title}}</h1>
 
         <!-- Intro and dynamic HTML content -->
-        <div style="font-size:15px; line-height:1.6; color:#f5f5f5;">
+        <div style="font-size:15px; line-height:1.6; color:#022C22;">
           {% if intro %}
-            <p style="margin:0 0 16px 0; color:#c7c7c7;">{{intro}}</p>
+            <p style="margin:0 0 16px 0; color:#64748b;">{{intro}}</p>
           {% endif %}
           {% if content_html %}
             <div style="margin:0 0 4px 0;">{{content_html|safe}}</div>
@@ -88,9 +121,9 @@
           {% if cta_url and cta_label %}
             <!--[if mso]>
             <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="left" style="margin:24px 0 0 0;"><tr><td>
-              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{cta_url}}" style="height:44px; v-text-anchor:middle; width:220px;" arcsize="10%" stroke="f" fillcolor="#7ED957">
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{cta_url}}" style="height:48px; v-text-anchor:middle; width:220px;" arcsize="13%" stroke="f" fillcolor="#84cc16">
                 <w:anchorlock/>
-                <center style="color:#000000; font-family: Arial, Helvetica, sans-serif; font-size:16px; font-weight:700;">{{cta_label}}</center>
+                <center style="color:#022C22; font-family: Arial, Helvetica, sans-serif; font-size:16px; font-weight:600;">{{cta_label}}</center>
               </v:roundrect>
             </td></tr></table>
             <![endif]-->
@@ -108,7 +141,7 @@
       <div class="muted" style="font-size:12px; text-align:center; margin-top:18px;">{{ footer_html|safe }}</div>
       {% else %}
       <p class="muted" style="font-size:12px; text-align:center; margin-top:18px;">
-        © {{year}} CleanEnroll • <a href="https://cleanenroll.com/legal#privacy-policy" style="color:#9fe38e; text-decoration:none;">Privacy</a> • <a href="https://cleanenroll.com/legal#terms-of-service" style="color:#9fe38e; text-decoration:none;">Terms</a>
+        © {{year}} CleanEnroll • <a href="https://cleanenroll.com/legal#privacy-policy" style="color:#65a30d; text-decoration:none;">Privacy</a> • <a href="https://cleanenroll.com/legal#terms-of-service" style="color:#65a30d; text-decoration:none;">Terms</a>
       </p>
       {% endif %}
     </div>

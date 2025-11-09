@@ -3,7 +3,7 @@ Developer Waitlist Router
 Handles developer portal waitlist signups and admin retrieval
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 import firebase_admin.auth
@@ -46,7 +46,7 @@ class DeveloperWaitlistResponse(BaseModel):
 # Authentication Helper
 # ============================================================================
 
-async def get_current_user_uid(authorization: str = Depends(lambda: None)) -> str:
+async def get_current_user_uid(authorization: str = Header(None)) -> str:
     """Extract and verify Firebase token from Authorization header"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -161,13 +161,12 @@ async def submit_waitlist(data: DeveloperWaitlistSubmit):
 # ============================================================================
 
 @router.get("/list", response_model=List[DeveloperWaitlistResponse])
-async def list_waitlist(authorization: str = Depends(lambda req: req.headers.get("authorization"))):
+async def list_waitlist(uid: str = Depends(get_current_user_uid)):
     """
     Admin-only endpoint to retrieve all developer waitlist signups
     Requires authentication and admin privileges
     """
-    # Verify authentication
-    uid = await get_current_user_uid(authorization)
+    # uid is already verified from dependency
     
     # Verify admin status
     is_admin = await verify_admin(uid)
@@ -214,12 +213,11 @@ async def list_waitlist(authorization: str = Depends(lambda req: req.headers.get
 
 
 @router.get("/stats")
-async def get_waitlist_stats(authorization: str = Depends(lambda req: req.headers.get("authorization"))):
+async def get_waitlist_stats(uid: str = Depends(get_current_user_uid)):
     """
     Admin-only endpoint to get waitlist statistics
     """
-    # Verify authentication
-    uid = await get_current_user_uid(authorization)
+    # uid is already verified from dependency
     
     # Verify admin status
     is_admin = await verify_admin(uid)

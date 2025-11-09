@@ -1412,12 +1412,14 @@ def _start_cert_renew_daemon():
         pass
 
 
-def _verify_recaptcha(token: str, remoteip: str = "") -> bool:
-    if not RECAPTCHA_SECRET:
+def _verify_recaptcha(token: str, remoteip: str = "", secret_key: Optional[str] = None) -> bool:
+    """Verify reCAPTCHA token using provided secret key or fallback to global secret."""
+    secret = secret_key or RECAPTCHA_SECRET
+    if not secret:
         return False
     try:
         payload = urllib.parse.urlencode({
-            "secret": RECAPTCHA_SECRET,
+            "secret": secret,
             "response": token,
             "remoteip": remoteip or ""
         }).encode()
@@ -2223,6 +2225,9 @@ async def public_get_form(form_id: str):
                     if now <= closed_to:
                         is_closed = True
                 
+                # Get domain-specific reCAPTCHA site key if available
+                recaptcha_site_key = data.get("recaptcha_site_key") or None
+                
                 # Build camelCase payload
                 out = {
                     "id": data.get("id"),
@@ -2267,6 +2272,7 @@ async def public_get_form(form_id: str):
                     "duplicateWindowHours": int(data.get("duplicate_window_hours") or data.get("duplicateWindowHours") or 24),
                     # Security settings
                     "recaptchaEnabled": bool(data.get("recaptcha_enabled") if data.get("recaptcha_enabled") is not None else data.get("recaptchaEnabled")),
+                    "recaptchaSiteKey": recaptcha_site_key,  # Domain-specific site key (public)
                     "urlScanEnabled": bool(data.get("url_scan_enabled") if data.get("url_scan_enabled") is not None else data.get("urlScanEnabled")),
                     "fileScanEnabled": bool(data.get("file_scan_enabled") if data.get("file_scan_enabled") is not None else (data.get("file_safety_check_enabled") if data.get("file_safety_check_enabled") is not None else data.get("fileScanEnabled"))),
                     "gdprComplianceEnabled": bool(data.get("gdpr_compliance_enabled") if data.get("gdpr_compliance_enabled") is not None else data.get("gdprComplianceEnabled")),
@@ -3727,11 +3733,23 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         )
         if not token:
             raise HTTPException(status_code=400, detail="Missing reCAPTCHA token")
+        
+        # Fetch domain-specific secret key if available (for custom domains)
+        domain_secret_key = form_data.get("recaptcha_secret_key")
+        if domain_secret_key:
+            # Decrypt the secret key using recaptcha_service
+            try:
+                from services.recaptcha_service import _decrypt_secret
+                domain_secret_key = _decrypt_secret(domain_secret_key)
+            except Exception as e:
+                logger.warning(f"Failed to decrypt domain reCAPTCHA secret for form {form_id}: {e}")
+                domain_secret_key = None
+        
         client_ip = _client_ip(request)
-        ok = _verify_recaptcha(token, client_ip)
+        ok = _verify_recaptcha(token, client_ip, secret_key=domain_secret_key)
         if not ok:
             raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
-        logger.debug("submit_form recaptcha ok id=%s ip=%s", form_id, client_ip)
+        logger.debug("submit_form recaptcha ok id=%s ip=%s domain_key=%s", form_id, client_ip, bool(domain_secret_key))
 
     # Email validation (format + MX) when enabled
     if is_pro and form_data.get("emailValidationEnabled"):

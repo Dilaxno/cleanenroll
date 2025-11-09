@@ -5,6 +5,7 @@ import dns.resolver
 import logging
 from db.database import async_session_maker  # type: ignore
 from fastapi.responses import PlainTextResponse
+from services.recaptcha_service import provision_recaptcha_for_domain, delete_recaptcha_keys
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +93,22 @@ async def verify_custom_domain(form_id: str, payload: Dict = None, domain: Optio
             {"fid": form_id, "dom": inbound_domain},
         )
         await session.commit()
+    
+    # Automatically provision domain-specific reCAPTCHA keys
+    recaptcha_keys = None
+    try:
+        recaptcha_keys = await provision_recaptcha_for_domain(form_id, inbound_domain)
+        logger.info(f"Provisioned reCAPTCHA keys for domain {inbound_domain}")
+    except Exception as e:
+        logger.warning(f"Failed to provision reCAPTCHA keys for {inbound_domain}: {e}")
+        # Continue without failing - reCAPTCHA is optional
 
     return {
         "verified": True,
         "domain": inbound_domain,
         "sslVerified": True,
         "mode": "caddy",
+        "recaptchaProvisioned": recaptcha_keys is not None,
         "message": f"Domain {inbound_domain} verified and ready to serve directly via api.cleanenroll.com."
     }
 
@@ -207,6 +218,13 @@ async def resolve_domain(hostname: str):
 @router.delete("/forms/{form_id}/custom-domain")
 async def delete_custom_domain(form_id: str):
     """Remove custom domain from the form in Neon DB."""
+    # Delete domain-specific reCAPTCHA keys first
+    try:
+        await delete_recaptcha_keys(form_id)
+        logger.info(f"Deleted reCAPTCHA keys for form {form_id}")
+    except Exception as e:
+        logger.warning(f"Failed to delete reCAPTCHA keys: {e}")
+    
     async with async_session_maker() as session:
         await session.execute(
             text("""

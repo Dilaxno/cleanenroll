@@ -10,6 +10,7 @@ import firebase_admin.auth
 from db.database import async_session_maker
 from sqlalchemy import text
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +68,20 @@ async def get_current_user_uid(authorization: str = Header(None)) -> str:
 
 
 async def verify_admin(uid: str) -> bool:
-    """Check if user is an admin"""
-    async with async_session_maker() as session:
-        result = await session.execute(
-            text("SELECT is_admin FROM users WHERE uid = :uid"),
-            {"uid": uid}
-        )
-        row = result.fetchone()
-        return row and row[0] is True if row else False
+    """Check if user is an admin via email allowlist"""
+    try:
+        # Get user's email from Firebase token
+        user = firebase_admin.auth.get_user(uid)
+        email = str(user.email or "").lower()
+        
+        # Check against ALLOW_ADMIN_EMAILS environment variable
+        allowlist = os.getenv("ALLOW_ADMIN_EMAILS", "")
+        allowed_emails = {e.strip().lower() for e in allowlist.split(",") if e.strip()}
+        
+        return email in allowed_emails if email else False
+    except Exception as e:
+        logger.error(f"Error verifying admin: {e}")
+        return False
 
 
 # ============================================================================

@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 import firebase_admin.auth
-from db.database import get_db_connection
+from db.database import async_session_maker
+from sqlalchemy import text
 import logging
 
 logger = logging.getLogger(__name__)
@@ -67,17 +68,13 @@ async def get_current_user_uid(authorization: str = Depends(lambda: None)) -> st
 
 async def verify_admin(uid: str) -> bool:
     """Check if user is an admin"""
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT is_admin FROM users WHERE uid = %s",
-                (uid,)
-            )
-            result = cur.fetchone()
-            return result and result[0] is True
-    finally:
-        conn.close()
+    async with async_session_maker() as session:
+        result = await session.execute(
+            text("SELECT is_admin FROM users WHERE uid = :uid"),
+            {"uid": uid}
+        )
+        row = result.fetchone()
+        return row and row[0] is True if row else False
 
 
 # ============================================================================
@@ -90,76 +87,73 @@ async def submit_waitlist(data: DeveloperWaitlistSubmit):
     Public endpoint to submit developer waitlist signup
     No authentication required
     """
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
+    async with async_session_maker() as session:
+        try:
             # Check if email already exists
-            cur.execute(
-                "SELECT id FROM developer_waitlist WHERE email = %s",
-                (data.email,)
+            result = await session.execute(
+                text("SELECT id FROM developer_waitlist WHERE email = :email"),
+                {"email": data.email}
             )
-            existing = cur.fetchone()
+            existing = result.fetchone()
             
             if existing:
                 # Update existing entry
-                cur.execute(
-                    """
-                    UPDATE developer_waitlist
-                    SET name = %s, company = %s, role = %s, interests = %s,
-                        use_cases = %s, additional_info = %s, updated_at = NOW()
-                    WHERE email = %s
-                    RETURNING id
-                    """,
-                    (
-                        data.name,
-                        data.company,
-                        data.role,
-                        data.interests,
-                        data.use_cases,
-                        data.additional_info,
-                        data.email
-                    )
+                result = await session.execute(
+                    text("""
+                        UPDATE developer_waitlist
+                        SET name = :name, company = :company, role = :role, interests = :interests,
+                            use_cases = :use_cases, additional_info = :additional_info, updated_at = NOW()
+                        WHERE email = :email
+                        RETURNING id
+                    """),
+                    {
+                        "name": data.name,
+                        "company": data.company,
+                        "role": data.role,
+                        "interests": data.interests,
+                        "use_cases": data.use_cases,
+                        "additional_info": data.additional_info,
+                        "email": data.email
+                    }
                 )
             else:
                 # Insert new entry
-                cur.execute(
-                    """
-                    INSERT INTO developer_waitlist
-                    (email, name, company, role, interests, use_cases, additional_info)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (
-                        data.email,
-                        data.name,
-                        data.company,
-                        data.role,
-                        data.interests,
-                        data.use_cases,
-                        data.additional_info
-                    )
+                result = await session.execute(
+                    text("""
+                        INSERT INTO developer_waitlist
+                        (email, name, company, role, interests, use_cases, additional_info)
+                        VALUES (:email, :name, :company, :role, :interests, :use_cases, :additional_info)
+                        RETURNING id
+                    """),
+                    {
+                        "email": data.email,
+                        "name": data.name,
+                        "company": data.company,
+                        "role": data.role,
+                        "interests": data.interests,
+                        "use_cases": data.use_cases,
+                        "additional_info": data.additional_info
+                    }
                 )
             
-            result = cur.fetchone()
-            conn.commit()
+            row = result.fetchone()
+            await session.commit()
             
             logger.info(f"Developer waitlist signup: {data.email}")
             
             return {
                 "success": True,
                 "message": "Successfully joined the waitlist!",
-                "id": result[0]
+                "id": row[0]
             }
             
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error submitting waitlist: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to submit waitlist signup"
-        )
-    finally:
-        conn.close()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Error submitting waitlist: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to submit waitlist signup"
+            )
 
 
 # ============================================================================
@@ -183,18 +177,17 @@ async def list_waitlist(authorization: str = Depends(lambda req: req.headers.get
             detail="Admin access required"
         )
     
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, email, name, company, role, interests, use_cases, 
-                       additional_info, created_at
-                FROM developer_waitlist
-                ORDER BY created_at DESC
-                """
+    async with async_session_maker() as session:
+        try:
+            result = await session.execute(
+                text("""
+                    SELECT id, email, name, company, role, interests, use_cases, 
+                           additional_info, created_at
+                    FROM developer_waitlist
+                    ORDER BY created_at DESC
+                """)
             )
-            rows = cur.fetchall()
+            rows = result.fetchall()
             
             waitlist_entries = []
             for row in rows:
@@ -212,14 +205,12 @@ async def list_waitlist(authorization: str = Depends(lambda req: req.headers.get
             
             return waitlist_entries
             
-    except Exception as e:
-        logger.error(f"Error retrieving waitlist: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve waitlist data"
-        )
-    finally:
-        conn.close()
+        except Exception as e:
+            logger.error(f"Error retrieving waitlist: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve waitlist data"
+            )
 
 
 @router.get("/stats")
@@ -238,30 +229,29 @@ async def get_waitlist_stats(authorization: str = Depends(lambda req: req.header
             detail="Admin access required"
         )
     
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
+    async with async_session_maker() as session:
+        try:
             # Get total count
-            cur.execute("SELECT COUNT(*) FROM developer_waitlist")
-            total = cur.fetchone()[0]
+            result = await session.execute(text("SELECT COUNT(*) FROM developer_waitlist"))
+            total = result.scalar()
             
             # Get count from last 7 days
-            cur.execute(
-                """
-                SELECT COUNT(*) FROM developer_waitlist
-                WHERE created_at >= NOW() - INTERVAL '7 days'
-                """
+            result = await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM developer_waitlist
+                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                """)
             )
-            last_7_days = cur.fetchone()[0]
+            last_7_days = result.scalar()
             
             # Get count from last 30 days
-            cur.execute(
-                """
-                SELECT COUNT(*) FROM developer_waitlist
-                WHERE created_at >= NOW() - INTERVAL '30 days'
-                """
+            result = await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM developer_waitlist
+                    WHERE created_at >= NOW() - INTERVAL '30 days'
+                """)
             )
-            last_30_days = cur.fetchone()[0]
+            last_30_days = result.scalar()
             
             return {
                 "total": total,
@@ -269,11 +259,9 @@ async def get_waitlist_stats(authorization: str = Depends(lambda req: req.header
                 "last_30_days": last_30_days
             }
             
-    except Exception as e:
-        logger.error(f"Error retrieving waitlist stats: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve waitlist statistics"
-        )
-    finally:
-        conn.close()
+        except Exception as e:
+            logger.error(f"Error retrieving waitlist stats: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve waitlist statistics"
+            )

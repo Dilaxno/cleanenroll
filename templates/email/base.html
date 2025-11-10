@@ -63,6 +63,52 @@
         border: 1px solid #84cc16;
         color: #84cc16 !important;
       }
+      
+      /* Unified icon wrapper styles matching icon-wrapper.jsx */
+      .icon-wrapper {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 8px; /* p-2 - default size */
+        border-radius: 8px; /* rounded-lg */
+      }
+      .icon-wrapper-sm {
+        padding: 6px; /* p-1.5 */
+        border-radius: 4px; /* rounded */
+      }
+      .icon-wrapper-lg {
+        padding: 12px; /* p-3 */
+        border-radius: 12px; /* rounded-xl */
+      }
+      .icon-wrapper-xl {
+        padding: 16px; /* p-4 */
+        border-radius: 16px; /* rounded-2xl */
+      }
+      /* Icon wrapper color variants with gradients */
+      .icon-wrapper-primary {
+        background: linear-gradient(135deg, #84cc16, #65a30d); /* lime-500 to lime-600 */
+        color: #ffffff;
+      }
+      .icon-wrapper-secondary {
+        background: linear-gradient(135deg, #65a30d, #4d7c0f); /* lime-600 to lime-700 */
+        color: #ffffff;
+      }
+      .icon-wrapper-success {
+        background: linear-gradient(135deg, #22c55e, #16a34a); /* green-500 to green-600 */
+        color: #ffffff;
+      }
+      .icon-wrapper-warning {
+        background: linear-gradient(135deg, #f59e0b, #d97706); /* amber-500 to amber-600 */
+        color: #ffffff;
+      }
+      .icon-wrapper-danger {
+        background: linear-gradient(135deg, #ef4444, #dc2626); /* red-500 to red-600 */
+        color: #ffffff;
+      }
+      .icon-wrapper-neutral {
+        background: linear-gradient(135deg, #6b7280, #4b5563); /* gray-500 to gray-600 */
+        color: #ffffff;
+      }
       @media screen and (max-width: 600px) {
         .container { padding: 0 16px; }
         .btn { display: block; width: 100%; text-align: center; padding: 10px 14px !important; font-size: 15px !important; }

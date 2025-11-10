@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% set subject = "Welcome to the CleanEnroll Developer Portal Waitlist!" %}
+{% set preheader = "Thank you for joining the waitlist. We'll notify you when access is available." %}
+{% set title = "You're on the list! 🎉" %}
+{% set intro = "Thank you for your interest in the CleanEnroll Developer Portal. We're excited to have you join our community of developers." %}
+
+{% set content_html %}
+<p style="margin:0 0 16px 0;">
+  We've received your waitlist signup and you're now in the queue for early access to our powerful API and developer tools.
+</p>
+
+<!-- Status badge with unified styling -->
+<div style="text-align: center; margin: 20px 0;">
+  <span class="badge" style="font-size: 13px; padding: 6px 16px;">
+    <span class="icon-wrapper icon-wrapper-sm icon-wrapper-success" style="display: inline-flex; margin-right: 6px; vertical-align: middle;">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+    </span>
+    You're on the waitlist!
+  </span>
+</div>
+
+<div style="background: #f0fdf4; border-left: 4px solid #84cc16; padding: 16px; margin: 16px 0; border-radius: 6px;">
+  <p style="margin: 0 0 12px 0; font-weight: 600; color: #022C22; display: flex; align-items: center; gap: 8px;">
+    <span class="icon-wrapper icon-wrapper-sm icon-wrapper-primary">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+      </svg>
+    </span>
+    What's coming:
+  </p>
+  <ul style="margin: 0; padding-left: 20px; color: #064e3b;">
+    <li style="margin-bottom: 6px;">Powerful REST API for form management</li>
+    <li style="margin-bottom: 6px;">Webhooks for real-time submission notifications</li>
+    <li style="margin-bottom: 6px;">Advanced analytics and reporting endpoints</li>
+    <li style="margin-bottom: 6px;">SDKs for popular languages</li>
+    <li style="margin-bottom: 6px;">Comprehensive documentation and examples</li>
+  </ul>
+</div>
+
+<p style="margin:16px 0;">
+  We'll send you an email as soon as access becomes available. In the meantime, feel free to explore our platform and see what CleanEnroll can do.
+</p>
+
+<p style="margin:16px 0 0 0; color: #64748b; font-size: 14px; display: flex; align-items: center; gap: 6px;">
+  <span class="icon-wrapper icon-wrapper-sm icon-wrapper-neutral">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"></circle>
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+      <line x1="12" y1="17" x2="12.01" y2="17"></line>
+    </svg>
+  </span>
+  Have questions? Just reply to this email — we'd love to hear from you!
+</p>
+{% endset %}
+
+{% set cta_url = "https://cleanenroll.com/developers" %}
+{% set cta_label = "Learn More About Developer Portal" %}

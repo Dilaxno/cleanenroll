@@ -11,6 +11,7 @@ from db.database import async_session_maker
 from sqlalchemy import text
 import logging
 import os
+from utils.email import render_email, send_email_html
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,24 @@ async def submit_waitlist(data: DeveloperWaitlistSubmit):
             await session.commit()
             
             logger.info(f"Developer waitlist signup: {data.email}")
+            
+            # Send welcome email to developer
+            try:
+                email_html = render_email(
+                    "developer_waitlist_welcome.html",
+                    {
+                        "developer_name": data.name or "Developer",
+                    }
+                )
+                send_email_html(
+                    to_email=data.email,
+                    subject="Welcome to the CleanEnroll Developer Portal Waitlist!",
+                    html_body=email_html
+                )
+                logger.info(f"Welcome email sent to {data.email}")
+            except Exception as email_error:
+                # Log error but don't fail the signup
+                logger.error(f"Failed to send welcome email to {data.email}: {email_error}")
             
             return {
                 "success": True,

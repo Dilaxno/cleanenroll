@@ -2491,6 +2491,44 @@ async def update_form(form_id: str, request: Request, payload: Dict[str, Any] | 
     except Exception:
         pass
 
+    # Bot protection: honeypot field (accept camelCase and snake_case)
+    honeypot_enabled = payload.get("honeypotEnabled")
+    if honeypot_enabled is None:
+        honeypot_enabled = payload.get("honeypot_enabled")
+    if isinstance(honeypot_enabled, bool):
+        sets.append("honeypot_enabled = :honeypot_enabled")
+        params["honeypot_enabled"] = honeypot_enabled
+
+    # Bot protection: time-based submission checks (accept camelCase and snake_case)
+    time_based_check_enabled = payload.get("timeBasedCheckEnabled")
+    if time_based_check_enabled is None:
+        time_based_check_enabled = payload.get("time_based_check_enabled")
+    if isinstance(time_based_check_enabled, bool):
+        sets.append("time_based_check_enabled = :time_based_check_enabled")
+        params["time_based_check_enabled"] = time_based_check_enabled
+
+    # Bot protection: minimum submission time in seconds (accept camelCase and snake_case)
+    min_submission_time = payload.get("minSubmissionTime")
+    if min_submission_time is None:
+        min_submission_time = payload.get("min_submission_time")
+    try:
+        if min_submission_time is not None:
+            mst = int(min_submission_time)
+            # Clamp between 1 and 60 seconds
+            mst = max(1, min(60, mst))
+            sets.append("min_submission_time = :min_submission_time")
+            params["min_submission_time"] = mst
+    except Exception:
+        pass
+
+    # Duplicate email prevention (accept camelCase and snake_case)
+    prevent_duplicate_email = payload.get("preventDuplicateEmail")
+    if prevent_duplicate_email is None:
+        prevent_duplicate_email = payload.get("prevent_duplicate_email")
+    if isinstance(prevent_duplicate_email, bool):
+        sets.append("prevent_duplicate_email = :prevent_duplicate_email")
+        params["prevent_duplicate_email"] = prevent_duplicate_email
+
     # Thank you page settings
     thank_you_display = payload.get("thankYouDisplay") or payload.get("thank_you_display")
     if isinstance(thank_you_display, str) and thank_you_display.strip():
@@ -3750,6 +3788,97 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         if not ok:
             raise HTTPException(status_code=400, detail="reCAPTCHA verification failed")
         logger.debug("submit_form recaptcha ok id=%s ip=%s domain_key=%s", form_id, client_ip, bool(domain_secret_key))
+
+    # Honeypot bot protection (Pro feature)
+    if is_pro and bool(form_data.get("honeypotEnabled")):
+        try:
+            if isinstance(payload, dict):
+                # Check for honeypot field (conventionally named with prefix to avoid user fields)
+                honeypot_value = payload.get("_honeypot") or payload.get("honeypot") or payload.get("hp")
+                if honeypot_value and str(honeypot_value).strip():
+                    logger.warning(f"Honeypot triggered for form {form_id}: value={honeypot_value}")
+                    raise HTTPException(status_code=400, detail="Submission rejected")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    # Time-based submission checks (Pro feature)
+    if is_pro and bool(form_data.get("timeBasedCheckEnabled")):
+        try:
+            min_time = int(form_data.get("minSubmissionTime") or 3)
+            min_time = max(1, min(60, min_time))  # Clamp between 1-60 seconds
+            
+            if session_id:
+                # Fetch session start time from abandons table
+                async with async_session_maker() as session:
+                    res = await session.execute(
+                        text(
+                            """
+                            SELECT started_at FROM abandons
+                            WHERE session_id = :sid AND form_id = :fid
+                            ORDER BY started_at DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"sid": session_id, "fid": form_id},
+                    )
+                    row = res.mappings().first()
+                    if row and row.get("started_at"):
+                        from datetime import timedelta
+                        started_at = row.get("started_at")
+                        elapsed = (datetime.utcnow() - started_at).total_seconds()
+                        if elapsed < min_time:
+                            logger.warning(f"Time-based check failed for form {form_id}: elapsed={elapsed}s min={min_time}s")
+                            raise HTTPException(status_code=400, detail=f"Submission too fast. Please take at least {min_time} seconds to complete the form.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.debug(f"Time-based check error (non-fatal): {e}")
+            pass
+
+    # Duplicate email prevention (Pro feature)
+    if is_pro and bool(form_data.get("preventDuplicateEmail")):
+        try:
+            if isinstance(payload, dict):
+                fields_def = form_data.get("fields") or []
+                email_values = []
+                
+                # Extract all email field values
+                for f in fields_def:
+                    try:
+                        ftype = str((f or {}).get("type") or "").strip().lower()
+                        fid = (f or {}).get("id")
+                        if ftype == "email" and fid:
+                            val = payload.get(fid)
+                            if isinstance(val, str) and val.strip():
+                                email_values.append(val.strip().lower())
+                    except Exception:
+                        continue
+                
+                # Check if any of these emails already exist in submissions for this form
+                if email_values:
+                    async with async_session_maker() as session:
+                        for email_val in email_values:
+                            res = await session.execute(
+                                text(
+                                    """
+                                    SELECT 1 FROM submissions
+                                    WHERE form_id = :fid
+                                      AND data::text ILIKE :email_pattern
+                                    LIMIT 1
+                                    """
+                                ),
+                                {"fid": form_id, "email_pattern": f"%{email_val}%"},
+                            )
+                            if res.first() is not None:
+                                logger.info(f"Duplicate email detected for form {form_id}: {email_val}")
+                                raise HTTPException(status_code=400, detail="This email address has already been used to submit this form.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.debug(f"Duplicate email check error (non-fatal): {e}")
+            pass
 
     # Email validation (format + MX) when enabled
     if is_pro and form_data.get("emailValidationEnabled"):

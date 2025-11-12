@@ -3,7 +3,8 @@ Notion Integration Router
 Handles Notion OAuth, database selection, field mapping, and form submission sync
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Query
+from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import firebase_admin.auth
@@ -28,6 +29,7 @@ NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_CLIENT_ID = os.getenv("NOTION_CLIENT_ID", "")
 NOTION_CLIENT_SECRET = os.getenv("NOTION_CLIENT_SECRET", "")
 NOTION_REDIRECT_URI = os.getenv("NOTION_REDIRECT_URI", "http://localhost:3000/integrations/notion/callback")
+ALLOWED_OAUTH_REDIRECT_HOSTS = os.getenv("ALLOWED_OAUTH_REDIRECT_HOSTS", "cleanenroll.com,localhost,127.0.0.1").split(",")
 
 
 # ============================================================================
@@ -279,6 +281,87 @@ async def notion_oauth_callback(data: NotionOAuthCallback, uid: str = Depends(ge
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to save Notion connection"
             )
+
+
+@router.get("/oauth/callback")
+async def notion_oauth_callback_get(
+    code: Optional[str] = Query(None),
+    form_id: Optional[int] = Query(None),
+    redirect: Optional[str] = Query(None, description="Optional frontend URL to redirect to with code appended")
+):
+    """
+    Handle Notion OAuth browser redirect (GET).
+    This endpoint does NOT finalize the connection server-side. It passes the `code` back to the frontend,
+    which then calls the POST /api/notion/oauth/callback with Authorization to securely save the integration.
+
+    Behavior:
+    - If `redirect` is provided and safe, redirect to it with ?code=...&form_id=...
+    - Else, render a tiny HTML page that postMessages the code to window.opener then closes the window.
+    """
+    if not code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing OAuth code")
+
+    # Optional: validate redirect host to prevent open redirect
+    def _is_allowed_redirect(url: str) -> bool:
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            if p.scheme not in ("http", "https"):
+                return False
+            host = (p.netloc or "").lower()
+            for allowed in ALLOWED_OAUTH_REDIRECT_HOSTS:
+                allowed = allowed.strip().lower()
+                if not allowed:
+                    continue
+                if host == allowed or host.endswith("." + allowed):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    if redirect and _is_allowed_redirect(redirect):
+        from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
+        parsed = list(urlparse(redirect))
+        q = dict(parse_qsl(parsed[4]))
+        q.update({"code": code})
+        if form_id is not None:
+            q["form_id"] = str(form_id)
+        parsed[4] = urlencode(q)
+        return RedirectResponse(url=urlunparse(parsed), status_code=302)
+
+    # Fallback: small HTML that informs the opener and closes
+    html = f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset='utf-8'/>
+        <title>Connecting Notion…</title>
+        <style>
+          body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; margin: 20px; }}
+          .card {{ max-width: 520px; margin: 40px auto; padding: 16px; border: 1px solid #e5e7eb; border-radius: 12px; }}
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>Notion authorization received</h2>
+          <p>You can close this window. Returning to the app…</p>
+        </div>
+        <script>
+          (function() {{
+            try {{
+              if (window.opener) {{
+                window.opener.postMessage({{ provider: 'notion', code: {code!r}, form_id: {form_id!r} }}, '*');
+              }}
+              setTimeout(function() {{ window.close(); }}, 300);
+            }} catch(e) {{
+              console.error(e);
+            }}
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html, status_code=200)
 
 
 @router.post("/database/select")

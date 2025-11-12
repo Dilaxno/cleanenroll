@@ -14,10 +14,10 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 
 try:
-    from .db.database import get_db_connection
+    from .db.database import get_cursor
 except ImportError:
     # Fallback for flat directory structure
-    from db.database import get_db_connection
+    from db.database import get_cursor
 
 # Firebase authentication
 import firebase_admin
@@ -95,20 +95,18 @@ async def store_session_recording(
         recording_id = str(uuid.uuid4())
         
         # Get form owner UID from database
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Get form owner
-        cursor.execute(
-            "SELECT user_id FROM forms WHERE id = %s",
-            (recording_data.formId,)
-        )
-        form_result = cursor.fetchone()
-        
-        if not form_result:
-            raise HTTPException(status_code=404, detail="Form not found")
-        
-        owner_uid = form_result[0]
+        async with get_cursor() as cursor:
+            # Get form owner
+            await cursor.execute(
+                "SELECT user_id FROM forms WHERE id = %s",
+                {"form_id": recording_data.formId}
+            )
+            form_result = await cursor.fetchone()
+            
+            if not form_result:
+                raise HTTPException(status_code=404, detail="Form not found")
+            
+            owner_uid = form_result["user_id"]
         
         # Create R2 key with owner UID for organization
         r2_key = f"recordings/{owner_uid}/{recording_data.formId}/{recording_id}.json"
@@ -134,26 +132,23 @@ async def store_session_recording(
         )
         
         # Store metadata in database
-        cursor.execute("""
-            INSERT INTO session_recordings 
-            (id, form_id, owner_uid, start_time, end_time, user_agent, viewport_width, viewport_height, r2_key, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            recording_id,
-            recording_data.formId,
-            owner_uid,
-            datetime.fromtimestamp(recording_data.startTime / 1000, timezone.utc),
-            datetime.fromtimestamp(recording_data.endTime / 1000, timezone.utc) if recording_data.endTime else None,
-            recording_data.userAgent,
-            recording_data.viewport.get('width'),
-            recording_data.viewport.get('height'),
-            r2_key,
-            datetime.now(timezone.utc)
-        ))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        async with get_cursor(commit=True) as cursor:
+            await cursor.execute("""
+                INSERT INTO session_recordings 
+                (id, form_id, owner_uid, start_time, end_time, user_agent, viewport_width, viewport_height, r2_key, created_at)
+                VALUES (%(recording_id)s, %(form_id)s, %(owner_uid)s, %(start_time)s, %(end_time)s, %(user_agent)s, %(viewport_width)s, %(viewport_height)s, %(r2_key)s, %(created_at)s)
+            """, {
+                "recording_id": recording_id,
+                "form_id": recording_data.formId,
+                "owner_uid": owner_uid,
+                "start_time": datetime.fromtimestamp(recording_data.startTime / 1000, timezone.utc),
+                "end_time": datetime.fromtimestamp(recording_data.endTime / 1000, timezone.utc) if recording_data.endTime else None,
+                "user_agent": recording_data.userAgent,
+                "viewport_width": recording_data.viewport.get('width'),
+                "viewport_height": recording_data.viewport.get('height'),
+                "r2_key": r2_key,
+                "created_at": datetime.now(timezone.utc)
+            })
         
         return {"success": True, "recordingId": recording_id}
         
@@ -170,45 +165,41 @@ async def get_session_recordings(
 ):
     """Get session recordings for a specific owner UID, optionally filtered by form."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Build query based on filters
-        if form_id:
-            cursor.execute("""
-                SELECT id, form_id, start_time, end_time, user_agent, 
-                       viewport_width, viewport_height, r2_key, created_at
-                FROM session_recordings 
-                WHERE owner_uid = %s AND form_id = %s
-                ORDER BY created_at DESC
-            """, (user_uid, form_id))
-        else:
-            cursor.execute("""
-                SELECT id, form_id, start_time, end_time, user_agent, 
-                       viewport_width, viewport_height, r2_key, created_at
-                FROM session_recordings 
-                WHERE owner_uid = %s
-                ORDER BY created_at DESC
-            """, (user_uid,))
-        
-        recordings = []
-        for row in cursor.fetchall():
-            recordings.append({
-                "id": row[0],
-                "formId": row[1],
-                "startTime": int(row[2].timestamp() * 1000) if row[2] else None,
-                "endTime": int(row[3].timestamp() * 1000) if row[3] else None,
-                "userAgent": row[4],
-                "viewport": {
-                    "width": row[5],
-                    "height": row[6]
-                },
-                "r2Key": row[7],
-                "createdAt": row[8].isoformat() if row[8] else None
-            })
-        
-        cursor.close()
-        conn.close()
+        async with get_cursor() as cursor:
+            # Build query based on filters
+            if form_id:
+                await cursor.execute("""
+                    SELECT id, form_id, start_time, end_time, user_agent, 
+                           viewport_width, viewport_height, r2_key, created_at
+                    FROM session_recordings 
+                    WHERE owner_uid = %(user_uid)s AND form_id = %(form_id)s
+                    ORDER BY created_at DESC
+                """, {"user_uid": user_uid, "form_id": form_id})
+            else:
+                await cursor.execute("""
+                    SELECT id, form_id, start_time, end_time, user_agent, 
+                           viewport_width, viewport_height, r2_key, created_at
+                    FROM session_recordings 
+                    WHERE owner_uid = %(user_uid)s
+                    ORDER BY created_at DESC
+                """, {"user_uid": user_uid})
+            
+            rows = await cursor.fetchall()
+            recordings = []
+            for row in rows:
+                recordings.append({
+                    "id": row["id"],
+                    "formId": row["form_id"],
+                    "startTime": int(row["start_time"].timestamp() * 1000) if row["start_time"] else None,
+                    "endTime": int(row["end_time"].timestamp() * 1000) if row["end_time"] else None,
+                    "userAgent": row["user_agent"],
+                    "viewport": {
+                        "width": row["viewport_width"],
+                        "height": row["viewport_height"]
+                    },
+                    "r2Key": row["r2_key"],
+                    "createdAt": row["created_at"].isoformat() if row["created_at"] else None
+                })
         
         return {"recordings": recordings}
         
@@ -223,27 +214,22 @@ async def get_session_recording_data(
 ):
     """Get the full recording data from R2 for playback."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Get recording metadata and verify ownership
-        cursor.execute("""
-            SELECT r2_key FROM session_recordings 
-            WHERE id = %s AND owner_uid = %s
-        """, (recording_id, user_uid))
-        
-        result = cursor.fetchone()
-        if not result:
-            raise HTTPException(status_code=404, detail="Recording not found")
-        
-        r2_key = result[0]
+        async with get_cursor() as cursor:
+            # Get recording metadata and verify ownership
+            await cursor.execute("""
+                SELECT r2_key FROM session_recordings 
+                WHERE id = %(recording_id)s AND owner_uid = %(user_uid)s
+            """, {"recording_id": recording_id, "user_uid": user_uid})
+            
+            result = await cursor.fetchone()
+            if not result:
+                raise HTTPException(status_code=404, detail="Recording not found")
+            
+            r2_key = result["r2_key"]
         
         # Fetch from R2
         response = r2_client.get_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
         recording_data = json.loads(response['Body'].read())
-        
-        cursor.close()
-        conn.close()
         
         return recording_data
         
@@ -262,33 +248,28 @@ async def delete_session_recording(
 ):
     """Delete a session recording from both R2 and database."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Get recording metadata and verify ownership
-        cursor.execute("""
-            SELECT r2_key FROM session_recordings 
-            WHERE id = %s AND owner_uid = %s
-        """, (recording_id, user_uid))
-        
-        result = cursor.fetchone()
-        if not result:
-            raise HTTPException(status_code=404, detail="Recording not found")
-        
-        r2_key = result[0]
+        async with get_cursor() as cursor:
+            # Get recording metadata and verify ownership
+            await cursor.execute("""
+                SELECT r2_key FROM session_recordings 
+                WHERE id = %(recording_id)s AND owner_uid = %(user_uid)s
+            """, {"recording_id": recording_id, "user_uid": user_uid})
+            
+            result = await cursor.fetchone()
+            if not result:
+                raise HTTPException(status_code=404, detail="Recording not found")
+            
+            r2_key = result["r2_key"]
         
         # Delete from R2
         r2_client.delete_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
         
         # Delete from database
-        cursor.execute("""
-            DELETE FROM session_recordings 
-            WHERE id = %s AND owner_uid = %s
-        """, (recording_id, user_uid))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        async with get_cursor(commit=True) as cursor:
+            await cursor.execute("""
+                DELETE FROM session_recordings 
+                WHERE id = %(recording_id)s AND owner_uid = %(user_uid)s
+            """, {"recording_id": recording_id, "user_uid": user_uid})
         
         return {"success": True}
         

@@ -14,12 +14,35 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 
 try:
-    from .auth import get_current_user_uid
     from .db.database import get_db_connection
 except ImportError:
     # Fallback for flat directory structure
-    from auth import get_current_user_uid
     from db.database import get_db_connection
+
+# Firebase authentication
+import firebase_admin
+from firebase_admin import auth as firebase_auth
+from fastapi import Header
+
+async def get_current_user_uid(authorization: str = Header(None)) -> str:
+    """Extract and verify Firebase token from Authorization header"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401, 
+            detail="Authorization header missing or invalid format"
+        )
+    
+    token = authorization.split("Bearer ")[1]
+    
+    try:
+        # Verify the Firebase token
+        decoded_token = firebase_auth.verify_id_token(token)
+        return decoded_token['uid']
+    except Exception as e:
+        raise HTTPException(
+            status_code=401, 
+            detail=f"Invalid token: {str(e)}"
+        )
 
 
 # R2 Configuration (Cloudflare R2)

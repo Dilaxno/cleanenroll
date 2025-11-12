@@ -13,8 +13,13 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 
-from .auth import get_current_user_uid
-from .db.database import get_db_connection
+try:
+    from .auth import get_current_user_uid
+    from .db.database import get_db_connection
+except ImportError:
+    # Fallback for flat directory structure
+    from auth import get_current_user_uid
+    from db.database import get_db_connection
 
 
 # R2 Configuration (Cloudflare R2)

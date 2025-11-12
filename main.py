@@ -102,6 +102,7 @@ from routers.affiliates_stats import router as affiliates_stats_router  # type: 
 from routers.affiliates_webhook import router as affiliates_webhook_router  # type: ignore
 from routers.feature_requests import router as feature_requests_router  # type: ignore
 from routers.developer_waitlist import router as developer_waitlist_router  # type: ignore
+from routers.notion_integration import router as notion_integration_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -302,6 +303,7 @@ app.include_router(affiliates_stats_router, prefix="/api/affiliates")  # Affilia
 app.include_router(affiliates_webhook_router, prefix="/api/affiliates")  # Affiliate webhook handlers
 app.include_router(feature_requests_router, prefix="/api")  # Feature requests
 app.include_router(developer_waitlist_router)  # Developer portal waitlist
+app.include_router(notion_integration_router)  # Notion integration
 
 
 if __name__ == "__main__":

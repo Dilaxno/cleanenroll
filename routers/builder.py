@@ -4593,6 +4593,56 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
     except Exception as e:
         logger.exception("Auto-reply send failed form_id=%s: %s", form_id, str(e))
 
+    # Sync to Notion if integration is enabled
+    try:
+        from routers.notion_integration import router as notion_router
+        # Call the internal sync endpoint
+        async with async_session_maker() as notion_session:
+            notion_result = await notion_session.execute(
+                text("""
+                    SELECT access_token, database_id, field_mappings, enabled
+                    FROM notion_integrations
+                    WHERE form_id = :form_id AND enabled = true
+                """),
+                {"form_id": form_id}
+            )
+            notion_row = notion_result.fetchone()
+            
+            if notion_row:
+                # Notion integration is enabled, sync the submission
+                from routers.notion_integration import create_notion_page
+                
+                access_token = notion_row[0]
+                database_id = notion_row[1]
+                field_mappings = notion_row[2] or {}
+                
+                # Build Notion properties from answers
+                notion_properties = {}
+                for field_id, notion_property_name in field_mappings.items():
+                    field_value = answers.get(field_id)
+                    
+                    if field_value is not None:
+                        # Convert to Notion property format (rich_text)
+                        notion_properties[notion_property_name] = {
+                            "rich_text": [{"text": {"content": str(field_value)}}]
+                        }
+                
+                # Add metadata fields
+                notion_properties["Submitted At"] = {
+                    "rich_text": [{"text": {"content": submitted_at.isoformat() if submitted_at else datetime.utcnow().isoformat()}}]
+                }
+                if country_code:
+                    notion_properties["Country"] = {
+                        "rich_text": [{"text": {"content": country_code}}]
+                    }
+                
+                # Create page in Notion
+                await create_notion_page(access_token, database_id, notion_properties)
+                logger.info(f"Successfully synced form {form_id} submission to Notion")
+    except Exception as e:
+        # Don't fail the submission if Notion sync fails
+        logger.error(f"Failed to sync to Notion for form {form_id}: {e}")
+
     logger.info("form submitted id=%s response_id=%s", form_id, resp.get("responseId"))
     return resp
 

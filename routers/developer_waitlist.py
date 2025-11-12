@@ -167,6 +167,34 @@ async def submit_waitlist(data: DeveloperWaitlistSubmit):
                 # Log error but don't fail the signup
                 logger.error(f"Failed to send welcome email to {data.email}: {email_error}")
             
+            # Send notification email to CleanEnroll team
+            try:
+                interests_str = ", ".join(data.interests) if data.interests else "None selected"
+                notification_html = f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #022C22;">New Developer Waitlist Signup</h2>
+                    <p>A new developer has joined the waitlist:</p>
+                    <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                        <p><strong>Email:</strong> {data.email}</p>
+                        <p><strong>Name:</strong> {data.name or "Not provided"}</p>
+                        <p><strong>Company:</strong> {data.company or "Not provided"}</p>
+                        <p><strong>Role:</strong> {data.role or "Not provided"}</p>
+                        <p><strong>Interests:</strong> {interests_str}</p>
+                        {f'<p><strong>Use Cases:</strong> {data.use_cases}</p>' if data.use_cases else ''}
+                        {f'<p><strong>Additional Info:</strong> {data.additional_info}</p>' if data.additional_info else ''}
+                    </div>
+                </div>
+                """
+                send_email_html(
+                    to_email="eric@cleanenroll.com",
+                    subject=f"New Developer Waitlist Signup: {data.email}",
+                    html_body=notification_html
+                )
+                logger.info(f"Notification email sent to eric@cleanenroll.com for {data.email}")
+            except Exception as notification_error:
+                # Log error but don't fail the signup
+                logger.error(f"Failed to send notification email: {notification_error}")
+            
             return {
                 "success": True,
                 "message": "Successfully joined the waitlist!",

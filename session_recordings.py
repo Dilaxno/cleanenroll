@@ -60,7 +60,18 @@ r2_client = boto3.client(
     endpoint_url=R2_ENDPOINT_URL,
     aws_access_key_id=R2_ACCESS_KEY_ID,
     aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-    region_name='auto'
+    region_name='auto',
+    config=boto3.session.Config(
+        signature_version='s3v4',
+        s3={
+            'addressing_style': 'path'
+        },
+        retries={
+            'max_attempts': 3,
+            'mode': 'adaptive'
+        }
+    ),
+    verify=True  # Ensure SSL verification is enabled
 )
 
 router = APIRouter()

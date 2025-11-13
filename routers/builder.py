@@ -2133,12 +2133,21 @@ async def public_get_form(form_id: str):
             try:
                 theme = data.get("theme") or {}
                 btn = (data.get("submitButton") or theme.get("submitButton") or {})
+                secondary_btn = (data.get("secondaryButton") or theme.get("secondaryButton") or {})
                 primary = (theme.get("primaryColor") if isinstance(theme, dict) else None) or "#4f46e5"
                 computed_btn = {
                     "label": (btn.get("label") if isinstance(btn, dict) else None) or "Submit",
                     "color": (btn.get("color") if isinstance(btn, dict) else None) or primary,
                     "textColor": (btn.get("textColor") if isinstance(btn, dict) else None) or "#ffffff",
                     "borderRadius": (btn.get("borderRadius") if isinstance(btn, dict) else None) or 6,
+                }
+                computed_secondary_btn = {
+                    "enabled": (secondary_btn.get("enabled") if isinstance(secondary_btn, dict) else None) or False,
+                    "label": (secondary_btn.get("label") if isinstance(secondary_btn, dict) else None) or "Cancel",
+                    "color": (secondary_btn.get("color") if isinstance(secondary_btn, dict) else None) or "#6b7280",
+                    "textColor": (secondary_btn.get("textColor") if isinstance(secondary_btn, dict) else None) or "#ffffff",
+                    "action": (secondary_btn.get("action") if isinstance(secondary_btn, dict) else None) or "reset",
+                    "customUrl": (secondary_btn.get("customUrl") if isinstance(secondary_btn, dict) else None) or "",
                 }
                 # Extract titleStyle and subtitleStyle from theme
                 title_style_data = (data.get("titleStyle") or theme.get("titleStyle") or {})
@@ -2147,12 +2156,13 @@ async def public_get_form(form_id: str):
                 subtitle_style_data = (data.get("subtitleStyle") or theme.get("subtitleStyle") or {})
                 computed_subtitle_style = subtitle_style_data if isinstance(subtitle_style_data, dict) else {"bold": False, "italic": False, "level": 3}
                 
-                # Ensure theme.submitButton, titleStyle, subtitleStyle exist for clients that read theme
+                # Ensure theme.submitButton, secondaryButton, titleStyle, subtitleStyle exist for clients that read theme
                 try:
                     if not isinstance(theme, dict):
                         theme = {}
                     theme = dict(theme)
                     theme["submitButton"] = computed_btn
+                    theme["secondaryButton"] = computed_secondary_btn
                     theme["titleStyle"] = computed_title_style
                     theme["subtitleStyle"] = computed_subtitle_style
                     data["theme"] = theme

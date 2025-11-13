@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Request, Response, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict, Literal, Any
+from typing import Dict, Any, List, Optional, Dict, Literal, Any
 import logging
 from datetime import datetime, timezone
 import os
@@ -3355,6 +3355,19 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
 @limiter.limit("120/minute")
 async def update_theme_secondary_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
     """Persist secondary button style (enabled, label, color, textColor, action, customUrl) to Neon in forms.theme.secondaryButton."""
+    # Auth
+    uid = _verify_firebase_uid(request)
+    
+    # Verify form ownership
+    async with async_session_maker() as session:
+        result = await session.execute(
+            text("SELECT user_id FROM forms WHERE id = :fid"),
+            {"fid": form_id}
+        )
+        row = result.fetchone()
+        if not row or row[0] != uid:
+            raise HTTPException(status_code=404, detail="Form not found")
+    
     payload = payload or {}
     enabled = bool(payload.get("enabled", False))
     label = str(payload.get("label") or "").strip()

@@ -14,10 +14,12 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 
 try:
-    from .db.database import get_cursor
+    from .db.database import async_session_maker
 except ImportError:
     # Fallback for flat directory structure
-    from db.database import get_cursor
+    from db.database import async_session_maker
+
+from sqlalchemy import text
 
 # Firebase authentication
 import firebase_admin
@@ -106,19 +108,19 @@ async def store_session_recording(
         logger.info(f"Generated recording_id: {recording_id}")
         
         # Get form owner UID from database
-        async with get_cursor() as cursor:
+        async with async_session_maker() as session:
             # Get form owner
-            await cursor.execute(
-                "SELECT user_id FROM forms WHERE id = %(form_id)s",
+            result = await session.execute(
+                text("SELECT user_id FROM forms WHERE id = :form_id"),
                 {"form_id": recording_data.formId}
             )
-            form_result = await cursor.fetchone()
+            form_result = result.fetchone()
             
             if not form_result:
                 logger.error(f"Form not found: {recording_data.formId}")
                 raise HTTPException(status_code=404, detail="Form not found")
             
-            owner_uid = form_result["user_id"]
+            owner_uid = form_result[0]
             logger.info(f"Found form owner_uid: {owner_uid}")
         
         # Create R2 key with owner UID for organization
@@ -159,12 +161,12 @@ async def store_session_recording(
             
         logger.info(f"Inserting recording with form_id: {recording_data.formId}, owner_uid: {owner_uid}")
         
-        async with get_cursor(commit=True) as cursor:
-            await cursor.execute("""
+        async with async_session_maker() as session:
+            await session.execute(text("""
                 INSERT INTO session_recordings 
                 (id, form_id, owner_uid, start_time, end_time, user_agent, viewport_width, viewport_height, r2_key, created_at)
-                VALUES (%(recording_id)s, %(form_id)s, %(owner_uid)s, %(start_time)s, %(end_time)s, %(user_agent)s, %(viewport_width)s, %(viewport_height)s, %(r2_key)s, %(created_at)s)
-            """, {
+                VALUES (:recording_id, :form_id, :owner_uid, :start_time, :end_time, :user_agent, :viewport_width, :viewport_height, :r2_key, :created_at)
+            """), {
                 "recording_id": recording_id,
                 "form_id": recording_data.formId,
                 "owner_uid": owner_uid,
@@ -176,6 +178,7 @@ async def store_session_recording(
                 "r2_key": r2_key,
                 "created_at": datetime.now(timezone.utc)
             })
+            await session.commit()
         logger.info(f"Successfully stored recording metadata in DB with ID: {recording_id}")
         
         return {"success": True, "recordingId": recording_id}
@@ -205,40 +208,40 @@ async def get_session_recordings(
 ):
     """Get session recordings for a specific owner UID, optionally filtered by form."""
     try:
-        async with get_cursor() as cursor:
+        async with async_session_maker() as session:
             # Build query based on filters
             if form_id:
-                await cursor.execute("""
+                result = await session.execute(text("""
                     SELECT id, form_id, start_time, end_time, user_agent, 
                            viewport_width, viewport_height, r2_key, created_at
                     FROM session_recordings 
-                    WHERE owner_uid = %(user_uid)s AND form_id = %(form_id)s
+                    WHERE owner_uid = :user_uid AND form_id = :form_id
                     ORDER BY created_at DESC
-                """, {"user_uid": user_uid, "form_id": form_id})
+                """), {"user_uid": user_uid, "form_id": form_id})
             else:
-                await cursor.execute("""
+                result = await session.execute(text("""
                     SELECT id, form_id, start_time, end_time, user_agent, 
                            viewport_width, viewport_height, r2_key, created_at
                     FROM session_recordings 
-                    WHERE owner_uid = %(user_uid)s
+                    WHERE owner_uid = :user_uid
                     ORDER BY created_at DESC
-                """, {"user_uid": user_uid})
+                """), {"user_uid": user_uid})
             
-            rows = await cursor.fetchall()
+            rows = result.fetchall()
             recordings = []
             for row in rows:
                 recordings.append({
-                    "id": row["id"],
-                    "formId": row["form_id"],
-                    "startTime": int(row["start_time"].timestamp() * 1000) if row["start_time"] else None,
-                    "endTime": int(row["end_time"].timestamp() * 1000) if row["end_time"] else None,
-                    "userAgent": row["user_agent"],
+                    "id": row[0],
+                    "formId": row[1],
+                    "startTime": int(row[2].timestamp() * 1000) if row[2] else None,
+                    "endTime": int(row[3].timestamp() * 1000) if row[3] else None,
+                    "userAgent": row[4],
                     "viewport": {
-                        "width": row["viewport_width"],
-                        "height": row["viewport_height"]
+                        "width": row[5],
+                        "height": row[6]
                     },
-                    "r2Key": row["r2_key"],
-                    "createdAt": row["created_at"].isoformat() if row["created_at"] else None
+                    "r2Key": row[7],
+                    "createdAt": row[8].isoformat() if row[8] else None
                 })
         
         return {"recordings": recordings}

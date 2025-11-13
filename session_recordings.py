@@ -190,8 +190,8 @@ async def store_session_recording(
                     f"endTime={getattr(recording_data, 'endTime', 'MISSING')}")
         
         # Provide more specific error messages
-        if "form_id" in str(e).lower():
-            raise HTTPException(status_code=400, detail="Invalid or missing form_id parameter")
+        if "form_id" in str(e).lower() or "formid" in str(e).lower():
+            raise HTTPException(status_code=400, detail="Invalid or missing formId parameter")
         elif "owner_uid" in str(e).lower():
             raise HTTPException(status_code=400, detail="Unable to determine form owner")
         else:

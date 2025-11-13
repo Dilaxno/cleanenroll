@@ -94,6 +94,11 @@ async def store_session_recording(
     logger = logging.getLogger("session_recordings")
     
     try:
+        # Validate required fields
+        if not recording_data.formId:
+            logger.error("Missing formId in session recording request")
+            raise HTTPException(status_code=400, detail="Missing formId")
+        
         logger.info(f"Received session recording request for form_id: {recording_data.formId}")
         
         # Generate unique ID for the recording
@@ -143,6 +148,17 @@ async def store_session_recording(
         
         # Store metadata in database
         logger.info("Storing metadata in Neon DB")
+        
+        # Validate all required fields before database insertion
+        if not recording_data.formId:
+            raise HTTPException(status_code=400, detail="Missing formId")
+        if not owner_uid:
+            raise HTTPException(status_code=400, detail="Missing owner_uid")
+        if not recording_id:
+            raise HTTPException(status_code=400, detail="Missing recording_id")
+            
+        logger.info(f"Inserting recording with form_id: {recording_data.formId}, owner_uid: {owner_uid}")
+        
         async with get_cursor(commit=True) as cursor:
             await cursor.execute("""
                 INSERT INTO session_recordings 
@@ -154,9 +170,9 @@ async def store_session_recording(
                 "owner_uid": owner_uid,
                 "start_time": datetime.fromtimestamp(recording_data.startTime / 1000, timezone.utc),
                 "end_time": datetime.fromtimestamp(recording_data.endTime / 1000, timezone.utc) if recording_data.endTime else None,
-                "user_agent": recording_data.userAgent,
-                "viewport_width": recording_data.viewport.get('width'),
-                "viewport_height": recording_data.viewport.get('height'),
+                "user_agent": recording_data.userAgent or "Unknown",
+                "viewport_width": recording_data.viewport.get('width') if recording_data.viewport else None,
+                "viewport_height": recording_data.viewport.get('height') if recording_data.viewport else None,
                 "r2_key": r2_key,
                 "created_at": datetime.now(timezone.utc)
             })
@@ -169,7 +185,17 @@ async def store_session_recording(
         raise HTTPException(status_code=500, detail=f"R2 storage error: {str(e)}")
     except Exception as e:
         logger.error(f"Failed to store recording: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to store recording: {str(e)}")
+        logger.error(f"Recording data received: formId={getattr(recording_data, 'formId', 'MISSING')}, "
+                    f"startTime={getattr(recording_data, 'startTime', 'MISSING')}, "
+                    f"endTime={getattr(recording_data, 'endTime', 'MISSING')}")
+        
+        # Provide more specific error messages
+        if "form_id" in str(e).lower():
+            raise HTTPException(status_code=400, detail="Invalid or missing form_id parameter")
+        elif "owner_uid" in str(e).lower():
+            raise HTTPException(status_code=400, detail="Unable to determine form owner")
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to store recording: {str(e)}")
 
 
 @router.get("/api/session-recordings")

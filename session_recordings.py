@@ -90,23 +90,31 @@ async def store_session_recording(
     request: Request
 ):
     """Store a session recording in R2 and metadata in database."""
+    import logging
+    logger = logging.getLogger("session_recordings")
+    
     try:
+        logger.info(f"Received session recording request for form_id: {recording_data.formId}")
+        
         # Generate unique ID for the recording
         recording_id = str(uuid.uuid4())
+        logger.info(f"Generated recording_id: {recording_id}")
         
         # Get form owner UID from database
         async with get_cursor() as cursor:
             # Get form owner
             await cursor.execute(
-                "SELECT user_id FROM forms WHERE id = %s",
+                "SELECT user_id FROM forms WHERE id = %(form_id)s",
                 {"form_id": recording_data.formId}
             )
             form_result = await cursor.fetchone()
             
             if not form_result:
+                logger.error(f"Form not found: {recording_data.formId}")
                 raise HTTPException(status_code=404, detail="Form not found")
             
             owner_uid = form_result["user_id"]
+            logger.info(f"Found form owner_uid: {owner_uid}")
         
         # Create R2 key with owner UID for organization
         r2_key = f"recordings/{owner_uid}/{recording_data.formId}/{recording_id}.json"
@@ -124,14 +132,17 @@ async def store_session_recording(
         }
         
         # Store in R2
+        logger.info(f"Storing recording in R2 with key: {r2_key}")
         r2_client.put_object(
             Bucket=R2_BUCKET_NAME,
             Key=r2_key,
             Body=json.dumps(recording_payload),
             ContentType='application/json'
         )
+        logger.info("Successfully stored recording in R2")
         
         # Store metadata in database
+        logger.info("Storing metadata in Neon DB")
         async with get_cursor(commit=True) as cursor:
             await cursor.execute("""
                 INSERT INTO session_recordings 
@@ -149,12 +160,15 @@ async def store_session_recording(
                 "r2_key": r2_key,
                 "created_at": datetime.now(timezone.utc)
             })
+        logger.info(f"Successfully stored recording metadata in DB with ID: {recording_id}")
         
         return {"success": True, "recordingId": recording_id}
         
     except ClientError as e:
+        logger.error(f"R2 storage error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"R2 storage error: {str(e)}")
     except Exception as e:
+        logger.error(f"Failed to store recording: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to store recording: {str(e)}")
 
 

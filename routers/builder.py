@@ -3351,6 +3351,61 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
         await session.commit()
     return {"ok": True, "submitButton": submit_button}
 
+@router.post("/forms/{form_id}/theme/secondary-button")
+@limiter.limit("120/minute")
+async def update_theme_secondary_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
+    """Persist secondary button style (enabled, label, color, textColor, action, customUrl) to Neon in forms.theme.secondaryButton."""
+    payload = payload or {}
+    enabled = bool(payload.get("enabled", False))
+    label = str(payload.get("label") or "").strip()
+    color = str(payload.get("color") or "").strip() or None
+    text_color = str(payload.get("textColor") or "").strip() or None
+    action = str(payload.get("action") or "").strip() or None
+    custom_url = str(payload.get("customUrl") or "").strip() or None
+
+    def _is_hex(c: Optional[str]) -> bool:
+        try:
+            if not c:
+                return False
+            s = c.strip()
+            if not s.startswith("#"):
+                return False
+            h = s[1:]
+            return len(h) in (3, 6) and all(ch in "0123456789abcdefABCDEF" for ch in h)
+        except Exception:
+            return False
+
+    if color and not _is_hex(color):
+        raise HTTPException(status_code=400, detail="Invalid color hex")
+    if text_color and not _is_hex(text_color):
+        raise HTTPException(status_code=400, detail="Invalid textColor hex")
+    if action and action not in ("reset", "custom"):
+        raise HTTPException(status_code=400, detail="Action must be 'reset' or 'custom'")
+
+    secondary_button = {k: v for k, v in {
+        "enabled": enabled,
+        "label": label or None,
+        "color": color,
+        "textColor": text_color,
+        "action": action,
+        "customUrl": custom_url,
+    }.items() if v is not None}
+
+    async with async_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE forms
+                SET theme = jsonb_set(COALESCE(theme, '{}'::jsonb), '{secondaryButton}', CAST(:btn AS JSONB), true),
+                    updated_at = NOW()
+                WHERE id = :fid
+                """
+            ),
+            {"fid": form_id, "btn": json.dumps(secondary_button or {})},
+        )
+        await session.commit()
+    return {"ok": True, "secondaryButton": secondary_button}
+
 @router.post("/forms/{form_id}/auto-reply/config")
 @limiter.limit("60/minute")
 async def set_auto_reply_config(form_id: str, request: Request, payload: Dict[str, Any] | None = None):

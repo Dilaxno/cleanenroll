@@ -3339,11 +3339,17 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="borderRadius must be an integer")
 
+    # Extract position from payload
+    position = str(payload.get("position") or "").strip() or None
+    if position and position not in ["left", "center", "right"]:
+        position = None
+
     submit_button = {k: v for k, v in {
         "label": label or None,
         "color": color,
         "textColor": text_color,
         "borderRadius": border_radius,
+        "position": position,
     }.items() if v is not None}
 
     async with async_session_maker() as session:

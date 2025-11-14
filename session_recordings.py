@@ -246,10 +246,12 @@ async def get_session_recording_data(
     """Get the full recording data from R2 for playback."""
     try:
         async with async_session_maker() as session:
-            # Get recording metadata and verify ownership
+            # Get recording metadata and verify ownership, also fetch form name
             result = await session.execute(
-                text("""SELECT r2_key FROM session_recordings 
-                     WHERE id = :recording_id AND owner_uid = :user_uid"""),
+                text("""SELECT sr.r2_key, f.title, f.name 
+                     FROM session_recordings sr
+                     LEFT JOIN forms f ON sr.form_id = f.id
+                     WHERE sr.id = :recording_id AND sr.owner_uid = :user_uid"""),
                 {"recording_id": recording_id, "user_uid": user_uid}
             )
             
@@ -258,11 +260,18 @@ async def get_session_recording_data(
                 raise HTTPException(status_code=404, detail="Recording not found")
             
             r2_key = row[0]
+            form_title = row[1]
+            form_name = row[2]
+            # Use title if available, otherwise fall back to name
+            form_display_name = form_title or form_name or "Unknown Form"
         
         # Fetch from R2
         s3 = _r2_client()
         response = s3.get_object(Bucket=R2_BUCKET, Key=r2_key)
         recording_data = json.loads(response['Body'].read())
+        
+        # Add form name to the response
+        recording_data['formName'] = form_display_name
         
         return recording_data
         
@@ -314,3 +323,71 @@ async def delete_session_recording(
         raise HTTPException(status_code=500, detail=f"R2 deletion error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete recording: {str(e)}")
+
+
+class BatchDeleteRequest(BaseModel):
+    recording_ids: List[str] = Field(..., description="List of recording IDs to delete")
+
+
+@router.post("/api/session-recordings/batch-delete")
+async def batch_delete_session_recordings(
+    request: BatchDeleteRequest,
+    user_uid: str = Depends(get_current_user_uid)
+):
+    """Delete multiple session recordings from both R2 and database."""
+    if not request.recording_ids:
+        raise HTTPException(status_code=400, detail="No recording IDs provided")
+    
+    deleted_count = 0
+    failed_count = 0
+    errors = []
+    
+    try:
+        async with async_session_maker() as session:
+            # Get all recording metadata and verify ownership
+            placeholders = ",".join([f":id_{i}" for i in range(len(request.recording_ids))])
+            params = {f"id_{i}": recording_id for i, recording_id in enumerate(request.recording_ids)}
+            params["user_uid"] = user_uid
+            
+            result = await session.execute(
+                text(f"""SELECT id, r2_key FROM session_recordings 
+                     WHERE id IN ({placeholders}) AND owner_uid = :user_uid"""),
+                params
+            )
+            
+            recordings = result.fetchall()
+            
+            if not recordings:
+                raise HTTPException(status_code=404, detail="No recordings found")
+            
+            # Delete from R2
+            s3 = _r2_client()
+            for row in recordings:
+                recording_id = row[0]
+                r2_key = row[1]
+                try:
+                    s3.delete_object(Bucket=R2_BUCKET, Key=r2_key)
+                    deleted_count += 1
+                except Exception as e:
+                    failed_count += 1
+                    errors.append(f"Failed to delete R2 object for {recording_id}: {str(e)}")
+            
+            # Delete from database (all at once)
+            await session.execute(
+                text(f"""DELETE FROM session_recordings 
+                     WHERE id IN ({placeholders}) AND owner_uid = :user_uid"""),
+                params
+            )
+            await session.commit()
+        
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "failed_count": failed_count,
+            "errors": errors if errors else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete recordings: {str(e)}")

@@ -651,6 +651,7 @@ class SubmitButton(BaseModel):
     label: str = "Submit"
     color: str = "#3b82f6"
     textColor: str = "#ffffff"
+    position: str = "left"
     borderRadius: int = 6
 
 
@@ -2212,6 +2213,7 @@ async def public_get_form(form_id: str):
                     "color": (btn.get("color") if isinstance(btn, dict) else None) or primary,
                     "textColor": (btn.get("textColor") if isinstance(btn, dict) else None) or "#ffffff",
                     "borderRadius": (btn.get("borderRadius") if isinstance(btn, dict) else None) or 6,
+                    "position": (btn.get("position") if isinstance(btn, dict) else None) or "left",
                 }
                 computed_secondary_btn = {
                     "enabled": (secondary_btn.get("enabled") if isinstance(secondary_btn, dict) else None) or False,
@@ -3380,7 +3382,7 @@ async def update_theme_page_bg(request: Request, form_id: str, payload: Dict[str
 @router.post("/forms/{form_id}/theme/submit-button")
 @limiter.limit("120/minute")
 async def update_theme_submit_button(request: Request, form_id: str, payload: Dict[str, Any] | None = None):
-    """Persist submit button style (label, color, textColor, borderRadius) to Neon in forms.theme.submitButton."""
+    """Persist submit button style (label, color, textColor, borderRadius, position) to Neon in forms.theme.submitButton."""
     payload = payload or {}
     label = str(payload.get("label") or "").strip()
     color = str(payload.get("color") or "").strip() or None
@@ -3412,9 +3414,9 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
             raise HTTPException(status_code=400, detail="borderRadius must be an integer")
 
     # Extract position from payload
-    position = str(payload.get("position") or "").strip() or None
-    if position and position not in ["left", "center", "right"]:
-        position = None
+    position = str(payload.get("position") or "").strip() or "left"
+    if position not in ["left", "center", "right"]:
+        position = "left"
 
     submit_button = {k: v for k, v in {
         "label": label or None,
@@ -3423,6 +3425,10 @@ async def update_theme_submit_button(request: Request, form_id: str, payload: Di
         "borderRadius": border_radius,
         "position": position,
     }.items() if v is not None}
+    
+    # Always include position even if it's the default
+    if "position" not in submit_button:
+        submit_button["position"] = "left"
 
     async with async_session_maker() as session:
         await session.execute(

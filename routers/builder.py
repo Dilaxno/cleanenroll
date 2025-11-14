@@ -1937,9 +1937,19 @@ async def list_form_sessions(form_id: str, request: Request):
     """List session recordings for a form owned by the authenticated user.
     Returns: { sessions: [{ id, startedAt, durationMs, country, userAgent, chunks, ... }] }
     """
+    import logging
+    logger = logging.getLogger("backend.builder")
+    
     try:
+        # Debug: Log the incoming request headers
+        auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+        logger.info(f"Sessions endpoint called for form {form_id}, auth header present: {bool(auth_header)}")
+        if auth_header:
+            logger.info(f"Auth header format: {auth_header[:20]}...")
+        
         # Get authenticated user
         uid = _verify_firebase_uid(request)
+        logger.info(f"Successfully authenticated user: {uid}")
         if not uid:
             raise HTTPException(status_code=401, detail="Authentication required")
         
@@ -5321,21 +5331,39 @@ async def list_responses(
 # -----------------------------
 
 def _verify_firebase_uid(request: Request) -> str:
+    import logging
+    logger = logging.getLogger("backend.builder")
+    
     try:
         from firebase_admin import auth as _admin_auth  # type: ignore
-    except Exception:
+    except Exception as e:
+        logger.error(f"Firebase Admin not available: {e}")
         raise HTTPException(status_code=500, detail="Firebase Admin not available on server")
+    
     authz = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not authz or not authz.lower().startswith("bearer "):
+    logger.info(f"Auth header received: {bool(authz)}")
+    
+    if not authz:
+        logger.warning("No authorization header found")
         raise HTTPException(status_code=401, detail="Missing Authorization token")
+    
+    if not authz.lower().startswith("bearer "):
+        logger.warning(f"Invalid auth header format: {authz[:20]}...")
+        raise HTTPException(status_code=401, detail="Missing Authorization token")
+    
     token = authz.split(" ", 1)[1].strip()
+    logger.info(f"Extracted token length: {len(token)}")
+    
     try:
         decoded = _admin_auth.verify_id_token(token)
         uid = decoded.get("uid")
         if not uid:
+            logger.error("Token decoded but no UID found")
             raise HTTPException(status_code=401, detail="Invalid token")
+        logger.info(f"Successfully verified Firebase token for UID: {uid}")
         return uid
-    except Exception:
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
         raise HTTPException(status_code=401, detail="Invalid token")
 
 

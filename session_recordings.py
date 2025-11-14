@@ -47,32 +47,8 @@ async def get_current_user_uid(authorization: str = Header(None)) -> str:
         )
 
 
-# R2 Configuration (Cloudflare R2)
-import os
-R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "https://your-account-id.r2.cloudflarestorage.com")
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "your-r2-access-key")
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "your-r2-secret-key")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "cleanenroll-session-recordings")
-
-# Initialize R2 client
-r2_client = boto3.client(
-    's3',
-    endpoint_url=R2_ENDPOINT_URL,
-    aws_access_key_id=R2_ACCESS_KEY_ID,
-    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-    region_name='auto',
-    config=boto3.session.Config(
-        signature_version='s3v4',
-        s3={
-            'addressing_style': 'path'
-        },
-        retries={
-            'max_attempts': 3,
-            'mode': 'adaptive'
-        }
-    ),
-    verify=True  # Ensure SSL verification is enabled
-)
+# Use the same R2 configuration as other uploads (backgrounds, images, etc.)
+from routers.builder import _r2_client, R2_BUCKET
 
 router = APIRouter()
 
@@ -151,8 +127,9 @@ async def store_session_recording(
         
         # Store in R2
         logger.info(f"Storing recording in R2 with key: {r2_key}")
-        r2_client.put_object(
-            Bucket=R2_BUCKET_NAME,
+        s3 = _r2_client()
+        s3.put_object(
+            Bucket=R2_BUCKET,
             Key=r2_key,
             Body=json.dumps(recording_payload),
             ContentType='application/json'
@@ -282,7 +259,8 @@ async def get_session_recording_data(
             r2_key = result["r2_key"]
         
         # Fetch from R2
-        response = r2_client.get_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
+        s3 = _r2_client()
+        response = s3.get_object(Bucket=R2_BUCKET, Key=r2_key)
         recording_data = json.loads(response['Body'].read())
         
         return recording_data
@@ -316,7 +294,8 @@ async def delete_session_recording(
             r2_key = result["r2_key"]
         
         # Delete from R2
-        r2_client.delete_object(Bucket=R2_BUCKET_NAME, Key=r2_key)
+        s3 = _r2_client()
+        s3.delete_object(Bucket=R2_BUCKET, Key=r2_key)
         
         # Delete from database
         async with get_cursor(commit=True) as cursor:

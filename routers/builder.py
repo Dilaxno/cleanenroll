@@ -1956,11 +1956,11 @@ async def list_form_sessions(form_id: str, request: Request):
         # Verify form ownership
         async with async_session_maker() as session:
             form_result = await session.execute(text("""
-                SELECT owner_uid FROM forms WHERE id = :form_id
+                SELECT user_id FROM forms WHERE id = :form_id
             """), {"form_id": form_id})
             form_row = form_result.fetchone()
             
-            if not form_row or form_row.owner_uid != uid:
+            if not form_row or form_row.user_id != uid:
                 raise HTTPException(status_code=404, detail="Form not found or access denied")
             
             # Get session recordings

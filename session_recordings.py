@@ -110,6 +110,50 @@ async def store_session_recording(
             owner_uid = form_result[0]
             logger.info(f"Found form owner_uid: {owner_uid}")
         
+        # Check recording limits for free users
+        async with async_session_maker() as session:
+            # Auto-reset counter if month has passed
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET recordings_this_month = 0,
+                        recording_limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
+                    WHERE uid = :uid 
+                      AND recording_limit_reset_date <= CURRENT_TIMESTAMP
+                """),
+                {"uid": owner_uid}
+            )
+            await session.commit()
+            
+            # Get current usage and check limits
+            result = await session.execute(
+                text("""
+                    SELECT recordings_this_month, recordings_limit, plan
+                    FROM users
+                    WHERE uid = :uid
+                """),
+                {"uid": owner_uid}
+            )
+            user_data = result.fetchone()
+            
+            if not user_data:
+                logger.error(f"User not found: {owner_uid}")
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            recordings_used = int(user_data[0] or 0)
+            recordings_limit = int(user_data[1] or 10)
+            user_plan = user_data[2] or "free"
+            
+            # Check if user is on free plan and has exceeded limit
+            is_pro = user_plan.lower() in ["pro", "business", "enterprise"]
+            
+            if not is_pro and recordings_used >= recordings_limit:
+                logger.warning(f"Recording limit reached for user {owner_uid}: {recordings_used}/{recordings_limit}")
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Monthly recording limit reached ({recordings_limit} recordings). Upgrade to Pro for 100 recordings per month."
+                )
+        
         # Create R2 key with owner UID for organization
         r2_key = f"recordings/{owner_uid}/{recording_data.formId}/{recording_id}.json"
         
@@ -169,6 +213,19 @@ async def store_session_recording(
             await session.commit()
         logger.info(f"Successfully stored recording metadata in DB with ID: {recording_id}")
         
+        # Increment recording counter for the user
+        async with async_session_maker() as session:
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET recordings_this_month = recordings_this_month + 1
+                    WHERE uid = :uid
+                """),
+                {"uid": owner_uid}
+            )
+            await session.commit()
+        logger.info(f"Incremented recording counter for user {owner_uid}")
+        
         return {"success": True, "recordingId": recording_id}
         
     except ClientError as e:
@@ -187,6 +244,65 @@ async def store_session_recording(
             raise HTTPException(status_code=400, detail="Unable to determine form owner")
         else:
             raise HTTPException(status_code=500, detail=f"Failed to store recording: {str(e)}")
+
+
+@router.get("/api/session-recordings/usage")
+async def get_recording_usage(
+    user_uid: str = Depends(get_current_user_uid)
+):
+    """Get the user's current monthly recording usage and limit.
+    Response: { "used": int, "limit": int, "resetDate": str, "isPro": bool }
+    """
+    try:
+        async with async_session_maker() as session:
+            # Auto-reset counter if month has passed
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET recordings_this_month = 0,
+                        recording_limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
+                    WHERE uid = :uid 
+                      AND recording_limit_reset_date <= CURRENT_TIMESTAMP
+                """),
+                {"uid": user_uid}
+            )
+            await session.commit()
+            
+            # Get current usage
+            result = await session.execute(
+                text("""
+                    SELECT recordings_this_month, recordings_limit, recording_limit_reset_date, plan
+                    FROM users
+                    WHERE uid = :uid
+                """),
+                {"uid": user_uid}
+            )
+            row = result.fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            used = int(row[0] or 0)
+            limit = int(row[1] or 10)
+            reset_date = row[2]
+            user_plan = row[3] or "free"
+            
+            is_pro = user_plan.lower() in ["pro", "business", "enterprise"]
+            
+            # Pro users have 100 recordings limit
+            if is_pro:
+                limit = 100
+            
+            return {
+                "used": used,
+                "limit": limit,
+                "resetDate": reset_date.isoformat() if reset_date else None,
+                "isPro": is_pro
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get recording usage: {str(e)}")
 
 
 @router.get("/api/session-recordings")

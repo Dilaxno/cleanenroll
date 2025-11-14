@@ -1932,6 +1932,68 @@ async def upsert_abandon(request: Request, payload: Dict[str, Any] | None = None
         logger.exception("upsert_abandon failed form_id=%s session_id=%s error=%s", form_id, session_id, str(e))
         raise HTTPException(status_code=500, detail="Failed to save progress")
 
+@router.get("/forms/{form_id}/sessions")
+async def list_form_sessions(form_id: str, request: Request):
+    """List session recordings for a form owned by the authenticated user.
+    Returns: { sessions: [{ id, startedAt, durationMs, country, userAgent, chunks, ... }] }
+    """
+    try:
+        # Get authenticated user
+        uid = _verify_firebase_uid(request)
+        if not uid:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # Verify form ownership
+        async with async_session_maker() as session:
+            form_result = await session.execute(text("""
+                SELECT owner_uid FROM forms WHERE id = :form_id
+            """), {"form_id": form_id})
+            form_row = form_result.fetchone()
+            
+            if not form_row or form_row.owner_uid != uid:
+                raise HTTPException(status_code=404, detail="Form not found or access denied")
+            
+            # Get session recordings
+            result = await session.execute(text("""
+                SELECT id, start_time, end_time, user_agent, viewport_width, viewport_height, 
+                       r2_key, created_at
+                FROM session_recordings 
+                WHERE form_id = :form_id AND owner_uid = :uid
+                ORDER BY created_at DESC
+            """), {"form_id": form_id, "uid": uid})
+            
+            rows = result.fetchall()
+            sessions = []
+            for row in rows:
+                # Calculate duration in milliseconds
+                duration_ms = 0
+                if row.start_time and row.end_time:
+                    duration_ms = int((row.end_time - row.start_time).total_seconds() * 1000)
+                
+                sessions.append({
+                    "id": row.id,
+                    "startedAt": row.start_time.isoformat() if row.start_time else None,
+                    "started_at": row.start_time.isoformat() if row.start_time else None,  # Alternative format
+                    "durationMs": duration_ms,
+                    "duration_ms": duration_ms,  # Alternative format
+                    "country": "",  # Will be enriched by frontend from submissions
+                    "userAgent": row.user_agent or "",
+                    "user_agent": row.user_agent or "",  # Alternative format
+                    "chunks": 1,  # Default to 1 chunk per recording
+                    "viewportWidth": row.viewport_width,
+                    "viewportHeight": row.viewport_height,
+                    "r2Key": row.r2_key,
+                    "createdAt": row.created_at.isoformat() if row.created_at else None
+                })
+            
+            return {"sessions": sessions}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("list sessions failed form_id=%s", form_id)
+        raise HTTPException(status_code=500, detail=f"Failed to list session recordings: {e}")
+
 @router.get("/forms/{form_id}/abandons")
 async def list_form_abandons(form_id: str, limit: int = 100):
     """List abandoned sessions for a form.

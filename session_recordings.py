@@ -5,6 +5,8 @@ Handles R2 storage and retrieval of session data by owner UID.
 
 import json
 import uuid
+import os
+import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -14,10 +16,51 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 
 try:
+    from utils.email import render_email, send_email_html
+except ImportError:
+    from ..utils.email import render_email, send_email_html
+
+logger = logging.getLogger(__name__)
+
+try:
     from .db.database import async_session_maker
 except ImportError:
     # Fallback for flat directory structure
     from db.database import async_session_maker
+
+
+async def _send_recording_limit_email(user_email: str, user_name: str, limit: int, is_pro: bool):
+    """Send email notification when user reaches their monthly recording limit."""
+    try:
+        plan_name = "Pro" if is_pro else "Free"
+        subject = f"Recording Limit Reached - {limit} recordings/month"
+        
+        content_html = f"""
+        <p style="margin: 0 0 16px 0;">You've reached your monthly session recording limit of <strong>{limit} recordings</strong> on your {plan_name} plan.</p>
+        
+        <p style="margin: 0 0 16px 0;">Your recording limit will reset at the beginning of next month. Until then, new form sessions will not be recorded.</p>
+        """
+        
+        if not is_pro:
+            content_html += """
+            <p style="margin: 0 0 16px 0;">Want more recordings? Upgrade to Pro and get <strong>100 recordings per month</strong>!</p>
+            """
+        
+        html = render_email({
+            'subject': subject,
+            'preheader': f'You\'ve used all {limit} session recordings this month',
+            'title': '📹 Recording Limit Reached',
+            'intro': f'Hi {user_name},',
+            'content_html': content_html,
+            'cta_url': 'https://cleanenroll.com/billing' if not is_pro else None,
+            'cta_label': 'Upgrade to Pro' if not is_pro else None,
+            'year': datetime.now().year,
+        })
+        
+        send_email_html(user_email, subject, html)
+        logger.info(f"Recording limit email sent to {user_email}")
+    except Exception as e:
+        logger.error(f"Failed to send recording limit email: {str(e)}")
 
 from sqlalchemy import text
 
@@ -244,6 +287,80 @@ async def store_session_recording(
             raise HTTPException(status_code=400, detail="Unable to determine form owner")
         else:
             raise HTTPException(status_code=500, detail=f"Failed to store recording: {str(e)}")
+
+
+@router.get("/api/session-recordings/can-record")
+async def can_start_recording(
+    user_uid: str = Depends(get_current_user_uid)
+):
+    """Check if user can start a new recording based on their monthly limit.
+    Response: { "canRecord": bool, "used": int, "limit": int, "reason": str }
+    """
+    try:
+        async with async_session_maker() as session:
+            # Auto-reset counter if month has passed
+            await session.execute(
+                text("""
+                    UPDATE users 
+                    SET recordings_this_month = 0,
+                        recording_limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
+                    WHERE uid = :uid 
+                      AND recording_limit_reset_date <= CURRENT_TIMESTAMP
+                """),
+                {"uid": user_uid}
+            )
+            await session.commit()
+            
+            # Get current usage and user info
+            result = await session.execute(
+                text("""
+                    SELECT recordings_this_month, recordings_limit, plan, email, first_name
+                    FROM users
+                    WHERE uid = :uid
+                """),
+                {"uid": user_uid}
+            )
+            row = result.fetchone()
+            
+            if not row:
+                return {"canRecord": False, "used": 0, "limit": 0, "reason": "User not found"}
+            
+            used = int(row[0] or 0)
+            limit = int(row[1] or 10)
+            user_plan = row[2] or "free"
+            user_email = row[3]
+            user_name = row[4] or "there"
+            
+            is_pro = user_plan.lower() in ["pro", "business", "enterprise"]
+            
+            # Pro users have 100 recordings limit
+            if is_pro:
+                limit = 100
+            
+            # Check if limit is reached
+            if used >= limit:
+                # Send email notification (async, don't wait)
+                if user_email:
+                    try:
+                        await _send_recording_limit_email(user_email, user_name, limit, is_pro)
+                    except Exception as e:
+                        logger.error(f"Failed to send limit email: {e}")
+                
+                return {
+                    "canRecord": False,
+                    "used": used,
+                    "limit": limit,
+                    "reason": f"Monthly recording limit of {limit} reached. {'Contact support for higher limits.' if is_pro else 'Upgrade to Pro for 100 recordings/month.'}"
+                }
+            
+            return {
+                "canRecord": True,
+                "used": used,
+                "limit": limit,
+                "reason": ""
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check recording limit: {str(e)}")
 
 
 @router.get("/api/session-recordings/usage")

@@ -245,18 +245,19 @@ async def get_session_recording_data(
 ):
     """Get the full recording data from R2 for playback."""
     try:
-        async with get_cursor() as cursor:
+        async with async_session_maker() as session:
             # Get recording metadata and verify ownership
-            await cursor.execute("""
-                SELECT r2_key FROM session_recordings 
-                WHERE id = %(recording_id)s AND owner_uid = %(user_uid)s
-            """, {"recording_id": recording_id, "user_uid": user_uid})
+            result = await session.execute(
+                text("""SELECT r2_key FROM session_recordings 
+                     WHERE id = :recording_id AND owner_uid = :user_uid"""),
+                {"recording_id": recording_id, "user_uid": user_uid}
+            )
             
-            result = await cursor.fetchone()
-            if not result:
+            row = result.fetchone()
+            if not row:
                 raise HTTPException(status_code=404, detail="Recording not found")
             
-            r2_key = result["r2_key"]
+            r2_key = row[0]
         
         # Fetch from R2
         s3 = _r2_client()
@@ -280,29 +281,32 @@ async def delete_session_recording(
 ):
     """Delete a session recording from both R2 and database."""
     try:
-        async with get_cursor() as cursor:
+        async with async_session_maker() as session:
             # Get recording metadata and verify ownership
-            await cursor.execute("""
-                SELECT r2_key FROM session_recordings 
-                WHERE id = %(recording_id)s AND owner_uid = %(user_uid)s
-            """, {"recording_id": recording_id, "user_uid": user_uid})
+            result = await session.execute(
+                text("""SELECT r2_key FROM session_recordings 
+                     WHERE id = :recording_id AND owner_uid = :user_uid"""),
+                {"recording_id": recording_id, "user_uid": user_uid}
+            )
             
-            result = await cursor.fetchone()
-            if not result:
+            row = result.fetchone()
+            if not row:
                 raise HTTPException(status_code=404, detail="Recording not found")
             
-            r2_key = result["r2_key"]
+            r2_key = row[0]
         
         # Delete from R2
         s3 = _r2_client()
         s3.delete_object(Bucket=R2_BUCKET, Key=r2_key)
         
         # Delete from database
-        async with get_cursor(commit=True) as cursor:
-            await cursor.execute("""
-                DELETE FROM session_recordings 
-                WHERE id = %(recording_id)s AND owner_uid = %(user_uid)s
-            """, {"recording_id": recording_id, "user_uid": user_uid})
+        async with async_session_maker() as session:
+            await session.execute(
+                text("""DELETE FROM session_recordings 
+                     WHERE id = :recording_id AND owner_uid = :user_uid"""),
+                {"recording_id": recording_id, "user_uid": user_uid}
+            )
+            await session.commit()
         
         return {"success": True}
         

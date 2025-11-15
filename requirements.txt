@@ -54,3 +54,6 @@ validators>=0.22.0
 publicsuffixlist>=0.10.0
 pyshorteners>=1.0.1
 # Cloudmersive virus scanning API (uses requests library already included)
+
+# Dodo Payments official Python SDK
+dodopayments

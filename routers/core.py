@@ -268,7 +268,87 @@ async def get_user_info(request: Request, userId: str = Query(..., description="
 class UpdateUserProfileRequest(BaseModel):
     displayName: Optional[str] = None
     photoURL: Optional[str] = None
+    bannerImageUrl: Optional[str] = None
+    tagline: Optional[str] = None
     email: Optional[EmailStr] = None
+
+
+@router.get("/api/user/public-profile")
+@limiter.limit("100/minute")
+async def get_public_profile(request: Request, userId: str = Query(..., description="User ID")):
+    """Get public user profile with published forms for profile page"""
+    if not userId:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if async_session_maker is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    
+    async with async_session_maker() as session:
+        from sqlalchemy import text as _text  # type: ignore
+        try:
+            # Fetch user profile
+            user_query = _text("""
+                SELECT uid, email, display_name, photo_url, banner_image_url, tagline, plan, created_at
+                FROM users
+                WHERE uid = :uid
+            """)
+            user_result = await session.execute(user_query, {"uid": userId})
+            user_row = user_result.fetchone()
+            
+            if not user_row:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            user_data = {
+                "uid": user_row.uid,
+                "email": user_row.email,
+                "displayName": user_row.display_name,
+                "photoURL": user_row.photo_url,
+                "bannerImageUrl": user_row.banner_image_url,
+                "tagline": user_row.tagline,
+                "plan": user_row.plan,
+                "createdAt": user_row.created_at.isoformat() if user_row.created_at else None
+            }
+            
+            # Fetch published forms
+            forms_query = _text("""
+                SELECT id, name, description, is_published, views, created_at
+                FROM forms
+                WHERE owner_id = :owner_id AND is_published = TRUE
+                ORDER BY created_at DESC
+            """)
+            forms_result = await session.execute(forms_query, {"owner_id": userId})
+            forms_rows = forms_result.fetchall()
+            
+            # Get submission counts for each form
+            forms_list = []
+            for form_row in forms_rows:
+                submissions_query = _text("""
+                    SELECT COUNT(*) as count
+                    FROM submissions
+                    WHERE form_id = :form_id
+                """)
+                sub_result = await session.execute(submissions_query, {"form_id": form_row.id})
+                sub_count = sub_result.fetchone().count if sub_result else 0
+                
+                forms_list.append({
+                    "id": form_row.id,
+                    "name": form_row.name,
+                    "description": form_row.description,
+                    "isPublished": form_row.is_published,
+                    "views": form_row.views or 0,
+                    "submissions": sub_count,
+                    "createdAt": form_row.created_at.isoformat() if form_row.created_at else None
+                })
+            
+            return {
+                "user": user_data,
+                "forms": forms_list,
+                "totalForms": len(forms_list)
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching public profile: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/user/profile")
@@ -292,6 +372,14 @@ async def update_user_profile(request: Request, userId: str = Query(..., descrip
     if req.photoURL is not None:
         updates.append("photo_url = :photo_url")
         params["photo_url"] = req.photoURL.strip() if req.photoURL else None
+    
+    if req.bannerImageUrl is not None:
+        updates.append("banner_image_url = :banner_image_url")
+        params["banner_image_url"] = req.bannerImageUrl.strip() if req.bannerImageUrl else None
+    
+    if req.tagline is not None:
+        updates.append("tagline = :tagline")
+        params["tagline"] = req.tagline.strip() if req.tagline else None
     
     if req.email is not None:
         updates.append("email = :email")

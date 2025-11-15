@@ -43,6 +43,21 @@ except Exception:
 
 # Firestore removed - all user data now stored in Neon database
 
+# Dodo Payments Python SDK (async)
+try:
+    from dodopayments import AsyncDodoPayments  # type: ignore
+    _DODO_SDK_AVAILABLE = True
+except Exception:
+    AsyncDodoPayments = None  # type: ignore
+    _DODO_SDK_AVAILABLE = False
+
+def _dodo_environment() -> str:
+    """Return 'test_mode' or 'live_mode' based on env flags."""
+    env = (os.getenv("DODO_ENV") or os.getenv("DODO_ENVIRONMENT") or "test_mode").strip().lower()
+    if env in ("live", "live_mode", "production", "prod"):
+        return "live_mode"
+    return "test_mode"
+
 
 def _verify_id_token_from_header(request: Request) -> Optional[str]:
     """Verify Firebase ID token from Authorization: Bearer <token>. Return uid or None.
@@ -456,6 +471,243 @@ async def create_dodo_dynamic_session(request: Request, payload: Dict):
         logger.exception("[dodo-session] request failed")
         raise HTTPException(status_code=502, detail="Checkout provider error")
 
+@router.post("/dodo/form-checkout")
+async def dodo_form_checkout(payload: Dict):
+    """
+    Create a hosted checkout session for a form submission using a pay_what_you_want product.
+    Requirements:
+    - Env DODO_PWYW_PRODUCT_ID (or DODO_PRODUCT_ID) is a one-time price product with pay_what_you_want enabled.
+    - Currency amounts are in the lowest denomination (e.g., cents for USD).
+    Body:
+    {
+      "form_id": "form_123",              // recommended
+      "submission_id": "sub_abc",         // recommended
+      "owner_id": "uid_123",              // optional; resolved from DB if omitted
+      "amount_cents": 2500,               // required, > 0
+      "currency": "USD",                  // optional, defaults to USD
+      "customer": { "email": "...", "name": "..." }, // optional
+      "return_url": "https://...",        // optional (falls back to env)
+      "allowed_payment_method_types": ["credit","debit","apple_pay","google_pay"] // optional
+    }
+    Response: { id, url, payment_status }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    # Validate amount (smallest unit)
+    try:
+        amount_cents = int(payload.get("amount_cents"))
+    except Exception:
+        amount_cents = 0
+    if amount_cents <= 0:
+        raise HTTPException(status_code=400, detail="Invalid amount_cents")
+
+    # Identify the context
+    form_id = (payload.get("form_id") or payload.get("formId") or "").strip()
+    submission_id = (payload.get("submission_id") or payload.get("submissionId") or "").strip()
+    owner_id = (payload.get("owner_id") or payload.get("ownerId") or "").strip()
+    if not form_id and not submission_id:
+        raise HTTPException(status_code=400, detail="Provide form_id or submission_id")
+
+    currency = (payload.get("currency") or "USD").upper().strip()
+
+    # Checkout customization
+    theme = (os.getenv("DODO_CHECKOUT_THEME") or "dark").strip().lower()
+    if theme not in ("dark", "light", "system"):
+        theme = "dark"
+
+    return_url = (payload.get("return_url") or os.getenv("RETURN_URL") or os.getenv("CHECKOUT_REDIRECT_URL") or "").strip()
+
+    # Customer (optional)
+    customer = payload.get("customer") or {}
+    customer_email = (customer.get("email") or "").strip() if isinstance(customer, dict) else ""
+    customer_name = (customer.get("name") or "").strip() if isinstance(customer, dict) else ""
+
+    # Pay-what-you-want product
+    pwyw_product_id = os.getenv("DODO_PWYW_PRODUCT_ID") or os.getenv("DODO_PRODUCT_ID") or ""
+    if not pwyw_product_id:
+        raise HTTPException(status_code=500, detail="Payments not configured (DODO_PWYW_PRODUCT_ID missing)")
+
+    # Payment methods (ensure credit & debit fallback)
+    allowed_methods = payload.get("allowed_payment_method_types") or ["credit", "debit", "apple_pay", "google_pay"]
+    if "credit" not in allowed_methods:
+        allowed_methods.append("credit")
+    if "debit" not in allowed_methods:
+        allowed_methods.append("debit")
+
+    token = os.getenv("DODO_PAYMENTS_API_KEY") or os.getenv("DODO_API_KEY")
+    if not (_DODO_SDK_AVAILABLE and token):
+        raise HTTPException(status_code=500, detail="Payments SDK unavailable or API key missing")
+
+    try:
+        # Use official SDK (Context7 reference: https://github.com/dodopayments/dodopayments-python)
+        async with AsyncDodoPayments(bearer_token=token, environment=_dodo_environment()) as client:  # type: ignore
+            req = {
+                "product_cart": [
+                    {
+                        "product_id": pwyw_product_id,
+                        "quantity": 1,
+                        # amount is respected when pay_what_you_want is enabled for one-time product
+                        "amount": amount_cents,
+                    }
+                ],
+                "billing_currency": currency,
+                "allowed_payment_method_types": allowed_methods,
+                "metadata": {
+                    "owner_id": owner_id,
+                    "form_id": form_id,
+                    "submission_id": submission_id,
+                },
+                "return_url": return_url,
+                "customization": {
+                    "theme": theme,
+                    "show_order_details": True,
+                    "show_on_demand_tag": False,
+                },
+                "show_saved_payment_methods": False,
+                "confirm": False,
+            }
+            if customer_email:
+                req["customer"] = {"email": customer_email, **({"name": customer_name} if customer_name else {})}
+
+            session = await client.checkout_sessions.create(**req)  # type: ignore[arg-type]
+            # Extract common fields safely for redirect
+            session_id = getattr(session, "id", None) or getattr(session, "session_id", None) or None
+            session_url = getattr(session, "url", None) or None
+            payment_status = getattr(session, "payment_status", None) or None
+            return {"id": session_id, "url": session_url, "payment_status": payment_status}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("[dodo-form-checkout] failed to create checkout session")
+        raise HTTPException(status_code=502, detail="Checkout provider error")
+
+async def _record_owner_transaction(data: Dict, event_type: str) -> None:
+    """
+    Upsert a one-time payment into owner_transactions for the Earnings dashboard.
+    Assumes amounts in the smallest currency unit (e.g., cents for USD).
+    """
+    try:
+        meta = data.get("metadata") or {}
+        form_id = meta.get("form_id") or meta.get("formId")
+        submission_id = meta.get("submission_id") or meta.get("submissionId")
+
+        # Identify payment fields
+        payment_id = data.get("payment_id") or data.get("id")
+        status = "succeeded" if event_type == "payment.succeeded" else "failed"
+        currency = (data.get("currency") or "USD").upper()
+
+        # Amounts
+        total_amount = None
+        for k in ("total_amount", "amount", "amount_cents", "total"):
+            v = data.get(k)
+            if isinstance(v, (int, float)):
+                total_amount = int(v)
+                break
+        total_amount = int(total_amount or 0)
+
+        fee_amount = 0
+        fees = data.get("fees")
+        if isinstance(fees, dict):
+            fv = fees.get("total") or fees.get("fee_amount")
+            if isinstance(fv, (int, float)):
+                fee_amount = int(fv)
+        elif isinstance(data.get("fee"), (int, float)):
+            fee_amount = int(data.get("fee"))
+        net_amount = max(total_amount - fee_amount, 0)
+
+        # Customer email
+        customer_email = None
+        cust = data.get("customer") or {}
+        if isinstance(cust, dict):
+            ce = cust.get("email")
+            if isinstance(ce, str):
+                customer_email = ce
+        if not customer_email and isinstance(data.get("customer_email"), str):
+            customer_email = data.get("customer_email")
+
+        # Payment method type
+        payment_method_type = data.get("payment_method_type")
+        if not payment_method_type:
+            pm = data.get("payment_method") or {}
+            if isinstance(pm, dict):
+                payment_method_type = pm.get("type")
+
+        if not payment_id:
+            logger.warning("[owner_txn] missing payment_id; skipping ledger write")
+            return
+
+        # Resolve owner_id via DB
+        from sqlalchemy import text as _text  # local import to avoid global dependency
+        resolved_owner_id = None
+        async with async_session_maker() as session:
+            try:
+                if not resolved_owner_id and submission_id:
+                    res = await session.execute(
+                        _text("SELECT form_owner_id, form_id FROM submissions WHERE id = :sid"),
+                        {"sid": str(submission_id)},
+                    )
+                    row = res.first()
+                    if row:
+                        resolved_owner_id = row[0]
+                        if not form_id:
+                            form_id = row[1]
+                if not resolved_owner_id and form_id:
+                    res = await session.execute(
+                        _text("SELECT user_id FROM forms WHERE id = :fid"),
+                        {"fid": str(form_id)},
+                    )
+                    row = res.first()
+                    if row:
+                        resolved_owner_id = row[0]
+            except Exception:
+                logger.exception("[owner_txn] failed to resolve owner for form_id=%s submission_id=%s", form_id, submission_id)
+
+            try:
+                await session.execute(
+                    _text("""
+                        INSERT INTO owner_transactions
+                            (payment_id, owner_id, form_id, submission_id, status, total_amount, currency, fee_amount, net_amount, customer_email, payment_method_type, created_at, updated_at)
+                        VALUES
+                            (:payment_id, :owner_id, :form_id, :submission_id, :status, :total_amount, :currency, :fee_amount, :net_amount, :customer_email, :payment_method_type, NOW(), NOW())
+                        ON CONFLICT (payment_id) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            total_amount = EXCLUDED.total_amount,
+                            currency = EXCLUDED.currency,
+                            fee_amount = EXCLUDED.fee_amount,
+                            net_amount = EXCLUDED.net_amount,
+                            customer_email = EXCLUDED.customer_email,
+                            payment_method_type = EXCLUDED.payment_method_type,
+                            owner_id = COALESCE(owner_transactions.owner_id, EXCLUDED.owner_id),
+                            form_id = COALESCE(owner_transactions.form_id, EXCLUDED.form_id),
+                            submission_id = COALESCE(owner_transactions.submission_id, EXCLUDED.submission_id),
+                            updated_at = NOW()
+                    """),
+                    {
+                        "payment_id": str(payment_id),
+                        "owner_id": resolved_owner_id,
+                        "form_id": form_id,
+                        "submission_id": submission_id,
+                        "status": status,
+                        "total_amount": int(total_amount),
+                        "currency": currency,
+                        "fee_amount": int(fee_amount),
+                        "net_amount": int(net_amount),
+                        "customer_email": customer_email,
+                        "payment_method_type": payment_method_type,
+                    },
+                )
+                await session.commit()
+                logger.info(
+                    "[owner_txn] upserted payment_id=%s status=%s gross=%s %s net=%s",
+                    payment_id, status, total_amount, currency, net_amount
+                )
+            except Exception:
+                await session.rollback()
+                logger.exception("[owner_txn] failed to upsert payment_id=%s", payment_id)
+    except Exception:
+        logger.exception("[owner_txn] unexpected error")
+
 async def _process_dodo_event(payload: Dict):
     """Apply Dodo event to local state (plan/billing) and send emails.
     Expects a dict payload like the provider's JSON body.
@@ -610,17 +862,23 @@ async def _process_dodo_event(payload: Dict):
                         
                         # Send the email using base.html template
                         _send_billing_email(
-                            email, 
-                            subject, 
-                            intro, 
-                            content_html=extra, 
-                            cta_label='View Dashboard' if is_new_subscription else 'Manage Billing', 
+                            email,
+                            subject,
+                            intro,
+                            content_html=extra,
+                            cta_label='View Dashboard' if is_new_subscription else 'Manage Billing',
                             cta_url=os.getenv('FRONTEND_URL', 'https://cleanenroll.com').rstrip('/') + '/dashboard' if is_new_subscription else portal,
                             title=title
                         )
                         logger.info('[payments] sent %s email to %s', 'upgrade thank you' if is_new_subscription else 'renewal confirmation', email)
                 except Exception:
                     logger.exception('[payments] failed to send upgrade/renewal email for uid=%s', uid)
+        elif event_type in ('payment.succeeded', 'payment.failed'):
+            # Record one-time payment events into owner ledger for Earnings dashboard
+            try:
+                await _record_owner_transaction(data, event_type)
+            except Exception:
+                logger.exception('[dodo-webhook] failed to record owner transaction')
         else:
             logger.info('[dodo-webhook] unhandled event type=%s', event_type)
         return { 'received': True }

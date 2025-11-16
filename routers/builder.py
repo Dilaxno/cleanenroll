@@ -2313,9 +2313,11 @@ async def public_get_form(form_id: str):
                 recaptcha_site_key = data.get("recaptcha_site_key") or None
                 
                 # Build camelCase payload
+                user_id_value = data.get("user_id") or data.get("userId")
                 out = {
                     "id": data.get("id"),
-                    "userId": data.get("user_id") or data.get("userId"),
+                    "userId": user_id_value,
+                    "ownerUid": user_id_value,  # Alias for session recording
                     "ownerPlan": owner_plan,  # Include owner's plan for upload size limits
                     "title": data.get("title"),
                     "subtitle": data.get("subtitle"),

@@ -60,7 +60,8 @@ async def get_billing_info(request: Request):
         async with async_session_maker() as session:
             result = await session.execute(
                 text("""
-                    SELECT plan, subscription_id, plan_details, last_payment_id
+                    SELECT plan, subscription_id, plan_details, last_payment_id,
+                           next_billing_at, member_since
                     FROM users 
                     WHERE uid = :uid
                     LIMIT 1
@@ -76,20 +77,26 @@ async def get_billing_info(request: Request):
             subscription_id = row[1]
             plan_details = row[2] if row[2] else {}
             last_payment_id = row[3]
+            next_billing_at = row[4]  # Direct column
+            member_since = row[5]     # Direct column
             
-            # Extract billing info from plan_details
+            # Convert timestamps to ISO format strings for frontend
+            next_billing_iso = next_billing_at.isoformat() if next_billing_at else None
+            member_since_iso = member_since.isoformat() if member_since else None
+            
+            # Extract billing info - prefer dedicated columns over plan_details
             billing_info = {
                 "plan": plan,
                 "subscriptionId": subscription_id,
                 "lastPaymentId": last_payment_id,
-                "nextBillingAt": plan_details.get("nextBillingAt"),
+                "nextBillingAt": next_billing_iso or plan_details.get("nextBillingAt"),
+                "memberSince": member_since_iso or plan_details.get("memberSince"),
                 "cancelAtPeriodEnd": plan_details.get("cancelAtPeriodEnd", False),
                 "status": plan_details.get("status", "active" if plan != "free" else "inactive"),
                 "currency": plan_details.get("currency", "USD"),
                 "price": plan_details.get("price"),
                 "interval": plan_details.get("interval", "month"),
                 "paymentMethod": plan_details.get("paymentMethod"),
-                "memberSince": plan_details.get("memberSince"),
             }
             
             # Add portal URL from environment

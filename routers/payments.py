@@ -809,12 +809,55 @@ async def _process_dodo_event(payload: Dict):
                 }
                 
                 # For subscription.created, set member_since timestamp
+                member_since_ts = None
                 if event_type == 'subscription.created':
                     import time
-                    billing_updates['memberSince'] = int(time.time() * 1000)  # ms timestamp
+                    member_since_ts = int(time.time() * 1000)  # ms timestamp
+                    billing_updates['memberSince'] = member_since_ts
                     logger.info('[payments] setting memberSince for new subscription uid=%s', uid)
                 
+                # Store in plan_details JSONB
                 await _update_user_billing(uid, billing_updates)
+                
+                # Also store next_billing_at and member_since in dedicated columns
+                try:
+                    from datetime import datetime
+                    async with async_session_maker() as session:
+                        # Convert next_billing to proper timestamp for database
+                        next_billing_db = None
+                        if next_billing:
+                            if isinstance(next_billing, (int, float)):
+                                next_billing_db = datetime.fromtimestamp(int(next_billing))
+                            else:
+                                try:
+                                    next_billing_db = datetime.fromisoformat(str(next_billing).replace('Z', '+00:00'))
+                                except Exception:
+                                    pass
+                        
+                        # Convert member_since to proper timestamp
+                        member_since_db = None
+                        if member_since_ts:
+                            member_since_db = datetime.fromtimestamp(member_since_ts / 1000.0)
+                        
+                        # Update columns
+                        if next_billing_db:
+                            await session.execute(
+                                "UPDATE users SET next_billing_at = :next_billing, updated_at = NOW() WHERE uid = :uid",
+                                {"next_billing": next_billing_db, "uid": uid}
+                            )
+                        
+                        # Only set member_since if it's a new subscription (don't overwrite existing)
+                        if member_since_db and event_type == 'subscription.created':
+                            await session.execute(
+                                "UPDATE users SET member_since = :member_since WHERE uid = :uid AND member_since IS NULL",
+                                {"member_since": member_since_db, "uid": uid}
+                            )
+                        
+                        await session.commit()
+                        logger.info('[payments] updated billing columns for uid=%s next_billing=%s member_since=%s', 
+                                  uid, next_billing_db, member_since_db)
+                except Exception:
+                    logger.exception('[payments] failed to update billing columns for uid=%s', uid)
                 # Notify user about successful upgrade/renewal (best-effort)
                 try:
                     email = await _get_user_email(uid)

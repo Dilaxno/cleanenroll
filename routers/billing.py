@@ -89,6 +89,7 @@ async def get_billing_info(request: Request):
                 "price": plan_details.get("price"),
                 "interval": plan_details.get("interval", "month"),
                 "paymentMethod": plan_details.get("paymentMethod"),
+                "memberSince": plan_details.get("memberSince"),
             }
             
             # Add portal URL from environment

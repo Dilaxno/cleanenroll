@@ -796,7 +796,9 @@ async def _process_dodo_event(payload: Dict):
                     or (data.get('payment') or {}).get('id')
                     or (data.get('invoice') or {}).get('id')
                 )
-                await _update_user_billing(uid, {
+                
+                # Check if this is the first time user becomes Pro (track member_since)
+                billing_updates = {
                     'nextBillingAt': normalize_ts(next_billing),
                     'cancelAtPeriodEnd': False,
                     'currency': currency,
@@ -804,7 +806,15 @@ async def _process_dodo_event(payload: Dict):
                     'status': 'active',
                     'paymentMethod': payment_method if isinstance(payment_method, dict) else None,
                     **({'lastPaymentId': payment_id} if payment_id else {}),
-                })
+                }
+                
+                # For subscription.created, set member_since timestamp
+                if event_type == 'subscription.created':
+                    import time
+                    billing_updates['memberSince'] = int(time.time() * 1000)  # ms timestamp
+                    logger.info('[payments] setting memberSince for new subscription uid=%s', uid)
+                
+                await _update_user_billing(uid, billing_updates)
                 # Notify user about successful upgrade/renewal (best-effort)
                 try:
                     email = await _get_user_email(uid)

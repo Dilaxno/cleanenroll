@@ -26,6 +26,9 @@ standardwebhooks>=0.4.1
 # Email provider SDK (Resend)
 resend>=2.0.0
 slowapi>=0.1.8
+# Redis for distributed rate limiting (optional - falls back to in-memory if not configured)
+redis>=5.0.0
+limits>=3.0.0
 # IP-based signup throttling (server-side)
 fastratelimiter>=0.0.4
 itsdangerous>=2.2.0

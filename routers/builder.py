@@ -164,16 +164,58 @@ async def _is_pro_plan(user_id: _Optional[str]) -> bool:
         return False
 
 
+async def _is_enterprise_plan(user_id: _Optional[str]) -> bool:
+    """Return True if the user's plan in Neon is enterprise tier."""
+    if not user_id:
+        return False
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"),
+                {"uid": user_id},
+            )
+            row = res.mappings().first()
+            plan = str((row or {}).get("plan") or "").lower()
+            return plan == "enterprise"
+    except Exception:
+        return False
+
+
+async def _get_user_plan(user_id: _Optional[str]) -> str:
+    """Return the user's plan name (free, pro, enterprise)."""
+    if not user_id:
+        return "free"
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text("SELECT plan FROM users WHERE uid = :uid LIMIT 1"),
+                {"uid": user_id},
+            )
+            row = res.mappings().first()
+            plan = str((row or {}).get("plan") or "free").lower()
+            return plan if plan in ("free", "pro", "business", "enterprise") else "free"
+    except Exception:
+        return "free"
+
+
 # Storage
 BACKING_DIR = os.path.join(os.getcwd(), "data", "forms")
 os.makedirs(BACKING_DIR, exist_ok=True)
 
-FREE_MONTHLY_SUBMISSION_LIMIT = 50
+# Free plan limits
+FREE_MONTHLY_SUBMISSION_LIMIT = 1000  # 1K submissions/month for Free plan
+FREE_FORMS_LIMIT = 5  # 5 forms max for Free plan
+FREE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB for Free plan
 
+# Pro plan limits
+PRO_MONTHLY_SUBMISSION_LIMIT = 10000  # 10k submissions/month for Pro plan
+PRO_FORMS_LIMIT = 50  # 50 forms max for Pro plan
+PRO_MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500MB for Pro plan
 
-# Plan-based upload limits
-FREE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024      # 50MB for Free plan
-PRO_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024     # 1GB for Pro/paid plans
+# Enterprise plan limits (unlimited forms/submissions, 1GB file upload)
+ENTERPRISE_MONTHLY_SUBMISSION_LIMIT = -1  # Unlimited submissions for Enterprise
+ENTERPRISE_FORMS_LIMIT = -1  # Unlimited forms for Enterprise
+ENTERPRISE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1GB for Enterprise plan
 
 # Cloudflare R2 configuration (S3-compatible)
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID") or os.getenv("CLOUDFLARE_R2_ACCOUNT_ID") or ""
@@ -2851,24 +2893,70 @@ async def get_user_plan(request: Request, userId: str = Query(...)):
 @limiter.limit("120/minute")
 async def get_user_submission_usage(request: Request, userId: str = Query(...)):
     """Return the user's current monthly submission usage and limit.
-    Response: { "used": int, "limit": int, "resetDate": str, "isPro": bool }
+    Response: { "used": int, "limit": int, "resetDate": str, "isPro": bool, "isEnterprise": bool }
     """
     try:
         uid = str(userId or "").strip()
         if not uid:
             raise HTTPException(status_code=400, detail="Missing userId")
         
-        # Check if user is on a Pro plan
-        is_pro = await _is_pro_plan(uid)
+        # Get user's plan
+        user_plan = await _get_user_plan(uid)
+        is_enterprise = user_plan == "enterprise"
+        is_pro = user_plan in ("pro", "business", "enterprise")
         
-        # For Pro users, return unlimited usage
-        if is_pro:
+        # For Enterprise users, return unlimited
+        if is_enterprise:
             return {
                 "used": 0,
                 "limit": -1,  # -1 indicates unlimited
                 "resetDate": None,
-                "isPro": True
+                "isPro": True,
+                "isEnterprise": True
             }
+        
+        # For Pro users, return Pro limit (10k/month)
+        if is_pro:
+            # Fetch Pro user's usage from database
+            async with async_session_maker() as session:
+                # Reset counter if needed first
+                await session.execute(
+                    text(
+                        """
+                        UPDATE users 
+                        SET submissions_this_month = 0,
+                            limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
+                        WHERE uid = :uid 
+                          AND limit_reset_date <= CURRENT_TIMESTAMP
+                        """
+                    ),
+                    {"uid": uid},
+                )
+                await session.commit()
+                
+                # Fetch current usage
+                res = await session.execute(
+                    text(
+                        """
+                        SELECT submissions_this_month, limit_reset_date
+                        FROM users
+                        WHERE uid = :uid
+                        """
+                    ),
+                    {"uid": uid},
+                )
+                row = res.mappings().first()
+                
+                used = int(row.get("submissions_this_month") or 0) if row else 0
+                reset_date = row.get("limit_reset_date") if row else None
+                
+                return {
+                    "used": used,
+                    "limit": PRO_MONTHLY_SUBMISSION_LIMIT,
+                    "resetDate": reset_date.isoformat() if reset_date else None,
+                    "isPro": True,
+                    "isEnterprise": False
+                }
         
         # For free users, fetch usage from database
         async with async_session_maker() as session:
@@ -3738,44 +3826,52 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         limit_raw = form_data.get("submissionLimit")
         limit = int(limit_raw) if limit_raw is not None else 0
 
-        # Monthly per-user submissions limit for Free plans
+        # Monthly per-user submissions limit for all plans
         try:
             owner_id = str(form_data.get("user_id") or "").strip() or None
-            if owner_id and not (await _is_pro_plan(owner_id)):
-                # Check and reset limit if needed, then check current usage
-                async with async_session_maker() as session:
-                    # Reset counter if limit_reset_date has passed
-                    await session.execute(
-                        text(
-                            """
-                            UPDATE users 
-                            SET submissions_this_month = 0,
-                                limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
-                            WHERE uid = :uid 
-                              AND limit_reset_date <= CURRENT_TIMESTAMP
-                            """
-                        ),
-                        {"uid": owner_id},
-                    )
-                    await session.commit()
+            if owner_id:
+                owner_plan = await _get_user_plan(owner_id)
+                is_owner_enterprise = owner_plan == "enterprise"
+                is_owner_pro = owner_plan in ("pro", "business", "enterprise")
+                
+                # Enterprise users have unlimited submissions
+                if not is_owner_enterprise:
+                    monthly_limit = PRO_MONTHLY_SUBMISSION_LIMIT if is_owner_pro else FREE_MONTHLY_SUBMISSION_LIMIT
                     
-                    # Fetch current usage and limit
-                    res = await session.execute(
-                        text(
-                            """
-                            SELECT submissions_this_month, submissions_limit
-                            FROM users
-                            WHERE uid = :uid
-                            """
-                        ),
-                        {"uid": owner_id},
-                    )
-                    row = res.mappings().first()
-                    if row:
-                        month_count = int(row.get("submissions_this_month") or 0)
-                        limit = int(row.get("submissions_limit") or FREE_MONTHLY_SUBMISSION_LIMIT)
-                        if month_count >= limit:
-                            raise HTTPException(status_code=429, detail=f"Monthly submission limit reached ({limit}). Please try again next month or upgrade your plan.")
+                    # Check and reset limit if needed, then check current usage
+                    async with async_session_maker() as session:
+                        # Reset counter if limit_reset_date has passed
+                        await session.execute(
+                            text(
+                                """
+                                UPDATE users 
+                                SET submissions_this_month = 0,
+                                    limit_reset_date = DATE_TRUNC('month', CURRENT_TIMESTAMP) + INTERVAL '1 month'
+                                WHERE uid = :uid 
+                                  AND limit_reset_date <= CURRENT_TIMESTAMP
+                                """
+                            ),
+                            {"uid": owner_id},
+                        )
+                        await session.commit()
+                        
+                        # Fetch current usage
+                        res = await session.execute(
+                            text(
+                                """
+                                SELECT submissions_this_month
+                                FROM users
+                                WHERE uid = :uid
+                                """
+                            ),
+                            {"uid": owner_id},
+                        )
+                        row = res.mappings().first()
+                        if row:
+                            month_count = int(row.get("submissions_this_month") or 0)
+                            if month_count >= monthly_limit:
+                                plan_name = "Pro" if is_owner_pro else "Free"
+                                raise HTTPException(status_code=429, detail=f"Monthly submission limit reached ({monthly_limit}). {plan_name} plan allows {monthly_limit} submissions per month.")
         except HTTPException:
             raise
         except Exception:

@@ -104,6 +104,12 @@ from routers.feature_requests import router as feature_requests_router  # type: 
 from routers.developer_waitlist import router as developer_waitlist_router  # type: ignore
 from routers.notion_integration import router as notion_integration_router  # type: ignore
 from session_recordings import router as session_recordings_router  # type: ignore
+from routers.photomark import router as photomark_router  # type: ignore
+# OAuth 2.0 Provider routers
+from routers.oauth import router as oauth_router  # type: ignore
+from routers.oauth_clients import router as oauth_clients_router  # type: ignore
+from routers.oauth_api import router as oauth_api_router  # type: ignore
+from routers.oauth_webhooks import router as oauth_webhooks_router  # type: ignore
 
 app = FastAPI(title="CleanEnroll API")
 
@@ -306,6 +312,12 @@ app.include_router(feature_requests_router, prefix="/api")  # Feature requests
 app.include_router(developer_waitlist_router)  # Developer portal waitlist
 app.include_router(notion_integration_router)  # Notion integration
 app.include_router(session_recordings_router)  # Session recordings
+app.include_router(photomark_router)  # PhotoMark proxy
+# OAuth 2.0 Provider
+app.include_router(oauth_router)  # OAuth authorization endpoints
+app.include_router(oauth_clients_router)  # OAuth client management
+app.include_router(oauth_api_router)  # OAuth protected API v2
+app.include_router(oauth_webhooks_router)  # OAuth webhook management
 
 
 if __name__ == "__main__":

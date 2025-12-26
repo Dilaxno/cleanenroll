@@ -103,6 +103,7 @@ from routers.affiliates_webhook import router as affiliates_webhook_router  # ty
 from routers.feature_requests import router as feature_requests_router  # type: ignore
 from routers.developer_waitlist import router as developer_waitlist_router  # type: ignore
 from routers.notion_integration import router as notion_integration_router  # type: ignore
+from routers.waitlist import router as waitlist_router  # type: ignore
 from session_recordings import router as session_recordings_router  # type: ignore
 from routers.photomark import router as photomark_router  # type: ignore
 # OAuth 2.0 Provider routers
@@ -310,6 +311,7 @@ app.include_router(affiliates_stats_router, prefix="/api/affiliates")  # Affilia
 app.include_router(affiliates_webhook_router, prefix="/api/affiliates")  # Affiliate webhook handlers
 app.include_router(feature_requests_router, prefix="/api")  # Feature requests
 app.include_router(developer_waitlist_router)  # Developer portal waitlist
+app.include_router(waitlist_router)  # Coming soon waitlist
 app.include_router(notion_integration_router)  # Notion integration
 app.include_router(session_recordings_router)  # Session recordings
 app.include_router(photomark_router)  # PhotoMark proxy

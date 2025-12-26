@@ -3988,15 +3988,19 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
         pass
 
     # Duplicate submission check by IP within a time window (Neon-backed)
-    if bool(form_data.get("preventDuplicateByIP")):
+    # Check both camelCase and snake_case since DB uses snake_case
+    prevent_dup_ip = form_data.get("preventDuplicateByIP") or form_data.get("prevent_duplicate_by_ip")
+    logger.info(f"[submit_form] Duplicate IP check: prevent_dup_ip={prevent_dup_ip}, form_id={form_id}")
+    if bool(prevent_dup_ip):
         try:
-            window_hours = int(form_data.get("duplicateWindowHours") or 24)
+            window_hours = int(form_data.get("duplicateWindowHours") or form_data.get("duplicate_window_hours") or 24)
         except Exception:
             window_hours = 24
         try:
             from datetime import timedelta
             threshold = datetime.utcnow() - timedelta(hours=max(1, window_hours))
             ip = ip or _client_ip(request)
+            logger.info(f"[submit_form] Checking duplicate IP: ip={ip}, window_hours={window_hours}, threshold={threshold}")
             if ip:
                 async with async_session_maker() as session:
                     res = await session.execute(
@@ -4012,12 +4016,15 @@ async def submit_form(form_id: str, request: Request, payload: Dict = None):
                         ),
                         {"fid": form_id, "ip": ip, "th": threshold},
                     )
-                    if res.first() is not None:
+                    existing = res.first()
+                    logger.info(f"[submit_form] Duplicate check result: existing={existing is not None}")
+                    if existing is not None:
                         raise HTTPException(status_code=429, detail="Duplicate submission detected from this IP. Please try again later.")
         except HTTPException:
             raise
-        except Exception:
+        except Exception as e:
             # Fail open on dedupe errors
+            logger.warning(f"[submit_form] Duplicate IP check failed: {e}")
             pass
 
     # reCAPTCHA verification when enabled

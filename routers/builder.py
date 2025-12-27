@@ -1541,8 +1541,8 @@ def _spamhaus_listed(domain: str) -> Optional[bool]:
         # Query Spamhaus DBL for the domain with timeout
         q = f"{domain}.dbl.spamhaus.org"
         resolver = dns.resolver.Resolver()  # type: ignore[attr-defined]
-        resolver.timeout = 2.0  # 2 second timeout
-        resolver.lifetime = 2.0
+        resolver.timeout = 1.0  # 1 second timeout
+        resolver.lifetime = 1.0
         
         answers = resolver.resolve(q, "A")  # type: ignore[attr-defined]
         # Only return True if we got actual answers (domain is listed)

@@ -86,7 +86,7 @@ def _mx_lookup(domain: str) -> list[str]:
     if not _DNSPY_AVAILABLE:
         return []
     try:
-        answers = _dns_resolver.resolve(domain, "MX", lifetime=2.0)  # type: ignore
+        answers = _dns_resolver.resolve(domain, "MX", lifetime=1.0)  # type: ignore
         hosts: list[str] = []
         for rdata in answers:
             try:
@@ -1642,47 +1642,58 @@ async def validate_email_deliverability(
     result["mx_hosts"] = mx_hosts
     result["has_mx"] = len(mx_hosts) > 0
     result["deliverable"] = bool(result["syntax_valid"] and result["has_mx"])
-    # Prefer external IsTempMail API when configured
-    try:
-        ext = _istempmail_disposable_status(raw, domain)
-        if ext is True:
-            result["disposable"] = True
-            result["deliverable"] = False
-            if not result["reason"]:
-                result["reason"] = "Disposable email domains are not accepted"
-        elif ext is False:
-            result["disposable"] = False
-    except Exception:
-        pass
-    # Neon-backed disposable domains check
-    try:
-        if domain:
-            from sqlalchemy import text as _text  # type: ignore
-            async with async_session_maker() as session:
-                q = _text("SELECT strict FROM disposable_domains WHERE domain = :dom LIMIT 1")
-                res = await session.execute(q, {"dom": domain.strip().lower()})
-                row = res.mappings().first()
-                if row is not None:
-                    result["disposable"] = True
-                    if bool(row.get("strict")):
-                        result["deliverable"] = False
-                        if not result.get("reason"):
-                            result["reason"] = "Disposable email domains are not accepted"
-    except Exception:
-        pass
+    
+    # Fast path: skip disposable checks for known good domains
+    KNOWN_GOOD_DOMAINS = {
+        'gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com',
+        'live.com', 'icloud.com', 'aol.com', 'protonmail.com', 'zoho.com',
+        'mail.com', 'yandex.com', 'gmx.com', 'fastmail.com', 'tutanota.com',
+        'me.com', 'mac.com', 'pm.me', 'ymail.com', 'rocketmail.com', 'msn.com'
+    }
+    is_known_good = domain and domain.lower() in KNOWN_GOOD_DOMAINS
+    
+    if not is_known_good:
+        # Prefer external IsTempMail API when configured
+        try:
+            ext = _istempmail_disposable_status(raw, domain)
+            if ext is True:
+                result["disposable"] = True
+                result["deliverable"] = False
+                if not result["reason"]:
+                    result["reason"] = "Disposable email domains are not accepted"
+            elif ext is False:
+                result["disposable"] = False
+        except Exception:
+            pass
+        # Neon-backed disposable domains check
+        try:
+            if domain:
+                from sqlalchemy import text as _text  # type: ignore
+                async with async_session_maker() as session:
+                    q = _text("SELECT strict FROM disposable_domains WHERE domain = :dom LIMIT 1")
+                    res = await session.execute(q, {"dom": domain.strip().lower()})
+                    row = res.mappings().first()
+                    if row is not None:
+                        result["disposable"] = True
+                        if bool(row.get("strict")):
+                            result["deliverable"] = False
+                            if not result.get("reason"):
+                                result["reason"] = "Disposable email domains are not accepted"
+        except Exception:
+            pass
 
-    # Fallback: optional in-memory disposable domains cache (no-op by default)
-    try:
-        await _ensure_temp_domains_loaded()
-        dom_lower = (domain or "").strip().lower()
+        # Fallback: optional in-memory disposable domains cache (no-op by default)
+        try:
+            await _ensure_temp_domains_loaded()
+            dom_lower = (domain or "").strip().lower()
 
-        if dom_lower and dom_lower in TEMP_DOMAINS_CACHE:
-            result["disposable"] = True
-            result["deliverable"] = False
-            if not result["reason"]:
-                result["reason"] = "Disposable email domains are not accepted"
-    except Exception:
-        pass
+            if dom_lower and dom_lower in TEMP_DOMAINS_CACHE:
+                result["disposable"] = True
+                result["deliverable"] = False
+                if not result["reason"]:
+                    result["reason"] = "Disposable email domains are not accepted"
+        except Exception:
+            pass
     if not result["deliverable"] and not result["reason"]:
         result["reason"] = "No MX records found for domain"
 
@@ -1702,7 +1713,7 @@ async def validate_email_deliverability(
     if rep_flag and _REPUTATION_HELPERS_AVAILABLE and domain:
         result["reputation_checked"] = True
         
-        # Whitelist known legitimate domains to prevent false positives
+        # Whitelist known legitimate domains - skip all reputation checks for these
         KNOWN_GOOD_DOMAINS = {
             'gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com',
             'live.com', 'icloud.com', 'aol.com', 'protonmail.com', 'zoho.com',
@@ -1710,29 +1721,24 @@ async def validate_email_deliverability(
             'me.com', 'mac.com', 'pm.me', 'ymail.com', 'rocketmail.com', 'msn.com'
         }
         
-        try:
-            # Skip blocklist check for known good domains
-            if domain.lower() in KNOWN_GOOD_DOMAINS:
-                listed = False
-            else:
-                listed = _spamhaus_listed(domain) if _spamhaus_listed else None
-        except Exception:
-            listed = None
-        try:
-            age_days = _domain_age_days(domain) if _domain_age_days else None
-        except Exception:
+        # Skip all slow checks for known good domains
+        if domain.lower() in KNOWN_GOOD_DOMAINS:
+            listed = False
             age_days = None
-        try:
-            spf_ok = _has_spf(domain) if _has_spf else None
-        except Exception:
+            spf_ok = True
+            dmarc_ok = True
+            dkim_ok = True
+        else:
+            # Only do essential checks for unknown domains
+            try:
+                listed = _spamhaus_listed(domain) if _spamhaus_listed else None
+            except Exception:
+                listed = None
+            # Skip WHOIS age check - it's too slow and unreliable
+            age_days = None
+            # Skip SPF/DMARC/DKIM - informational only, not worth the latency
             spf_ok = None
-        try:
-            dmarc_ok = _has_dmarc(domain) if _has_dmarc else None
-        except Exception:
             dmarc_ok = None
-        try:
-            dkim_ok = _has_any_dkim(domain) if _has_any_dkim else None
-        except Exception:
             dkim_ok = None
 
         result.update({

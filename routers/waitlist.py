@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/waitlist", tags=["waitlist"])
 
 class WaitlistSubmit(BaseModel):
     email: EmailStr
+    use_case: str = None
 
 
 class WaitlistResponse(BaseModel):
@@ -49,6 +50,13 @@ async def submit_waitlist(data: WaitlistSubmit):
             existing = result.fetchone()
             
             if existing:
+                # Update use_case if provided and different
+                if data.use_case:
+                    await session.execute(
+                        text("UPDATE coming_soon_waitlist SET use_case = :use_case WHERE id = :id"),
+                        {"use_case": data.use_case, "id": existing[0]}
+                    )
+                    await session.commit()
                 return WaitlistResponse(
                     success=True,
                     message="You're already on the waitlist!",
@@ -58,11 +66,11 @@ async def submit_waitlist(data: WaitlistSubmit):
             # Insert new entry
             result = await session.execute(
                 text("""
-                    INSERT INTO coming_soon_waitlist (email)
-                    VALUES (:email)
+                    INSERT INTO coming_soon_waitlist (email, use_case)
+                    VALUES (:email, :use_case)
                     RETURNING id
                 """),
-                {"email": data.email}
+                {"email": data.email, "use_case": data.use_case}
             )
             
             row = result.fetchone()
@@ -132,12 +140,14 @@ async def submit_waitlist(data: WaitlistSubmit):
             
             # Send notification to team
             try:
+                use_case_display = data.use_case.replace('_', ' ').title() if data.use_case else 'Not specified'
                 notification_html = f"""
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
                     <h2 style="color: #3D6B2F;">New Coming Soon Waitlist Signup</h2>
                     <p>A new user has joined the coming soon waitlist:</p>
                     <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 16px 0;">
                         <p><strong>Email:</strong> {data.email}</p>
+                        <p><strong>Use Case:</strong> {use_case_display}</p>
                     </div>
                 </div>
                 """

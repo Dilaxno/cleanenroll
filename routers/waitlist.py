@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/waitlist", tags=["waitlist"])
 class WaitlistSubmit(BaseModel):
     email: EmailStr
     use_case: str = None
+    leads_per_month: str = None
 
 
 class WaitlistResponse(BaseModel):
@@ -50,11 +51,11 @@ async def submit_waitlist(data: WaitlistSubmit):
             existing = result.fetchone()
             
             if existing:
-                # Update use_case if provided and different
-                if data.use_case:
+                # Update use_case and leads_per_month if provided
+                if data.use_case or data.leads_per_month:
                     await session.execute(
-                        text("UPDATE coming_soon_waitlist SET use_case = :use_case WHERE id = :id"),
-                        {"use_case": data.use_case, "id": existing[0]}
+                        text("UPDATE coming_soon_waitlist SET use_case = COALESCE(:use_case, use_case), leads_per_month = COALESCE(:leads_per_month, leads_per_month) WHERE id = :id"),
+                        {"use_case": data.use_case, "leads_per_month": data.leads_per_month, "id": existing[0]}
                     )
                     await session.commit()
                 return WaitlistResponse(
@@ -66,11 +67,11 @@ async def submit_waitlist(data: WaitlistSubmit):
             # Insert new entry
             result = await session.execute(
                 text("""
-                    INSERT INTO coming_soon_waitlist (email, use_case)
-                    VALUES (:email, :use_case)
+                    INSERT INTO coming_soon_waitlist (email, use_case, leads_per_month)
+                    VALUES (:email, :use_case, :leads_per_month)
                     RETURNING id
                 """),
-                {"email": data.email, "use_case": data.use_case}
+                {"email": data.email, "use_case": data.use_case, "leads_per_month": data.leads_per_month}
             )
             
             row = result.fetchone()
@@ -141,6 +142,7 @@ async def submit_waitlist(data: WaitlistSubmit):
             # Send notification to team
             try:
                 use_case_display = data.use_case.replace('_', ' ').title() if data.use_case else 'Not specified'
+                leads_display = data.leads_per_month if data.leads_per_month else 'Not specified'
                 notification_html = f"""
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
                     <h2 style="color: #3D6B2F;">New Coming Soon Waitlist Signup</h2>
@@ -148,6 +150,7 @@ async def submit_waitlist(data: WaitlistSubmit):
                     <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 16px 0;">
                         <p><strong>Email:</strong> {data.email}</p>
                         <p><strong>Use Case:</strong> {use_case_display}</p>
+                        <p><strong>Leads/Month:</strong> {leads_display}</p>
                     </div>
                 </div>
                 """
